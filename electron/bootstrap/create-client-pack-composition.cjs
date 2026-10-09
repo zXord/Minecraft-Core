@@ -3,6 +3,7 @@ const path = require('node:path');
 const { ModpackError } = require('../services/modpacks/errors.cjs');
 const { CompanionStore } = require('../services/client-modpacks/companion-store.cjs');
 const { CompanionService } = require('../services/client-modpacks/companion-service.cjs');
+const { ManagedServerModHealth } = require('../services/client-modpacks/managed-server-mod-health.cjs');
 const { ClientCandidatePreparer } = require('../services/client-modpacks/client-candidate-preparer.cjs');
 const { ClientPackStateStore } = require('../services/client-modpacks/client-pack-state.cjs');
 const { ClientPackTransaction } = require('../services/client-modpacks/client-pack-transaction.cjs');
@@ -73,10 +74,18 @@ function createClientPackComposition(input) {
   const durableFs = clientDurableRouter({ root, getInstances, durableFsFactory: clientDurableFsFactory });
   const authorityFs = clientDurableFsFactory([root]);
   const companionStore = new CompanionStore({ filePath: path.join(root, 'companions.json'), durableFs: authorityFs });
+  const managedServerModHealth = new ManagedServerModHealth({ readRecord: serverPath => stateRepository.read(serverPath), reparseInspector });
   const clientCandidatePreparer = new ClientCandidatePreparer({ workspaceRegistry, archiveExtractor, artifactDownloader,
     artifactCache, candidateHashService, reparseInspector, randomUUID });
   const companionService = new CompanionService({ store: companionStore, resolveServer,
-    readServerState: async id => stateRepository.read((await resolveServer(id)).serverPath), coordinator, providers,
+    readServerState: async (id, { force = false, signal } = {}) => {
+      const { serverPath } = await resolveServer(id);
+      const installed = await stateRepository.read(serverPath);
+      await managedServerModHealth.assertHealthy({ serverId: id, serverPath, record: installed, force, signal });
+      const registered = await resolveServer(id);
+      if (registered.serverPath !== serverPath) throw new ModpackError('PLAN_STALE', 'The managed server changed during verification');
+      return installed?.state ?? null;
+    }, coordinator, providers,
     sourceResolver, artifactAcquisition, archiveInspector, clientCandidatePreparer, clock: () => clock.now() });
   const stateStore = new ClientPackStateStore({ durableFs });
   const transaction = new ClientPackTransaction({ journalRoot, durableFs, stateStore, reparseInspector });
@@ -108,7 +117,7 @@ function createClientPackComposition(input) {
     },
     dispose() {
       if (!disposal) disposal = (async () => {
-        const results = await Promise.allSettled([clientPackService.dispose(), companionService.dispose()]);
+        const results = await Promise.allSettled([clientPackService.dispose(), companionService.dispose(), managedServerModHealth.dispose()]);
         await cleanupRegisteredClients();
         const failures = results.filter(r => r.status === 'rejected').map(r => r.reason);
         if (failures.length) throw new AggregateError(failures, 'Client pack disposal could not settle');

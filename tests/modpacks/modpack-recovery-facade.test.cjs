@@ -26,7 +26,7 @@ function fixture(records = [record()], {
   const reconciliations = [];
   let active = records;
   const recoveryRegistry = {
-    async listActive() { return active; }
+    async initialize() { return { records: active, pendingTerminalPublications: [] }; }
   };
   const recoveryService = {
     async recover(value) {

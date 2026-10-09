@@ -25,7 +25,7 @@ const { applyServerNetworkProperties, isNetworkAccess } = require('../../utils/s
 const instanceContext = require('../../utils/instance-context.cjs');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { computePreflightReserve, parseNonNegativeBytes } = require('../modpacks/limits.cjs');
-const { ReleaseTrackingReconciler } = require('../modpacks/notifications/release-tracking-reconciler.cjs');
+const { ReleaseTrackingReconciler, normalizeReleaseTrackingIntent } = require('../modpacks/notifications/release-tracking-reconciler.cjs');
 const { canonicalPath, planOwnership } = require('../modpacks/planning/ownership-planner.cjs');
 const {
   reconcileQuiescentOwnership
@@ -87,6 +87,12 @@ function invalid(cause) {
 
 function stale(cause) {
   return new ModpackError('PLAN_STALE', 'The reviewed modpack mutation is stale', { cause });
+}
+
+function stalePrecondition(field, cause) {
+  const error = stale(cause);
+  error.details = { field };
+  return error;
 }
 
 function staleDisk(requiredBytes, availableBytes, cause) {
@@ -960,12 +966,12 @@ class ProductionMutationRuntime {
         !samePath(lease.serverPath, resolved.serverPath)) throw invalid();
     const executionRecord = this.planningAdapter.getExecutionRecord(plan);
     if (!executionRecord || executionRecord.serverKind !== plan.operation.serverKind ||
-        !samePath(executionRecord.serverPath, resolved.serverPath)) throw stale();
+        !samePath(executionRecord.serverPath, resolved.serverPath)) throw stalePrecondition('executionRecord');
     let template = null;
     let expectedTemplateManifest = null;
     if (management) {
       if (executionRecord.operationKind !== plan.operation.kind ||
-          typeof executionRecord.execution?.managementOutputId !== 'string') throw stale();
+          typeof executionRecord.execution?.managementOutputId !== 'string') throw stalePrecondition('managementOutput');
       this.workspaceRegistry.resolveOwnedWorkspace({
         ownerId: jobId,
         id: executionRecord.execution.managementOutputId,
@@ -976,12 +982,14 @@ class ProductionMutationRuntime {
         const privatePoint = executionRecord.selectedRestorePoint;
         if (!planned || !privatePoint || privatePoint.id !== planned.id || privatePoint.sha256 !== planned.sha256 ||
             !samePath(privatePoint.serverPath, resolved.serverPath) || selectedRestorePoint?.id !== planned.id ||
-            choices?.restorePointId !== planned.id) throw stale();
+            choices?.restorePointId !== planned.id) throw stalePrecondition('restorePoint');
       } else if (executionRecord.selectedRestorePoint !== null || selectedRestorePoint) {
-        throw stale();
+        throw stalePrecondition('restorePoint');
       }
     } else {
-      if (!executionRecord.incomingManifest || typeof executionRecord.execution?.templateOutputId !== 'string') throw stale();
+      if (!executionRecord.incomingManifest || typeof executionRecord.execution?.templateOutputId !== 'string') {
+        throw stalePrecondition('templateOutput');
+      }
       template = this.workspaceRegistry.resolveOwnedWorkspace({
         ownerId: jobId,
         id: executionRecord.execution.templateOutputId,
@@ -990,14 +998,21 @@ class ProductionMutationRuntime {
       expectedTemplateManifest = plan.operation.kind === 'repair'
         ? executionRecord.execution.repairPayloadManifest
         : executionRecord.incomingManifest;
-      if (!expectedTemplateManifest) throw stale();
+      if (!expectedTemplateManifest) throw stalePrecondition('repairPayloadManifest');
       if (plan.operation.serverKind === 'existing') {
         const rescanned = await scanManifest(template.path, expectedTemplateManifest.installationId, {
           candidateHashService: this.candidateHashService,
           reparseInspector: this.reparseInspector,
           signal
         });
-        exactIncomingManifest(rescanned.manifest, expectedTemplateManifest);
+        try {
+          exactIncomingManifest(rescanned.manifest, expectedTemplateManifest);
+        } catch (error) {
+          if (error instanceof ModpackError && error.code === 'PLAN_STALE' && error.details === undefined) {
+            error.details = { field: 'templateManifest' };
+          }
+          throw error;
+        }
       }
     }
 
@@ -1006,7 +1021,9 @@ class ProductionMutationRuntime {
     const unmanagedAdoption = adoption !== null;
     if (unmanagedAdoption) {
       if (management || plan.operation.kind !== 'install' || plan.operation.serverKind !== 'existing' ||
-          executionRecord.reservation !== null || currentState?.state?.modpackManaged === true) throw stale();
+          executionRecord.reservation !== null || currentState?.state?.modpackManaged === true) {
+        throw stalePrecondition('unmanagedAdoption');
+      }
       await this.assertExistingUnmanagedTargetFn({
         targetPath: resolved.serverPath,
         adoption,
@@ -1084,7 +1101,7 @@ class ProductionMutationRuntime {
             currentOwnership = this.planOwnership({
               oldManifest: currentState?.manifest || null,
               liveSnapshot: snapshot.liveSnapshot,
-              incomingManifest: expectedTemplateManifest,
+              incomingManifest: executionRecord.incomingManifest,
               conflictChoices: plan.selections.conflictChoices,
               ...(plan.operation.kind === 'repair' ? { operationKind: 'repair' } : {})
             });
@@ -1098,10 +1115,12 @@ class ProductionMutationRuntime {
             oldManifest: currentState?.manifest || null,
             incomingManifest: management
               ? { schemaVersion: 1, installationId: 'uninstall-empty', entries: [] }
-              : expectedTemplateManifest
+              : executionRecord.incomingManifest
           });
         } catch (error) {
-          throw error instanceof ModpackError && error.code === 'PLAN_STALE' ? error : stale(error);
+          throw error instanceof ModpackError && error.code === 'PLAN_STALE'
+            ? error
+            : stalePrecondition('ownershipReconciliation', error);
         }
         validationSnapshot = snapshotWithReviewedPaths(currentSnapshot, reviewedPaths);
       }
@@ -1110,7 +1129,7 @@ class ProductionMutationRuntime {
       this.#assertManagementPlanStillValid(plan, validationSnapshot, { skipAvailableCapacity: true });
     }
     else this.planValidator(plan, validationSnapshot, { skipAvailableCapacity: true });
-    if (currentContentRevision !== plan.operation.expectedContentRevision) throw stale();
+    if (currentContentRevision !== plan.operation.expectedContentRevision) throw stalePrecondition('contentRevision');
     assertCurrentOperationDiskCapacity({
       availableBytes,
       executionRecord,
@@ -1138,7 +1157,7 @@ class ProductionMutationRuntime {
     if (targetKind === 'new' && plan.operation.kind !== 'files-only' &&
         (!Number.isSafeInteger(plannedMaxRam) || plannedMaxRam < 1 || plannedMaxRam > 64 ||
          !Number.isSafeInteger(plannedServerPort) || plannedServerPort < 1025 || plannedServerPort > 65535 ||
-         !isNetworkAccess(plannedNetworkAccess))) throw stale();
+         !isNetworkAccess(plannedNetworkAccess))) throw stalePrecondition('plannedRuntimeSelection');
     const defaults = getDefaultServerConfig(plannedMaxRam === null ? {} : {
       maxRam: plannedMaxRam,
       port: plannedServerPort,
@@ -1148,6 +1167,7 @@ class ProductionMutationRuntime {
     const priorAutoRestart = this.restartTokens.get(jobId)?.enabled === true;
     const recordOperationKind = operationKindForRecord(plan);
     const timestamp = nowDate(this.clock).toISOString();
+    this.#recoveryBinding({ jobId, plan, resolved, lease });
     let recoveryRecordCreated = false;
     try {
       await this.recoveryRegistry.create({
@@ -1261,68 +1281,98 @@ class ProductionMutationRuntime {
       this.contexts.set(jobId, context);
       return deepFreeze({ revalidated: true, targetKind });
     } catch (error) {
-      let retainedRecord = null;
-      if (!recoveryRecordCreated) {
-        try {
-          // Registry creation is an authenticated multi-file publication. A
-          // rejection can therefore be post-commit; probe the durable record
-          // instead of interpreting the rejected promise as proof of absence.
-          retainedRecord = await this.recoveryRegistry.load(jobId);
-          if (!retainedRecord) {
-            if (typeof this.recoveryRegistry.initialize !== 'function') {
-              throw new ModpackError(
-                'RECOVERY_REQUIRED',
-                'The recovery record publication could not be safely reconciled'
-              );
-            }
-            const scan = await this.recoveryRegistry.initialize();
-            const shaped = scan && typeof scan === 'object' && Array.isArray(scan.records) &&
-              Array.isArray(scan.corrupt) && Array.isArray(scan.blocks) && typeof scan.globalBlock === 'boolean';
-            const uncertain = !shaped || scan.globalBlock === true ||
-              scan.records.some(item => item?.jobId === jobId) ||
-              scan.corrupt.some(item => item?.jobId === jobId) ||
-              scan.blocks.some(item => item?.jobId === jobId);
-            if (uncertain) {
-              throw new ModpackError(
-                'RECOVERY_REQUIRED',
-                'The recovery record publication could not be safely reconciled'
-              );
-            }
-          }
-        } catch (probeError) {
-          throw new ModpackError(
-            'RECOVERY_REQUIRED',
-            'The recovery record publication could not be safely reconciled',
-            { cause: new AggregateError([error, probeError], 'Recovery publication probe failed') }
-          );
-        }
-        if (!retainedRecord) {
+      let publicationProbeExhausted = false;
+      return this.#withRecoveryClosure({ jobId, plan, resolved, lease }, async close => {
+        let retainedRecord = null;
+        if (!recoveryRecordCreated) {
+          let archived = false;
           try {
-            await this.#reconcileUnrecordedFailedRevalidation({
-              jobId, plan, resolved, lease, durableFs, executionRecord
-            });
-          } catch (cleanupError) {
+            // Registry creation is an authenticated multi-file publication. A
+            // rejection can therefore be post-commit; probe the durable record
+            // instead of interpreting the rejected promise as proof of absence.
+            retainedRecord = await this.recoveryRegistry.load(jobId);
+            if (!retainedRecord) {
+              let publication = null;
+              try {
+                publication = await this.recoveryRegistry.retryTerminalPublication(jobId, this.#recoveryBinding({ jobId, plan, resolved, lease }));
+              } catch (publicationError) {
+                // A transport error can follow the envelope move. One bounded
+                // metadata-only recheck may positively authenticate that pair.
+                try {
+                  publication = await this.recoveryRegistry.retryTerminalPublication(jobId, this.#recoveryBinding({ jobId, plan, resolved, lease }));
+                } catch (retryError) {
+                  publicationProbeExhausted = true;
+                  // History is omitted from a clean scan. This read proves only
+                  // absence, never closure or permission to replay source work.
+                  if (await this.recoveryRegistry.loadHistory(jobId) !== null) {
+                    throw this.#pendingRecovery(new AggregateError([publicationError, retryError], 'Historical closure remains unproven'));
+                  }
+                }
+              }
+              if (publication) {
+                this.#terminalClosure(publication.record);
+                close();
+                archived = true;
+                throw error;
+              }
+              if (typeof this.recoveryRegistry.initialize !== 'function') {
+                throw new ModpackError(
+                  'RECOVERY_REQUIRED',
+                  'The recovery record publication could not be safely reconciled'
+                );
+              }
+              const scan = await this.recoveryRegistry.initialize();
+              const shaped = scan && typeof scan === 'object' && Array.isArray(scan.records) &&
+                Array.isArray(scan.corrupt) && Array.isArray(scan.blocks) &&
+                Array.isArray(scan.pendingTerminalPublications) && typeof scan.globalBlock === 'boolean';
+              const uncertain = !shaped || scan.globalBlock === true ||
+                scan.records.some(item => item?.jobId === jobId) ||
+                scan.corrupt.some(item => item?.jobId === jobId) ||
+                scan.blocks.some(item => item?.jobId === jobId) ||
+                scan.pendingTerminalPublications.some(item => item?.jobId === jobId);
+              if (uncertain) {
+                throw new ModpackError(
+                  'RECOVERY_REQUIRED',
+                  'The recovery record publication could not be safely reconciled'
+                );
+              }
+            }
+          } catch (probeError) {
+            if (archived) throw error;
             throw new ModpackError(
               'RECOVERY_REQUIRED',
-              'The interrupted modpack revalidation requires recovery',
-              { cause: new AggregateError([error, cleanupError], 'Unrecorded revalidation cleanup failed') }
+              'The recovery record publication could not be safely reconciled',
+              { cause: new AggregateError([error, probeError], 'Recovery publication probe failed') }
             );
           }
-          throw error;
+          if (!retainedRecord) {
+            try {
+              await this.#reconcileUnrecordedFailedRevalidation({
+                jobId, plan, resolved, lease, durableFs, executionRecord, close
+              });
+            } catch (cleanupError) {
+              throw new ModpackError(
+                'RECOVERY_REQUIRED',
+                'The interrupted modpack revalidation requires recovery',
+                { cause: new AggregateError([error, cleanupError], 'Unrecorded revalidation cleanup failed') }
+              );
+            }
+            throw error;
+          }
         }
-      }
-      try {
-        await this.#reconcileFailedRevalidation({
-          jobId, plan, resolved, lease, durableFs, executionRecord, retainedRecord
-        });
-      } catch (cleanupError) {
-        throw new ModpackError(
-          'RECOVERY_REQUIRED',
-          'The interrupted modpack revalidation requires recovery',
-          { cause: new AggregateError([error, cleanupError], 'Revalidation cleanup failed') }
-        );
-      }
-      throw error;
+        try {
+          await this.#reconcileFailedRevalidation({
+            jobId, plan, resolved, lease, durableFs, executionRecord, retainedRecord, close
+          });
+        } catch (cleanupError) {
+          throw new ModpackError(
+            'RECOVERY_REQUIRED',
+            'The interrupted modpack revalidation requires recovery',
+            { cause: new AggregateError([error, cleanupError], 'Revalidation cleanup failed') }
+          );
+        }
+        throw error;
+      }, () => !publicationProbeExhausted);
     }
   }
 
@@ -1750,88 +1800,228 @@ class ProductionMutationRuntime {
   }
 
   async cleanup({ jobId, operationKind, plan, resolved, lease } = {}) {
-    const context = this.#context(jobId, plan, resolved);
-    await this.#assertRuntimeRecoveryAllowed(jobId, lease);
-    await this.releaseTrackingReconciler.reconcile(jobId);
-    await this.yieldControl();
-    if (plan.operation.serverKind === 'existing') {
-      const cleanup = await this.cleanupCommittedTransactionFn(this.#transactionContext({
-        jobId, operationKind, plan, resolved, lease, signal: undefined, context,
-        candidateState: context.candidateState
-      }));
-      if (cleanup?.phase !== 'completed' || cleanup.rollbackRemoved !== true) {
-        throw new ModpackError('RECOVERY_REQUIRED', 'The committed server cleanup is still pending');
+    const request = { jobId, operationKind, plan, resolved, lease };
+    return this.#withRecoveryClosure(request, async close => {
+      const record = await this.#loadBoundRecovery(request);
+      if (!record) {
+        const historical = await this.#authenticatedClosure(request);
+        close();
+        if (historical.closure !== 'completed') throw this.#pendingRecovery();
+        return deepFreeze({ cleaned: true, alreadyCleaned: true });
       }
+      const context = this.#context(jobId, plan, resolved);
+      await this.#assertRuntimeRecoveryAllowed(jobId, lease);
+      await this.releaseTrackingReconciler.reconcile(jobId);
       await this.yieldControl();
-    }
-    const record = await this.recoveryRegistry.load(jobId);
-    if (record) {
+      if (plan.operation.serverKind === 'existing') {
+        const cleanup = await this.cleanupCommittedTransactionFn(this.#transactionContext({
+          jobId, operationKind, plan, resolved, lease, signal: undefined, context,
+          candidateState: context.candidateState
+        }));
+        if (cleanup?.phase !== 'completed' || cleanup.rollbackRemoved !== true) throw this.#pendingRecovery();
+        await this.yieldControl();
+      }
+      const latest = await this.#loadBoundRecovery(request);
+      if (!latest || (plan.operation.serverKind === 'new' && latest.phase !== 'committed-healthy') ||
+          this.#terminalClosure(plan.operation.serverKind === 'new' ? { ...latest, phase: 'completed' } : latest, context) !== 'completed') throw this.#pendingRecovery();
       await this.recoveryRegistry.finish(jobId, {
         terminalPhase: 'completed',
-        outcome: record.outcome || { result: 'completed' }
+        outcome: latest.outcome || { result: 'completed' }
       });
+      close();
       await this.yieldControl();
-    }
-    if (plan.operation.serverKind === 'new') this.destinationReservations.consume(resolved.instanceId, resolved.serverPath);
-    this.contexts.delete(jobId);
-    this.restartTokens.delete(jobId);
-    return deepFreeze({ cleaned: true });
+      if (plan.operation.serverKind === 'new') this.destinationReservations.consume(resolved.instanceId, resolved.serverPath);
+      this.contexts.delete(jobId);
+      this.restartTokens.delete(jobId);
+      return deepFreeze({ cleaned: true });
+    });
   }
 
   async rollback({ jobId, plan, resolved, lease, error } = {}) {
-    this.#context(jobId, plan, resolved);
-    if (isUnprovenHealthProcessError(error)) {
-      throw new ModpackError(
-        'RECOVERY_REQUIRED',
-        'The exact server process must be proven stopped before recovery can continue',
-        { cause: error }
+    const request = { jobId, plan, resolved, lease };
+    return this.#withRecoveryClosure(request, async close => {
+      const record = await this.#loadBoundRecovery(request);
+      if (!record) return this.#historicalRecoveryResult(request, close, true);
+      if (DURABLE_COMMIT_PHASES.has(record.phase)) throw this.#pendingRecovery();
+      this.#context(jobId, plan, resolved);
+      if (isUnprovenHealthProcessError(error)) throw this.#pendingRecovery(error);
+      const beforeExistingSwap = plan.operation.serverKind === 'existing' && (
+        ['queued', 'preflight', 'snapshotting', 'staging', 'validating-candidate', 'failed'].includes(record.phase) ||
+        (record.phase === 'committing' && ['none', 'prepared'].includes(record.swapStep))
       );
-    }
-    const record = await this.recoveryRegistry.load(jobId);
-    if (!record) throw invalid();
-    const beforeExistingSwap = plan.operation.serverKind === 'existing' && (
-      ['queued', 'preflight', 'snapshotting', 'staging', 'validating-candidate'].includes(record.phase) ||
-      (record.phase === 'committing' && ['none', 'prepared'].includes(record.swapStep))
-    );
-    const result = plan.operation.serverKind === 'new'
-      ? this.recoveryService.failNewWithLease(record, lease, error)
-      : beforeExistingSwap
-        ? this.recoveryService.recoverWithLease(record, lease)
-        : this.recoveryService.rollbackWithLease(record, lease, error?.code || 'lifecycle-rollback');
-    const recovered = await result;
-    if (plan.operation.serverKind === 'new') this.#releaseReservation(resolved);
-    this.contexts.delete(jobId);
-    return recovered;
+      const recovered = await (plan.operation.serverKind === 'new'
+        ? this.recoveryService.failNewWithLease(record, lease, error)
+        : beforeExistingSwap
+          ? this.recoveryService.recoverWithLease(record, lease)
+          : this.recoveryService.rollbackWithLease(record, lease, error?.code || 'lifecycle-rollback'));
+      await this.#resolvedRecovery(recovered, request, close, true);
+      if (plan.operation.serverKind === 'new') this.#releaseReservation(resolved);
+      this.contexts.delete(jobId);
+      return recovered;
+    });
   }
 
   async abandonCandidate({ jobId, plan, resolved, lease, error } = {}) {
-    this.#context(jobId, plan, resolved);
-    let record = await this.recoveryRegistry.load(jobId);
-    if (!record) return deepFreeze({ alreadyAbsent: true });
-    const failure = failureDiagnosticFromError(error);
-    const storedFailure = normalizeFailureDiagnostic(record.outcome?.failure);
-    if (failure && !storedFailure) {
-      record = await this.recoveryRegistry.transition(jobId, {
-        expectedPhase: record.phase,
-        nextPhase: record.phase,
-        patch: {
-          outcome: {
-            ...(record.outcome || {}),
-            failure
+    const request = { jobId, plan, resolved, lease };
+    return this.#withRecoveryClosure(request, async close => {
+      let record = await this.#loadBoundRecovery(request);
+      if (!record) return this.#historicalRecoveryResult(request, close, false);
+      if (DURABLE_COMMIT_PHASES.has(record.phase)) throw this.#pendingRecovery();
+      this.#context(jobId, plan, resolved);
+      const failure = failureDiagnosticFromError(error);
+      const storedFailure = normalizeFailureDiagnostic(record.outcome?.failure);
+      if (failure && !storedFailure && !['completed', 'failed', 'rolled-back'].includes(record.phase)) {
+        record = await this.recoveryRegistry.transition(jobId, {
+          expectedPhase: record.phase,
+          nextPhase: record.phase,
+          patch: {
+            outcome: { ...(record.outcome || {}), failure }
           }
-        }
-      });
+        });
+      }
+      await this.#assertRuntimeRecoveryAllowed(jobId, lease);
+      await boundedRuntimeSettlement(waitForRuntimeWorkerQuiescence(error), 5000, error);
+      const recovered = await this.recoveryService.recoverWithLease(record, lease);
+      await this.#resolvedRecovery(recovered, request, close, false);
+      if (plan.operation.serverKind === 'new') this.#releaseReservation(resolved);
+      this.contexts.delete(jobId);
+      return recovered;
+    });
+  }
+
+  // Lifecycle calls this only inside the original lease when committed-healthy
+  // settlement failed before (or after) invoking cleanup. Metadata closure is
+  // independent of ancillary policy/claim failures and never replays source work.
+  async quarantinePendingCleanup(request) {
+    this.#recoveryBinding(request);
+    try {
+      const historical = await this.#authenticatedClosure(request);
+      return deepFreeze({ sourceClosed: true, closure: historical.closure });
+    } catch (proofError) {
+      this.#quarantineRecovery(request, request.error, proofError);
+      return deepFreeze({ sourceClosed: false, quarantined: true });
     }
-    await this.#assertRuntimeRecoveryAllowed(jobId, lease);
-    try { await boundedRuntimeSettlement(waitForRuntimeWorkerQuiescence(error), 5000, error); }
-    catch (closureError) {
-      this.coordinator?.quarantineMutation(lease);
-      throw closureError;
+  }
+
+  #pendingRecovery(cause) {
+    return new ModpackError('RECOVERY_REQUIRED', 'The modpack source cleanup requires verified recovery', { cause });
+  }
+
+  #recoveryBinding({ jobId, plan, resolved, lease, operationKind }) {
+    if (!plan?.operation || !['new', 'existing'].includes(plan.operation.serverKind) ||
+        plan.operation.instanceId !== resolved?.instanceId ||
+        (operationKind !== undefined && transactionOperationKind(operationKind) !== operationKindForRecord(plan))) throw invalid();
+    this.coordinator.assertMutationLease(lease, { instanceId: resolved.instanceId, serverPath: resolved.serverPath }, jobId);
+    return { expectedTarget: { kind: plan.operation.serverKind, stableServerId: resolved.instanceId, path: resolved.serverPath },
+      expectedOperationKind: operationKindForRecord(plan) };
+  }
+
+  async #loadBoundRecovery(request) {
+    const record = await this.recoveryRegistry.load(request.jobId);
+    if (record) {
+      const binding = this.#recoveryBinding(request);
+      if (record.jobId !== request.jobId || record.operationKind !== binding.expectedOperationKind ||
+          record.target.kind !== binding.expectedTarget.kind || record.target.stableServerId !== binding.expectedTarget.stableServerId ||
+          !samePath(record.target.path, binding.expectedTarget.path)) throw this.#pendingRecovery();
     }
-    const recovered = await this.recoveryService.recoverWithLease(record, lease);
-    if (plan.operation.serverKind === 'new') this.#releaseReservation(resolved);
-    this.contexts.delete(jobId);
-    return recovered;
+    return record;
+  }
+
+  async #authenticatedClosure(request) {
+    const published = await this.recoveryRegistry.retryTerminalPublication(request.jobId, this.#recoveryBinding(request));
+    const context = this.contexts.get(request.jobId);
+    const closure = this.#terminalClosure(published.record, context);
+    return { ...published, closure };
+  }
+
+  #terminalClosure(record, context) {
+    const outcome = record.outcome || {};
+    if (record.phase === 'completed') {
+      if (context?.releaseTrackingIntent || outcome.releaseTracking) {
+        const applied = normalizeReleaseTrackingIntent(outcome.releaseTracking);
+        if (applied.status !== 'applied' || applied.serverId !== record.target.stableServerId) throw this.#pendingRecovery();
+        if (context?.releaseTrackingIntent && JSON.stringify({ ...applied, status: 'pending' }) !==
+            JSON.stringify({ ...normalizeReleaseTrackingIntent(context.releaseTrackingIntent), status: 'pending' })) throw this.#pendingRecovery();
+      }
+      const complete = record.target.kind === 'existing'
+        ? record.swapStep === 'cleanup-complete' && outcome.cleanup?.rollbackRemoved === true && outcome.cleanup?.deletionAuthorized === true
+        : record.swapStep === 'candidate-published' && outcome.publication?.state === 'published' &&
+          outcome.registration?.complete === true && outcome.registration.instanceId === record.target.stableServerId;
+      if (complete) return 'completed';
+      throw this.#pendingRecovery();
+    }
+    const action = outcome.recovery?.action;
+    const identities = record.directoryIdentities;
+    if (record.phase === 'failed' && action === 'revalidation-aborted' && record.swapStep === 'none' &&
+        record.restoreCreation === null && record.restorePoint === null && identities.candidate === null &&
+        identities.rollback === null && identities.failed === null &&
+        (record.target.kind === 'existing' || identities.target === null) &&
+        outcome.publication == null && outcome.registration == null && outcome.liveMutationAuthorized !== true &&
+        (outcome.recovery.operationId === undefined || outcome.recovery.operationId === record.jobId)) return 'abandoned';
+    if (outcome.recovery?.operationId !== record.jobId) throw this.#pendingRecovery();
+    const sameOriginal = identities.target && identities.rollback &&
+      identities.target.volumeSerial === identities.rollback.volumeSerial && identities.target.fileId === identities.rollback.fileId;
+    if (record.target.kind === 'existing') {
+      if (record.phase === 'failed' && sameOriginal && identities.failed === null &&
+          ((action === 'pre-swap-restored' && ['none', 'prepared'].includes(record.swapStep)) ||
+           (action === 'between-renames-restored' && record.swapStep === 'live-moved'))) return 'abandoned';
+      if (record.phase === 'rolled-back' && action === 'rollback-restored' && record.swapStep === 'rollback-restored' &&
+          sameOriginal && identities.failed) return 'rolled-back';
+    } else if (record.phase === 'failed') {
+      const legacyPrePublication = record.swapStep === 'candidate-published' && outcome.publication?.state === 'publishing' &&
+        !outcome.registration && outcome.liveMutationAuthorized !== true;
+      if (action === 'pre-publication-cleanup' && identities.target === null && identities.failed === null &&
+          (['none', 'new-prepared'].includes(record.swapStep) || legacyPrePublication)) return 'abandoned';
+      if (action === 'new-health-failed' && record.swapStep === 'failed-canonical-moved' && identities.target === null &&
+          identities.failed) return 'abandoned';
+    }
+    throw this.#pendingRecovery();
+  }
+
+  async #historicalRecoveryResult(request, close, allowRollback) {
+    const historical = await this.#authenticatedClosure(request);
+    close();
+    if (historical.closure !== 'abandoned' && !(allowRollback && historical.closure === 'rolled-back')) throw this.#pendingRecovery();
+    return deepFreeze({ jobId: request.jobId, resolved: true, action: historical.record.outcome.recovery.action,
+      historyPublication: historical.status });
+  }
+
+  async #resolvedRecovery(result, request, close, allowRollback) {
+    if (result?.resolved !== true || result.jobId !== request.jobId) throw this.#pendingRecovery();
+    if (result.action === 'already-finished') {
+      await this.#historicalRecoveryResult(request, close, allowRollback);
+      return;
+    }
+    const abandoned = ['pre-swap-restored', 'between-renames-restored', 'pre-publication-cleanup', 'new-health-failed', 'revalidation-aborted'].includes(result.action);
+    const rolledBack = result.action === 'rollback-restored';
+    if (!abandoned && !rolledBack && !['new-publication-completed', 'committed-cleanup-completed'].includes(result.action)) throw this.#pendingRecovery();
+    close();
+    if (!abandoned && !(allowRollback && rolledBack)) throw this.#pendingRecovery();
+  }
+
+  async #withRecoveryClosure(request, work, recheckHistoricalClosure = () => true) {
+    this.#recoveryBinding(request); // Reject forged/expired/nonambient authority before any side effects.
+    let sourceClosed = false;
+    const close = () => { sourceClosed = true; };
+    try {
+      return await work(close);
+    } catch (error) {
+      let proofError;
+      if (!sourceClosed && recheckHistoricalClosure()) {
+        try { await this.#authenticatedClosure(request); close(); } catch (failure) { proofError = failure; }
+      }
+      if (!sourceClosed) this.#quarantineRecovery(request, error, proofError);
+      throw error;
+    }
+  }
+
+  #quarantineRecovery(request, error, proofError) {
+    try {
+      this.#recoveryBinding(request);
+      this.coordinator.quarantineMutation(request.lease);
+    } catch (quarantineError) {
+      throw this.#pendingRecovery(new AggregateError([error, proofError, quarantineError].filter(Boolean), 'Recovery quarantine handoff failed'));
+    }
   }
 
   async restorePriorState({ jobId, plan, resolved, restartToken } = {}) {
@@ -1880,10 +2070,14 @@ class ProductionMutationRuntime {
   }
 
   async #reconcileFailedRevalidation({
-    jobId, plan, resolved, lease, durableFs, executionRecord, retainedRecord = null
+    jobId, plan, resolved, lease, durableFs, executionRecord, retainedRecord = null, close
   }) {
-    const record = retainedRecord || await this.recoveryRegistry.load(jobId);
+    const request = { jobId, plan, resolved, lease };
+    const record = retainedRecord || await this.#loadBoundRecovery(request);
     if (record) {
+      // Retained publication probes must bind before touching their target.
+      const bound = await this.#loadBoundRecovery(request);
+      if (!bound || bound.sequence !== record.sequence) throw this.#pendingRecovery();
       if (record.phase === 'queued') {
         // No server content can have changed before the queued record advances.
         // A new-server reservation may still be an app-owned empty directory,
@@ -1902,15 +2096,17 @@ class ProductionMutationRuntime {
           terminalPhase: 'failed',
           outcome: { recovery: { action: 'revalidation-aborted' } }
         });
+        close();
       } else {
-        await this.recoveryService.recoverWithLease(record, lease);
+        const recovered = await this.recoveryService.recoverWithLease(record, lease);
+        await this.#resolvedRecovery(recovered, request, close, false);
       }
-    }
+    } else await this.#historicalRecoveryResult(request, close, false);
     if (plan.operation.serverKind === 'new') this.#releaseReservation(resolved);
     this.contexts.delete(jobId);
   }
 
-  async #reconcileUnrecordedFailedRevalidation({ jobId, plan, resolved, lease, durableFs, executionRecord }) {
+  async #reconcileUnrecordedFailedRevalidation({ jobId, plan, resolved, lease, durableFs, executionRecord, close }) {
     if (plan.operation.serverKind === 'new') {
       await this.consumeReservedTargetFn({
         targetPath: resolved.serverPath,
@@ -1920,8 +2116,9 @@ class ProductionMutationRuntime {
         fsApi: this.fs,
         reparseInspector: this.reparseInspector
       });
+      close();
       this.#releaseReservation(resolved);
-    }
+    } else close();
     this.contexts.delete(jobId);
   }
 
@@ -1971,7 +2168,7 @@ class ProductionMutationRuntime {
       const oldManifest = context.currentState?.manifest || null;
       const incomingManifest = context.management
         ? { schemaVersion: 1, installationId: 'uninstall-empty', entries: [] }
-        : context.expectedTemplateManifest;
+        : context.executionRecord.incomingManifest;
       if (!incomingManifest) throw stale();
       let currentOwnership;
       try {

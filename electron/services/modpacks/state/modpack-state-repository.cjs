@@ -9,6 +9,7 @@ const { normalizeRuntimeTuple } = require('../contracts.cjs');
 const { matchAssetPattern } = require('../providers/github-asset-pattern.cjs');
 const { normalizeOwnershipManifest } = require('../planning/ownership-planner.cjs');
 const { isSafeWindowsBasename } = require('../windows-basename.cjs');
+const { verifyManagedEntry } = require('./managed-entry-verifier.cjs');
 
 const STATE_DIRECTORY = '.minecraft-core-state';
 const CURRENT_STATE = 'modpack.json';
@@ -28,7 +29,6 @@ const MAX_STATE_MANIFEST_VALUES_PER_ENTRY = 11;
 const MAX_STATE_NON_MANIFEST_VALUES = 25_000;
 const MAX_STATE_JSON_VALUES = MAX_STATE_NON_MANIFEST_VALUES +
   (MAX_STATE_MANIFEST_ENTRIES * MAX_STATE_MANIFEST_VALUES_PER_ENTRY);
-const VERIFICATION_READ_BYTES = 64 * 1024;
 
 function invalid(field) {
   throw new ModpackError('INVALID_REQUEST', 'Managed modpack state is invalid', {
@@ -443,11 +443,6 @@ function verificationOptions(value) {
 
 function throwIfVerificationCancelled(signal) {
   if (signal?.aborted) throw new ModpackError('CANCELLED', 'Managed file verification was cancelled');
-}
-
-function verificationChanged(cause) {
-  if (cause instanceof ModpackError) return cause;
-  return new ModpackError('PLAN_STALE', 'A managed file changed during verification', { cause });
 }
 
 class ModpackStateRepository {
@@ -1135,102 +1130,11 @@ class ModpackStateRepository {
   }
 
   async #verifyManifestEntryAsync(serverPath, entry, signal) {
-    throwIfVerificationCancelled(signal);
-    const segments = entry.path.split('/');
-    const candidate = path.resolve(serverPath, ...segments);
-    const relative = path.relative(serverPath, candidate);
-    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) invalid('state.manifest.path');
-    let current = serverPath;
-    let stat;
-    for (let index = 0; index < segments.length; index += 1) {
-      throwIfVerificationCancelled(signal);
-      current = path.join(current, segments[index]);
-      try { stat = this.fs.lstatSync(current, { bigint: true }); }
-      catch (error) {
-        if (error?.code === 'ENOENT') return 'missing';
-        throw verificationChanged(error);
-      }
-      const last = index === segments.length - 1;
-      if (stat.isSymbolicLink() || (!last && !stat.isDirectory()) || (last && (!stat.isFile() || BigInt(stat.nlink) !== 1n))) {
-        return 'unsafe';
-      }
-    }
-    if (!this.#samePath(this.fs.realpathSync.native(candidate), candidate)) return 'unsafe';
-    const beforeIdentity = fileIdentity(stat);
-    if (String(stat.size) !== entry.size) return 'modified';
-    const expectedBytes = BigInt(entry.size);
-    const digest = crypto.createHash('sha256');
-    const buffer = Buffer.allocUnsafe(VERIFICATION_READ_BYTES);
-    let handle;
-    try {
-      handle = await this.fsPromises.open(candidate, 'r');
-    } catch (error) {
-      throwIfVerificationCancelled(signal);
-      throw verificationChanged(error);
-    }
-
-    let failure = null;
-    let handleAfterIdentity = null;
-    try {
-      throwIfVerificationCancelled(signal);
-      const openedStat = await handle.stat({ bigint: true });
-      if (!openedStat.isFile() || BigInt(openedStat.nlink) !== 1n ||
-          !sameFileIdentity(beforeIdentity, fileIdentity(openedStat))) {
-        throw new ModpackError('PLAN_STALE', 'A managed file changed during verification');
-      }
-      let measuredBytes = 0n;
-      for (;;) {
-        throwIfVerificationCancelled(signal);
-        const remaining = expectedBytes - measuredBytes;
-        const readLength = remaining >= BigInt(buffer.length)
-          ? buffer.length
-          : Number(remaining) + 1;
-        let result;
-        try { result = await handle.read(buffer, 0, readLength, null); }
-        catch (error) {
-          throwIfVerificationCancelled(signal);
-          throw verificationChanged(error);
-        }
-        throwIfVerificationCancelled(signal);
-        const bytesRead = result?.bytesRead;
-        if (!Number.isSafeInteger(bytesRead) || bytesRead < 0 || bytesRead > readLength) {
-          throw new ModpackError('PLAN_STALE', 'A managed file changed during verification');
-        }
-        if (bytesRead === 0) break;
-        measuredBytes += BigInt(bytesRead);
-        if (measuredBytes > expectedBytes) {
-          throw new ModpackError('PLAN_STALE', 'A managed file changed during verification');
-        }
-        digest.update(buffer.subarray(0, bytesRead));
-        await this.yieldControl();
-        throwIfVerificationCancelled(signal);
-      }
-      if (measuredBytes !== expectedBytes) {
-        throw new ModpackError('PLAN_STALE', 'A managed file changed during verification');
-      }
-      handleAfterIdentity = fileIdentity(await handle.stat({ bigint: true }));
-      throwIfVerificationCancelled(signal);
-    } catch (error) {
-      failure = error;
-      throw verificationChanged(error);
-    } finally {
-      try { await handle.close(); }
-      catch (error) {
-        if (failure === null) throw verificationChanged(error);
-      }
-    }
-
-    let afterStat;
-    try { afterStat = this.fs.lstatSync(candidate, { bigint: true }); }
-    catch (error) { throw verificationChanged(error); }
-    const afterIdentity = fileIdentity(afterStat);
-    if (!afterStat.isFile() || BigInt(afterStat.nlink) !== 1n ||
-        !sameFileIdentity(beforeIdentity, handleAfterIdentity) ||
-        !sameFileIdentity(beforeIdentity, afterIdentity) ||
-        !this.#samePath(this.fs.realpathSync.native(candidate), candidate)) {
-      throw new ModpackError('PLAN_STALE', 'A managed file changed during verification');
-    }
-    return digest.digest('hex') === entry.installedHash ? 'matched' : 'modified';
+    return (await verifyManagedEntry(serverPath, entry, {
+      fsApi: this.fs, fsPromises: this.fsPromises, signal, yieldToLoop: this.yieldControl,
+      // Full Verify hashes every byte; retain its established advisory ctime rule.
+      identitiesMatch: sameFileIdentity
+    })).status;
   }
 
   #verifyManifestEntry(serverPath, entry) {

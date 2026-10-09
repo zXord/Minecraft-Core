@@ -5,6 +5,7 @@
   import { get } from 'svelte/store';
   import { createEventDispatcher } from 'svelte';
   import { safeInvoke } from '../../utils/ipcUtils.js';
+  import { MANAGED_MOD_EDIT_MESSAGE, modJarEditsBlocked } from '../../utils/mods/managedModEditPolicy.js';
   // Import stores
   import { 
     installingModIds,
@@ -22,6 +23,7 @@
     totalPages,
     totalResults,
     isLoading,
+    serverConfig,
     isSearching,
     filterMinecraftVersion,
     filterModLoader,
@@ -68,11 +70,24 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   
   // Props
   export let serverPath = '';
+  export let modpackManaged = null;
+  export let modpackStateGeneration = 0;
+  $: modEditsBlocked = modJarEditsBlocked(modpackManaged, $activeContentType);
   
   // Local state
   let downloadManagerCleanup;
+  let componentActive = true;
   let activeTab = 'installed'; // 'installed' or 'search' or 'categories'
   let initializedServerPath = '';
+
+  function captureEditContext() {
+    const targetPath = serverPath;
+    const generation = modpackStateGeneration;
+    const contentType = $activeContentType;
+    return { serverPath: targetPath, contentType,
+      isCurrent: () => componentActive && targetPath === serverPath && generation === modpackStateGeneration &&
+        contentType === $activeContentType && !modJarEditsBlocked(modpackManaged, contentType) };
+  }
   
   // Content type configuration
   const contentTypes = [
@@ -230,6 +245,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   
   // Clean up on component destroy
   onDestroy(() => {
+    componentActive = false;
     if (downloadManagerCleanup && typeof downloadManagerCleanup === 'function') {
       downloadManagerCleanup();
     }
@@ -241,8 +257,11 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   
   // Handle installing mod with dependencies
   async function handleInstallWithDependencies() {
+    if (modEditsBlocked) return;
+    const context = captureEditContext();
     try {
-      const result = await installWithDependencies(serverPath, installMod, $activeContentType);
+      const result = await installWithDependencies(context.serverPath, installMod, context.contentType, context);
+      if (!context.isCurrent()) return;
       
       if (!result) {
         // If installation failed, ensure we clean up any installing state
@@ -270,6 +289,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         }
       }
     } catch (error) {
+      if (!context.isCurrent()) return;
       errorMessage.set(`Failed to install dependencies: ${error.message || 'Unknown error'}`);
       
       // Clean up all installing state
@@ -279,6 +299,9 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   
   // Handle compatibility warning events
   async function handleCompatibilityWarning(event) {
+    const targetPath = serverPath;
+    const generation = modpackStateGeneration;
+    const isCurrent = () => componentActive && targetPath === serverPath && generation === modpackStateGeneration;
     // Extract and ensure the modToUpdate has a source for download URL resolution
     const { issues: rawIssues, modToUpdate: rawMod } = event.detail;
     const modToUpdate = { ...rawMod, source: rawMod.source || 'modrinth' };
@@ -302,6 +325,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         return issue;
       }));
       
+      if (!isCurrent()) return;
       // Format dependencies for the dependency modal based on issue type
       const dependencies = issues.map(issue => {
         let dependencyType = 'required';
@@ -369,15 +393,25 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       // Show the dependency modal with compatibility warnings
       showDependencyModal(modToUpdate, dependencies);
     } catch (error) {
-      errorMessage.set(`Error checking dependencies: ${error.message || 'Unknown error'}`);
+      if (isCurrent()) errorMessage.set(`Error checking dependencies: ${error.message || 'Unknown error'}`);
     }
   }
   
   // Handle mod installation
   async function handleInstallMod(event) {
-    const { mod, versionId, isVersionChange, isDependency, onSuccess, onError, contentType } = event.detail;
+    const { mod, versionId, isVersionChange, isDependency, onSuccess, onError, onStale, contentType } = event.detail;
     const effectiveVersionId = versionId || mod.selectedVersionId || null;
     const targetContentType = contentType || $activeContentType;
+    if (modJarEditsBlocked(modpackManaged, targetContentType)) {
+      onError?.(new Error(MANAGED_MOD_EDIT_MESSAGE));
+      return;
+    }
+    const targetServerPath = serverPath;
+    const targetGeneration = modpackStateGeneration;
+    const entryContentType = $activeContentType;
+    const currentInstallContext = () => componentActive && targetServerPath === serverPath &&
+      targetGeneration === modpackStateGeneration && entryContentType === $activeContentType &&
+      !modJarEditsBlocked(modpackManaged, targetContentType);
     const queuedMod = {
       ...mod,
       ...(effectiveVersionId ? { selectedVersionId: effectiveVersionId } : {}),
@@ -419,10 +453,12 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
                 loader: get(loaderType),
                 gameVersion: get(minecraftVersion)
               });
+              if (!currentInstallContext()) return;
               
               if (versionInfo && versionInfo.dependencies && versionInfo.dependencies.length > 0) {
                 // Check for compatibility issues, passing the mod ID to avoid self-dependencies
                 const compatibilityIssues = await checkDependencyCompatibility(versionInfo.dependencies, queuedMod.id);
+                if (!currentInstallContext()) return;
                 
                 // If there are compatibility issues, show them
                 if (compatibilityIssues.length > 0) {
@@ -441,6 +477,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
                 }
               }
             } catch (versionError) {
+              if (!currentInstallContext()) return;
               // Set a more user-friendly error message
               if (versionError.message && versionError.message.includes('404')) {
                 errorMessage.set(`Couldn't find version information for this mod. It may have been removed from Modrinth.`);
@@ -463,10 +500,14 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         
         // Install (will replace existing version)
         // Use contentType from event if provided (for dependencies), otherwise use active content type
-        const installSuccess = await installMod(modToUpdate, serverPath, {
+        if (!currentInstallContext()) return;
+        const installSuccess = await installMod(modToUpdate, targetServerPath, {
           contentType: targetContentType,
+          isCurrent: currentInstallContext,
           downloadId
         });
+        if (!currentInstallContext()) return;
+        if (!installSuccess) onError?.(new Error('Installation failed or was refused'));
         
         // Clear installing state
         installingModIds.update(ids => {
@@ -490,6 +531,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       // Always check for dependencies even for reinstalling mods
       try {
         const dependencies = await checkModDependencies(queuedMod, new Set(), { interactive: true });
+        if (!currentInstallContext()) return;
         
         // Get the version info to also check for compatibility issues
         let compatibilityIssues = [];
@@ -515,6 +557,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         }
         
         // If has dependencies, show modal
+        if (!currentInstallContext()) return;
         if (dependencies && dependencies.length > 0) {
           // Add any compatibility issues to the dependencies message
           if (compatibilityIssues.length > 0) {
@@ -538,6 +581,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
               downloadId
             }
           }});
+          if (!currentInstallContext()) return;
           // Clear installing state since we're waiting for user decision
           installingModIds.update(ids => {
             ids.delete(queuedMod.id);
@@ -546,10 +590,13 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
           return;
         } else {
           // No dependencies or compatibility issues, install directly
-          const installSuccess = await installMod(queuedMod, serverPath, {
+          const installSuccess = await installMod(queuedMod, targetServerPath, {
             contentType: targetContentType,
+            isCurrent: currentInstallContext,
             downloadId
           });
+          if (!currentInstallContext()) return;
+          if (!installSuccess) onError?.(new Error('Installation failed or was refused'));
           
           // Clear installing state after installation
           installingModIds.update(ids => {
@@ -567,10 +614,11 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
           } else if (installSuccess && isDependency) {
             // Show specific success message for dependency installations
             successMessage.set(`Dependency "${queuedMod.name || queuedMod.title}" installed successfully!`);
-            setTimeout(() => successMessage.set(''), 3000);
+            setTimeout(() => { if (currentInstallContext()) successMessage.set(''); }, 3000);
           }
         }
       } catch (depError) {
+        if (!currentInstallContext()) return;
         
         // Don't just try to install the mod if dependency checking fails
         // Instead, show a meaningful error to the user
@@ -579,10 +627,13 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         // Ask the user if they want to continue with installation
         if (confirm(`Warning: Failed to check if the mod "${queuedMod.name || queuedMod.title}" requires dependencies. Continue with installation anyway?`)) {
           // If user confirms, proceed with installation
-          const installSuccess = await installMod(queuedMod, serverPath, {
+          const installSuccess = await installMod(queuedMod, targetServerPath, {
             contentType: targetContentType,
+            isCurrent: currentInstallContext,
             downloadId
           });
+          if (!currentInstallContext()) return;
+          if (!installSuccess) onError?.(new Error('Installation failed or was refused'));
           
           // Call success callback if provided and installation was successful
           if (installSuccess && onSuccess) {
@@ -611,6 +662,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         });
       }
     } catch (error) {
+      if (!currentInstallContext()) return;
       completeDownload(downloadId, true, error.message || 'Installation failed');
       errorMessage.set(`Failed to install mod: ${error.message || 'Unknown error'}`);
       
@@ -628,10 +680,16 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
           // Error callback failed
         }
       }
+    } finally {
+      // Resolve only the old component's local wait; never invoke its success/error
+      // callbacks against a replacement context.
+      if (!currentInstallContext()) onStale?.();
     }
   }
     // Handle mod update from InstalledModList
   async function handleUpdateMod(event) {
+    if (modEditsBlocked) return;
+    const context = captureEditContext();
     const { modName, projectId, versionId } = event.detail;
     
     try {
@@ -646,29 +704,24 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
         selectedVersionId: versionId,
         source: 'modrinth'
       };
-      // Remove this mod from the updates list immediately to prevent duplicate clicks
-      modsWithUpdates.update(updates => {
-        const next = new SvelteMap(updates);
-        next.delete(modName);
-        if (projectId) {
-          next.delete('project:' + projectId);
-        }
-        return next;
-      });
-      
       // Install the new version (it will replace the old one automatically)
-      const success = await installMod(mod, serverPath, { contentType: $activeContentType });
+      const success = await installMod(mod, context.serverPath, context);
+      if (!context.isCurrent()) return;
       
       if (success) {
-        // Force a full reload of installed mods to refresh version information
-        await loadMods(serverPath);
+        modsWithUpdates.update(updates => {
+          const next = new SvelteMap(updates);
+          next.delete(modName);
+          next.delete('project:' + projectId);
+          return next;
+        });
 
         // Don't automatically expand the dropdown - let the user choose to open it
         // This avoids the "loading versions" issue
         expandedInstalledMod.set(null);
       }
     } catch (error) {
-      errorMessage.set(`Failed to update mod: ${error.message || 'Unknown error'}`);
+      if (context.isCurrent()) errorMessage.set(`Failed to update mod: ${error.message || 'Unknown error'}`);
     }  }
   
   // Handle filter change
@@ -832,6 +885,8 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
    * Handle install dependencies request from InstalledModList
    */
   async function handleInstallDependenciesFromModList(event) {
+    if (modEditsBlocked) return;
+    const context = captureEditContext();
     // Directly install dependencies without opening a secondary modal
     const { mod: rawMod, dependencies: rawDependencies } = event.detail;
     const mod = { ...rawMod, source: rawMod.source || 'modrinth' };
@@ -841,14 +896,20 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       modToInstall.set(mod);
       currentDependencies.set(rawDependencies);
       // Perform the installation immediately
-      await installWithDependencies(serverPath, installMod, $activeContentType);
+      await installWithDependencies(context.serverPath, installMod, context.contentType, context);
     } catch (error) {
-      errorMessage.set(`Error installing dependencies: ${error.message || 'Unknown error'}`);
+      if (context.isCurrent()) errorMessage.set(`Error installing dependencies: ${error.message || 'Unknown error'}`);
     }
   }
 </script>
 
 <div class="mod-manager">
+  {#if modEditsBlocked}
+    <aside class="managed-mod-notice" role="status" aria-label="Managed mod editing policy">
+      <p>{modpackManaged === true ? MANAGED_MOD_EDIT_MESSAGE : 'Checking modpack ownership. Individual mod changes are unavailable until ownership is known.'}</p>
+      <button type="button" on:click={() => dispatch('openModpack')}>Open Modpack</button>
+    </aside>
+  {/if}
   <StatusManager />
   <DownloadProgress />
   <ModDependencyModal on:install={handleInstallWithDependencies} />
@@ -932,6 +993,8 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
     >
       <InstalledModList 
         serverPath={serverPath}
+        {modpackManaged}
+        {modpackStateGeneration}
         on:modRemoved={() => loadMods(serverPath)}
         on:updateMod={handleUpdateMod}
         on:refresh={handleRefresh}
@@ -951,6 +1014,7 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
       tabindex="0"
     >
       <ModSearch
+        {modEditsBlocked}
         on:search={handleSearch}
         on:install={handleInstallMod}
         on:filterChange={handleFilterChange}
@@ -965,6 +1029,13 @@ import DownloadProgress from '../mods/components/DownloadProgress.svelte';
 </div>
 
 <style>
+  .managed-mod-notice {
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+    border: 1px solid var(--border-color, #454545);
+    border-radius: 0.5rem;
+  }
+  .managed-mod-notice p { margin: 0 0 0.75rem; }
   .mod-manager {
     display: flex;
     flex-direction: column;

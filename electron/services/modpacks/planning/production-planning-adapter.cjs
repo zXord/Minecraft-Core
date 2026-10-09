@@ -728,6 +728,7 @@ class ProductionPlanningAdapter {
     }
     let snapshot = null;
     if (operationKind === 'repair' && managed) {
+      reportProgress({ phase: 'scanning-server' });
       snapshot = await this.snapshotServer({
         currentState,
         expectedContentRevision,
@@ -801,7 +802,7 @@ class ProductionPlanningAdapter {
     ) ||
         !sameRuntime(currentState.state.runtime, runtime) ||
         !sameStringSet(currentState.state.selectedOptionalFiles, selections.optionalFileIds))) throw stale();
-    reportProgress({ phase: 'scanning-server' });
+    if (!snapshot) reportProgress({ phase: 'scanning-server' });
     snapshot ||= await this.snapshotServer({
       currentState,
       expectedContentRevision,

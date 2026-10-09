@@ -1659,6 +1659,12 @@ test('repair pre-scans the live server and plans only missing or corrupt managed
     ]
   };
   let preparationContext = null;
+  let resolveSnapshotGate;
+  let signalSnapshotStarted;
+  const snapshotGate = new Promise(resolve => { resolveSnapshotGate = resolve; });
+  const snapshotStarted = new Promise(resolve => { signalSnapshotStarted = resolve; });
+  let snapshotCalls = 0;
+  const progress = [];
   const adapter = new ProductionPlanningAdapter({
     instanceResolver: { async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: false }; } },
     stateRepository: { read() { return currentState; } },
@@ -1677,10 +1683,15 @@ test('repair pre-scans the live server and plans only missing or corrupt managed
         execution: { templateOutputId: 'output-repair' }
       };
     },
-    snapshotServer: async () => ({
-      liveSnapshot, pathPreconditions: [], candidateBytes: '2', restorePointBytes: '2',
-      rollbackBytes: '2', journalBytes: '1', sourceRuntime: runtime, restorePoints: [], writeable: true
-    })
+    snapshotServer: async () => {
+      snapshotCalls += 1;
+      signalSnapshotStarted();
+      await snapshotGate;
+      return {
+        liveSnapshot, pathPreconditions: [], candidateBytes: '2', restorePointBytes: '2',
+        rollbackBytes: '2', journalBytes: '1', sourceRuntime: runtime, restorePoints: [], writeable: true
+      };
+    }
   });
   const request = {
     inspectionId: 'inspection-one', instanceId: 'server-one', operationKind: 'repair',
@@ -1691,7 +1702,16 @@ test('repair pre-scans the live server and plans only missing or corrupt managed
     }
   };
 
-  const result = await adapter.createPlan({ request, inspection: inspection(), source: conflictSource });
+  const planning = adapter.createPlan({
+    request, inspection: inspection(), source: conflictSource, onProgress: event => progress.push(event)
+  });
+  await snapshotStarted;
+  assert.deepEqual(progress.map(event => event.phase), ['validating-destination', 'scanning-server']);
+  assert.equal(preparationContext, null);
+  resolveSnapshotGate();
+  const result = await planning;
+  assert.equal(snapshotCalls, 1);
+  assert.equal(progress.filter(event => event.phase === 'scanning-server').length, 1);
   const actions = Object.fromEntries(result.plan.ownership.actions.map(action => [action.path, action.action]));
   assert.equal(preparationContext.currentState, currentState);
   assert.equal(preparationContext.liveSnapshot, liveSnapshot);

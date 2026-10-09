@@ -17,7 +17,7 @@
     disabledMods,
     disabledModUpdates,
     getCategorizedMods,
-    updateModCategory,
+    modCategories,
     updateModRequired,
     loadModCategories,
     activeContentType,
@@ -38,6 +38,7 @@
   // Import existing API functions
   import { loadMods, loadContent, deleteMod, deleteContent, checkForUpdates, enableAndUpdateMod, fetchModVersions, checkDisabledModUpdates, installMod, queueInstallDownload } from '../../../utils/mods/modAPI.js';
   import { safeInvoke } from '../../../utils/ipcUtils.js';
+  import { MANAGED_MOD_EDIT_MESSAGE, modJarEditsBlocked } from '../../../utils/mods/managedModEditPolicy.js';
   import { checkDependencyCompatibility, checkVersionCompatibility } from '../../../utils/mods/modCompatibility.js';
   import { checkModDependencies } from '../../../utils/mods/modDependencyHelper.js';
 
@@ -57,6 +58,48 @@
 
   // Props
   export let serverPath = '';
+  export let modpackManaged = null;
+  export let modpackStateGeneration = 0;
+  $: modEditsBlocked = modJarEditsBlocked(modpackManaged, $activeContentType);
+  $: modEditLockTitle = modEditsBlocked
+    ? (modpackManaged === true ? MANAGED_MOD_EDIT_MESSAGE : 'Checking modpack ownership. Individual mod changes are unavailable until ownership is known.')
+    : null;
+  let componentActive = true;
+  onDestroy(() => { componentActive = false; });
+  let disabledSaveInProgress = false;
+
+  function captureEditContext() {
+    const targetPath = serverPath;
+    const generation = modpackStateGeneration;
+    const contentType = $activeContentType;
+    return { serverPath: targetPath, contentType,
+      isCurrent: () => componentActive && targetPath === serverPath && generation === modpackStateGeneration &&
+        contentType === $activeContentType && !modJarEditsBlocked(modpackManaged, contentType) };
+  }
+
+  async function saveDisabledSet(next) {
+    if (!componentActive || modEditsBlocked || disabledSaveInProgress) return false;
+    const targetPath = serverPath;
+    const generation = modpackStateGeneration;
+    disabledSaveInProgress = true;
+    try {
+      const result = await safeInvoke('save-disabled-mods', targetPath, Array.from(next));
+      if (!componentActive || targetPath !== serverPath || generation !== modpackStateGeneration || modEditsBlocked) return false;
+      if (result === false || result?.success === false || result?.ok === false) {
+        throw new Error(result?.error?.message || result?.error || 'Unable to save disabled mods');
+      }
+      // Pessimistic commit: a main refusal leaves the previous disabled set intact.
+      disabledMods.set(new SvelteSet(next));
+      return true;
+    } catch (error) {
+      if (componentActive && targetPath === serverPath && generation === modpackStateGeneration) {
+        errorMessage.set(`Failed to toggle mod: ${error.message}`);
+      }
+      return false;
+    } finally {
+      disabledSaveInProgress = false;
+    }
+  }
 
   // Event dispatcher
   const dispatch = createEventDispatcher();
@@ -1091,11 +1134,13 @@
       : [];
   
   function toggleDropZone() {
+    if (modEditsBlocked) return;
     dropZoneCollapsed = !dropZoneCollapsed;
   }
   
   // Enhanced drag and drop handlers
   function handleDragOver(event) {
+    if (modEditsBlocked) { event.preventDefault(); return; }
     event.preventDefault();
     if (!isDragover) {
       isDragover = true;
@@ -1110,6 +1155,7 @@
   }
 
   function handleDrop(event) {
+    if (modEditsBlocked) { event.preventDefault(); return; }
     event.preventDefault();
     isDragover = false;
     
@@ -1131,6 +1177,7 @@
 
   // Handle drag enter on the add mods button
   function handleAddButtonDragEnter(event) {
+    if (modEditsBlocked) return;
     event.preventDefault();
     isDragover = true;
   }
@@ -1148,6 +1195,7 @@
   
   // Handle file input change
   function handleBrowseFiles() {
+    if (modEditsBlocked) return;
     // Simple file selection without type issues
     const input = document.createElement('input');
     input.type = 'file';
@@ -1177,43 +1225,56 @@
 
   // Install mod files (used by both drag&drop and browse)
   async function installModFiles(files) {
+    if (modEditsBlocked) return;
+    const context = captureEditContext();
     try {
-      successMessage.set(`Installing ${files.length} mod file(s)...`);
-      
       const installedMods = [];
+      let failedCount = 0;
       
       for (const file of files) {
-        const result = await safeInvoke('add-mod', serverPath, file.path);
+        if (!context.isCurrent()) return;
+        const result = await safeInvoke('add-mod', context.serverPath, file.path);
+        if (!context.isCurrent()) return;
         if (result && result.success) {
           installedMods.push({
             fileName: result.fileName,
             targetPath: result.targetPath,
             originalPath: file.path
           });
-        }
+        } else failedCount++;
       }
       
       // Refresh the mod list
-      await loadMods(serverPath);
+      if (!installedMods.length) {
+        errorMessage.set(`${failedCount} mod file(s) failed or were refused.`);
+        return;
+      }
+      await loadMods(context.serverPath, context);
+      if (!context.isCurrent()) return;
       dispatch('modAdded');
       
       // Trigger Modrinth matching for each installed mod
       for (const mod of installedMods) {
-        await triggerModrinthMatching(mod.fileName, mod.targetPath);
+        if (!context.isCurrent()) return;
+        await triggerModrinthMatching(mod.fileName, mod.targetPath, context);
       }
+      if (!context.isCurrent()) return;
       
-      successMessage.set(`Successfully installed ${files.length} mod(s)!`);
+      successMessage.set(`Successfully installed ${installedMods.length} mod(s)!`);
+      if (failedCount) errorMessage.set(`${failedCount} mod file(s) failed or were refused.`);
       
       // Collapse the drop zone after successful installation
       dropZoneCollapsed = true;
       localStorage.setItem('minecraft-core-drop-zone-collapsed', 'true');
     } catch (error) {
-      errorMessage.set(`Error installing mod files: ${error.message || 'Unknown error'}`);
+      if (context.isCurrent()) errorMessage.set(`Error installing mod files: ${error.message || 'Unknown error'}`);
     }
   }
 
   // Trigger Modrinth matching for a newly added mod
-  async function triggerModrinthMatching(fileName, modPath) {
+  async function triggerModrinthMatching(fileName, modPath, context = null) {
+    const isCurrent = context?.isCurrent || (() => componentActive);
+    if (!isCurrent()) return;
     try {
       // Set checking state
       modrinthMatchingActions.setSearchState(fileName, 'checking');
@@ -1224,6 +1285,7 @@
         modVersion: null,
         loader: get(loaderType)
       });
+      if (!isCurrent()) return;
 
       if (result && result.success && result.matches && result.matches.length > 0) {
         const topMatch = result.matches[0];
@@ -1237,16 +1299,21 @@
             searchedName: result.searchedName,
             searchedVersion: result.searchedVersion
           });
+          if (!isCurrent()) return;
           
           if (setPendingResult && setPendingResult.success) {
             // Immediately refresh pending confirmations to show UI
-            await modrinthMatchingActions.loadPendingConfirmations();
+            const pending = await safeInvoke('get-all-pending-confirmations');
+            if (!isCurrent()) return;
+            if (pending?.success && Array.isArray(pending.pending)) {
+              pendingModrinthConfirmations.set(new Map(pending.pending.map(item => [item.fileName, item])));
+            }
           }
           
           // Set found state and clear search state after a short delay to show the result
           modrinthMatchingActions.setSearchState(fileName, 'found');
           setTimeout(() => {
-            modrinthMatchingActions.clearSearchState(fileName);
+            if (isCurrent()) modrinthMatchingActions.clearSearchState(fileName);
           }, 1000);
         } else {
           // Low confidence matches - show as no matches
@@ -1256,7 +1323,7 @@
         modrinthMatchingActions.setSearchState(fileName, 'no-matches');
       }
     } catch (error) {
-      modrinthMatchingActions.setSearchState(fileName, 'failed', { error: error.message });
+      if (isCurrent()) modrinthMatchingActions.setSearchState(fileName, 'failed', { error: error.message });
     }
   }
 
@@ -1515,6 +1582,8 @@
   }
 
   async function updateAllMods() {
+    if (modEditsBlocked) return;
+    const context = captureEditContext();
     const enabledModsToUpdate = [];
     const disabledModsToUpdate = [];
     
@@ -1556,22 +1625,13 @@
     updateAllInProgress = true;
     
     try {
-      let updatedCount = 0;
-      
-      // Clear updates list immediately to prevent UI flickering
-      modsWithUpdates.update(updates => {
-        const next = new SvelteMap(updates);
-        for (const mod of enabledModsToUpdate) {
-          next.delete(mod.modName);
-          if (mod.projectId) {
-            next.delete('project:' + mod.projectId);
-          }
-        }
-        return next;
-      });
+      let enabledCount = 0;
+      let disabledCount = 0;
+      let failedCount = 0;
       
       // Update enabled mods - use direct install instead of dispatch to avoid intermediate reloads
       for (const mod of enabledModsToUpdate) {
+        if (!context.isCurrent()) return;
         try {
           const baseName = mod.modName.replace(/\.jar$/i, '');
           const modObj = {
@@ -1582,49 +1642,58 @@
             source: 'modrinth'
           };
           
-          const success = await installMod(modObj, serverPath, { contentType: $activeContentType });
+          const success = await installMod(modObj, context.serverPath, { ...context, skipReload: true });
+          if (!context.isCurrent()) return;
           if (success) {
-            updatedCount++;
-          }
+            enabledCount++;
+            modsWithUpdates.update(updates => {
+              const next = new SvelteMap(updates);
+              next.delete(mod.modName);
+              next.delete('project:' + mod.projectId);
+              return next;
+            });
+          } else failedCount++;
         } catch (error) {
-          // Log error but continue with other mods
-          console.error(`Failed to update ${mod.modName}:`, error);
+          if (!context.isCurrent()) return;
+          failedCount++;
         }
       }
       
       // Enable and update disabled mods (skip reload for each to improve speed)
       for (const mod of disabledModsToUpdate) {
+        if (!context.isCurrent()) return;
         const success = await enableAndUpdateMod(
-          serverPath,
+          context.serverPath,
           mod.modName,
           mod.projectId,
           mod.targetVersion,
           mod.targetVersionId,
-          true // skipReload = true for batch updates
+          true,
+          context
         );
+        if (!context.isCurrent()) return;
         if (success) {
-          updatedCount++;
-        }
+          disabledCount++;
+        } else failedCount++;
       }
-      
-        // Force refresh mod list ONCE at the end to ensure UI is current
-        await loadMods(serverPath);
-        // Explicitly refresh disabled mod updates to ensure accurate counts
-        await checkDisabledModUpdates(serverPath);
-
-      const enabledText = enabledModsToUpdate.length > 0 ? `${enabledModsToUpdate.length} updated` : '';
-      const disabledText = disabledModsToUpdate.length > 0 ? `${disabledModsToUpdate.length} enabled and updated` : '';
+      const updatedCount = enabledCount + disabledCount;
+      if (updatedCount) await loadMods(context.serverPath, context);
+      if (!context.isCurrent()) return;
+      const enabledText = enabledCount ? `${enabledCount} updated` : '';
+      const disabledText = disabledCount ? `${disabledCount} enabled and updated` : '';
       const combinedText = [enabledText, disabledText].filter(Boolean).join(', ');
-
-      successMessage.set(`Successfully processed ${updatedCount} mods (${combinedText})!`);
+      if (updatedCount) successMessage.set(`Successfully processed ${updatedCount} mods (${combinedText})!`);
+      if (failedCount) errorMessage.set(`${failedCount} mod update${failedCount === 1 ? '' : 's'} failed or were refused. Pending updates were kept.`);
     } catch (error) {
-      errorMessage.set(`Failed to update all mods: ${error.message}`);
+      if (context.isCurrent()) errorMessage.set(`Failed to update all mods: ${error.message}`);
     } finally {
       updateAllInProgress = false;
     }
   }
 
   async function handleDeleteSelected() {
+    if (modEditsBlocked) return;
+    const context = captureEditContext();
     if (selectedMods.size === 0) return;
     if (serverRunning && $activeContentType === CONTENT_TYPES.MODS) {
       const selectedModsArray = Array.from(selectedMods);
@@ -1635,33 +1704,35 @@
     }
     
     try {
-      for (const itemName of selectedMods) {
-        if ($activeContentType === CONTENT_TYPES.MODS) {
-          await deleteMod(itemName, serverPath, false); // Don't reload for each item
-          removeCachedVersion(itemName, CONTENT_TYPES.MODS);
-        } else {
-          await deleteContent(itemName, serverPath, $activeContentType, false); // Don't reload for each item
-          removeCachedVersion(itemName, $activeContentType);
-        }
+      let deletedCount = 0;
+      for (const itemName of [...selectedMods]) {
+        if (!context.isCurrent()) return;
+        const accepted = context.contentType === CONTENT_TYPES.MODS
+          ? await deleteMod(itemName, context.serverPath, false, context)
+          : await deleteContent(itemName, context.serverPath, context.contentType, false, context);
+        if (!context.isCurrent()) return;
+        if (!accepted) continue;
+        deletedCount++;
+        removeCachedVersion(itemName, context.contentType);
+        selectedMods = new SvelteSet([...selectedMods].filter(name => name !== itemName));
       }
-      selectedMods = new SvelteSet();
       
       // Reload once after all deletions
-      if ($activeContentType === CONTENT_TYPES.MODS) {
-        await loadMods(serverPath);
-      } else {
-        await loadContent(serverPath, $activeContentType);
-      }
+      if (!deletedCount) return;
+      await loadContent(context.serverPath, context.contentType, context);
+      if (!context.isCurrent()) return;
       
       dispatch('modRemoved');
     } catch (error) {
-      const itemType = $activeContentType === CONTENT_TYPES.MODS ? 'mods' : 
+      if (!context.isCurrent()) return;
+      const itemType = $activeContentType === CONTENT_TYPES.MODS ? 'mods' :
                       $activeContentType === CONTENT_TYPES.SHADERS ? 'shaders' : 'resource packs';
       errorMessage.set(`Failed to delete selected ${itemType}: ${error.message}`);
     }
   }
 
   async function handleBulkToggle() {
+    if (modEditsBlocked || disabledSaveInProgress) return;
     if (selectedMods.size === 0) return;
     
     // Determine what action to take based on selected mods
@@ -1689,7 +1760,8 @@
     }
     
     try {
-      disabledMods.update(mods => {
+      const nextDisabledMods = (() => {
+        const mods = $disabledMods;
         const newMods = new SvelteSet(mods);
         
         if (isMixedSelection) {
@@ -1715,9 +1787,9 @@
         }
         
         return newMods;
-      });
-      
-      await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
+      })();
+
+      if (!await saveDisabledSet(nextDisabledMods)) return;
       selectedMods = new SvelteSet();
       
       const count = selectedModsArray.length;
@@ -1741,6 +1813,7 @@
 
 
   async function toggleVersionSelector(modName) {
+    if (modEditsBlocked) return;
     const isExpanded = $expandedInstalledMod === modName;
     
     if (isExpanded) {
@@ -1798,6 +1871,7 @@
   }
 
   async function switchToVersion(modName, projectId, versionId) {
+    if (modEditsBlocked) return;
     try {
       dispatch('updateMod', { modName, projectId, versionId });
       expandedInstalledMod.set(null);
@@ -1807,6 +1881,7 @@
   }
 
   function updateModToLatest(modName) {
+    if (modEditsBlocked) return;
     const updateInfo = $modsWithUpdates.get(modName);
     const modInfo = infoByFile.get(modName);
     
@@ -1850,11 +1925,15 @@
   }
 
   function showDeleteConfirmation(modName) {
+    if (modEditsBlocked) return;
     modToDelete = modName;
     confirmDeleteVisible = true;
   }
 
   async function confirmDeleteMod() {
+    if (modEditsBlocked) return;
+    const context = captureEditContext();
+    const targetMod = modToDelete;
     if (modToDelete) {
       if (serverRunning && $activeContentType === CONTENT_TYPES.MODS && !isClientOnlyMod(modToDelete)) {
         errorMessage.set('Stop the server to delete server or shared mods.');
@@ -1866,50 +1945,44 @@
       
       if ($activeContentType === CONTENT_TYPES.MODS) {
         const wasDisabled = $disabledMods.has(modToDelete);
-        deleteSuccess = await deleteMod(modToDelete, serverPath, true);
-  removeCachedVersion(modToDelete, CONTENT_TYPES.MODS);
+        deleteSuccess = await deleteMod(targetMod, context.serverPath, true, context);
+        if (!context.isCurrent()) return;
+        if (deleteSuccess) removeCachedVersion(targetMod, CONTENT_TYPES.MODS);
         
         if (deleteSuccess && wasDisabled) {
-          disabledMods.update(mods => {
-            const newMods = new SvelteSet(mods);
-            newMods.delete(modToDelete);
-            return newMods;
-          });
-          
-          await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
+          const next = new SvelteSet($disabledMods);
+          next.delete(targetMod);
+          if (!await saveDisabledSet(next)) return;
         }
       } else {
         // For shaders and resource packs, use the generic delete function
-        deleteSuccess = await deleteContent(modToDelete, serverPath, $activeContentType, true);
-  removeCachedVersion(modToDelete, $activeContentType);
+        deleteSuccess = await deleteContent(targetMod, context.serverPath, context.contentType, true, context);
+        if (!context.isCurrent()) return;
+        if (deleteSuccess) removeCachedVersion(targetMod, context.contentType);
       }
       
       modToDelete = null;
       confirmDeleteVisible = false;
-      dispatch('modRemoved');
+      if (deleteSuccess) dispatch('modRemoved');
     }
   }
 
 
 
   async function confirmToggleModStatus(modName, isDisabled) {
+    if (modEditsBlocked || disabledSaveInProgress) return;
     try {
       if (serverRunning && !isClientOnlyMod(modName)) {
         errorMessage.set('Stop the server to enable or disable server or shared mods.');
         return;
       }
-        disabledMods.update(mods => {
-          const newMods = new SvelteSet(mods);
+          const newMods = new SvelteSet($disabledMods);
         if (isDisabled) {
           newMods.delete(modName);
       } else {
           newMods.add(modName);
         }
-          return newMods;
-        });
-      
-      await safeInvoke('save-disabled-mods', serverPath, Array.from($disabledMods));
-      try { await checkDisabledModUpdates(serverPath); } catch {}
+      if (!await saveDisabledSet(newMods)) return;
       
       const action = isDisabled ? 'enabled' : 'disabled';
       successMessage.set(`Mod ${modName} ${action} successfully.`);
@@ -1920,6 +1993,8 @@
   }
 
   async function handleEnableAndUpdate(modFileName) {
+    if (modEditsBlocked) return;
+    const context = captureEditContext();
     const updatesMap = get(disabledModUpdates);
     const updateInfo = findDisabledUpdate(updatesMap, modFileName);
 
@@ -1932,22 +2007,22 @@
 
     try {
       const success = await enableAndUpdateMod(
-        serverPath,
+        context.serverPath,
         updateKey || modFileName,
         updateInfo.projectId,
         updateInfo.latestVersion,
-        updateInfo.latestVersionId
+        updateInfo.latestVersionId,
+        false,
+        context
       );
-
-      if (success) {
-        await loadMods(serverPath);
-      }
     } catch (error) {
-      errorMessage.set(`Failed to enable and update mod: ${error.message}`);
+      if (context.isCurrent()) errorMessage.set(`Failed to enable and update mod: ${error.message}`);
     }
   }
 
   async function handleDependencyDownload(dependency) {
+    if (modEditsBlocked) return;
+    const context = captureEditContext();
     if (!dependency.projectId) {
       errorMessage.set('Cannot download dependency: missing project information');
       return;
@@ -1956,6 +2031,7 @@
     try {
       successMessage.set(`Downloading dependency: ${dependency.name}...`);
       const dependencyContentType = await resolveDependencyContentType(dependency);
+      if (!context.isCurrent()) return;
       const dependencyMod = {
         id: dependency.projectId,
         name: dependency.name,
@@ -1968,6 +2044,7 @@
       });
 
       const versionId = await resolveDependencyVersionId(dependency);
+      if (!context.isCurrent()) return;
       if (versionId) {
         dependencyMod.selectedVersionId = versionId;
       }
@@ -1979,20 +2056,24 @@
         isDependency: true, // Flag to indicate this is a dependency installation
         contentType: dependencyContentType, // Pass the determined content type for dependencies
         onSuccess: async () => {
+          if (!context.isCurrent()) return;
           removeResolvedDependenciesFromCompatibilityResults([dependency.projectId]);
           successMessage.set(`Successfully installed dependency: ${dependency.name}`);
         },
         onError: (error) => {
+          if (!context.isCurrent()) return;
           errorMessage.set(`Failed to install dependency ${dependency.name}: ${error.message || error}`);
         }
       });
 
     } catch (error) {
-      errorMessage.set(`Failed to download dependency: ${error.message}`);
+      if (context.isCurrent()) errorMessage.set(`Failed to download dependency: ${error.message}`);
     }
   }
 
   async function handleBulkDependencyDownload(missingDependencies) {
+    if (modEditsBlocked) return;
+    const context = captureEditContext();
     if (bulkDownloadInProgress || missingDependencies.length === 0) {
       return;
     }
@@ -2021,12 +2102,14 @@
       
       // Download dependencies one by one to avoid overwhelming the system
       for (let i = 0; i < uniqueDependencies.length; i++) {
+        if (!context.isCurrent()) return;
         const dependency = uniqueDependencies[i];
         bulkDownloadProgress = i + 1;
         
         try {
           successMessage.set(`Installing dependency ${i + 1}/${uniqueDependencies.length}: ${dependency.name}...`);
           const dependencyContentType = await resolveDependencyContentType(dependency);
+          if (!context.isCurrent()) return;
           const dependencyMod = {
             id: dependency.projectId,
             name: dependency.name,
@@ -2039,6 +2122,7 @@
           });
 
           const versionId = await resolveDependencyVersionId(dependency);
+          if (!context.isCurrent()) return;
           if (versionId) {
             dependencyMod.selectedVersionId = versionId;
           }
@@ -2051,18 +2135,23 @@
               isDependency: true,
               contentType: dependencyContentType, // Pass the determined content type for dependencies
               onSuccess: async () => {
+                if (!context.isCurrent()) { resolve(); return; }
                 successfulInstalls.push(dependency.name);
                 removeResolvedDependenciesFromCompatibilityResults([dependency.projectId]);
                 resolve();
               },
               onError: (error) => {
+                if (!context.isCurrent()) { resolve(); return; }
                 failedInstalls.push({ name: dependency.name, error: error.message || error });
                 reject(error);
-              }
+              },
+              onStale: resolve
             });
           });
+          if (!context.isCurrent()) return;
           
         } catch (error) {
+          if (!context.isCurrent()) return;
           // Failed to install dependency
           if (!failedInstalls.some((failedInstall) => failedInstall.name === dependency.name)) {
             failedInstalls.push({ name: dependency.name, error: error.message || error });
@@ -2071,6 +2160,7 @@
       }
       
       bulkDownloadProgress = uniqueDependencies.length;
+      if (!context.isCurrent()) return;
       
       // Show final results
       if (failedInstalls.length === 0) {
@@ -2083,11 +2173,11 @@
         // Show details of failed installations
         const failedNames = failedInstalls.map(f => f.name).join(', ');
         setTimeout(() => {
-          errorMessage.set(`Failed dependencies: ${failedNames}`);
+          if (context.isCurrent()) errorMessage.set(`Failed dependencies: ${failedNames}`);
         }, 3000);
       }
     } catch (error) {
-      errorMessage.set(`Bulk dependency download failed: ${error.message || error}`);
+      if (context.isCurrent()) errorMessage.set(`Bulk dependency download failed: ${error.message || error}`);
     } finally {
       bulkDownloadInProgress = false;
       bulkDownloadProgress = 0;
@@ -2095,6 +2185,8 @@
   }
 
   async function applyCategoryChange(modName, newCategory, { reloadAfter = false } = {}) {
+    if (modEditsBlocked) return false;
+    const context = captureEditContext();
     const previousCategory = resolveModCategory(modName);
 
     if (!modName || !newCategory || previousCategory === newCategory) {
@@ -2104,45 +2196,59 @@
     const result = await safeInvoke('move-mod-file', {
       fileName: modName,
       newCategory,
-      serverPath
+      serverPath: context.serverPath
     });
+    if (!context.isCurrent()) return { changed: false };
 
     if (!result || !result.success) {
       throw new Error(result?.error || 'Unknown error occurred');
     }
 
-    const categorySaved = await updateModCategory(modName, newCategory);
+    // The legacy category helper commits before persistence and can roll back
+    // into a newer context. Keep this edit's commit behind its own predicate.
+    const nextCategories = new SvelteMap($modCategories);
+    nextCategories.set(modName, { required: true, ...nextCategories.get(modName), category: newCategory });
+    let categorySaved = false;
+    try {
+      const saved = await safeInvoke('save-mod-categories', Array.from(nextCategories, ([modId, info]) => ({ modId, ...info })));
+      categorySaved = saved !== false && saved?.success !== false && saved?.ok !== false;
+    } catch { /* retain prior category and roll back the move below */ }
+    if (!context.isCurrent()) return { changed: false };
     if (!categorySaved) {
       try {
         await safeInvoke('move-mod-file', {
           fileName: modName,
           newCategory: previousCategory,
-          serverPath
+          serverPath: context.serverPath
         });
       } catch {
         // Ignore rollback failures; a full reload below will surface actual disk state.
       }
 
-      await loadModCategories();
-      await loadMods(serverPath);
+      if (!context.isCurrent()) return { changed: false };
+      await loadMods(context.serverPath, context);
+      if (!context.isCurrent()) return { changed: false };
       throw new Error('Failed to save mod category');
     }
 
-    if (reloadAfter) {
-      await loadMods(serverPath);
-    }
+    modCategories.set(nextCategories);
+    if (reloadAfter) await loadMods(context.serverPath, context);
+    if (!context.isCurrent()) return { changed: false };
 
     return { changed: true };
   }
 
   async function handleCategoryChange(modName, event) {
+    if (modEditsBlocked) return;
+    const context = captureEditContext();
     try {
       const newCategory = event.target.value;
-      await applyCategoryChange(modName, newCategory);
+      const result = await applyCategoryChange(modName, newCategory);
+      if (!context.isCurrent() || !result?.changed) return;
       successMessage.set(`Changed ${modName} to "${newCategory}"`);
-      setTimeout(() => successMessage.set(''), 3000);
+      setTimeout(() => { if (context.isCurrent()) successMessage.set(''); }, 3000);
     } catch (err) {
-      errorMessage.set(`Failed to update mod category: ${err.message}`);
+      if (context.isCurrent()) errorMessage.set(`Failed to update mod category: ${err.message}`);
     }
   }
 
@@ -2158,6 +2264,8 @@
   }
 
   async function handleApplySuggestedLocations() {
+    if (modEditsBlocked) return;
+    const context = captureEditContext();
     if (applyingSuggestedLocations || suggestedLocationAssignments.length === 0) {
       return;
     }
@@ -2169,21 +2277,24 @@
 
     try {
       for (const assignment of assignments) {
+        if (!context.isCurrent()) return;
         try {
-          await applyCategoryChange(assignment.modName, assignment.category, { reloadAfter: false });
-          appliedMods.push(assignment.modName);
+          const result = await applyCategoryChange(assignment.modName, assignment.category, { reloadAfter: false });
+          if (!context.isCurrent()) return;
+          if (result?.changed) appliedMods.push(assignment.modName);
         } catch (error) {
           failedMods.push(`${assignment.modName} (${error.message})`);
         }
       }
 
       if (appliedMods.length > 0) {
-        await loadMods(serverPath);
+        await loadMods(context.serverPath, context);
       }
+      if (!context.isCurrent()) return;
 
       if (appliedMods.length > 0) {
         successMessage.set(`Filled ${appliedMods.length} empty location${appliedMods.length === 1 ? '' : 's'} from suggestions.`);
-        setTimeout(() => successMessage.set(''), 3000);
+        setTimeout(() => { if (context.isCurrent()) successMessage.set(''); }, 3000);
       }
 
       if (failedMods.length > 0) {
@@ -2208,17 +2319,23 @@
   onMount(() => {
     // Add global keyboard listener for search shortcut
     document.addEventListener('keydown', handleGlobalKeyDown);
+    const initializationPath = serverPath;
+    const initializationGeneration = modpackStateGeneration;
+    const currentInitialization = () => componentActive && initializationPath === serverPath &&
+      initializationGeneration === modpackStateGeneration;
     
     // Load mod categories and disabled mods from storage on startup
     const initAsync = async () => {
     try {
       await loadModCategories();
+      if (!currentInitialization()) return;
       
       // Load disabled mods from storage
       if (serverPath) {
           autoUpdateChecksEnabled.loadForPath(serverPath);
           try {
-            const disabledModsList = await safeInvoke('get-disabled-mods', serverPath);
+            const disabledModsList = await safeInvoke('get-disabled-mods', initializationPath);
+            if (!currentInitialization()) return;
             if (Array.isArray(disabledModsList)) {
               disabledMods.set(new SvelteSet(disabledModsList));
               if (autoUpdateChecksEnabled.getForPath(serverPath)) {
@@ -2375,6 +2492,7 @@
       
       <!-- Add content button -->
       <button class="add-mods-btn-outline" 
+              disabled={modEditsBlocked}
               class:drag-highlight={isDragover}
               on:click={toggleDropZone} 
               on:dragenter={handleAddButtonDragEnter}
@@ -2407,8 +2525,8 @@
   {#if updateCount > 0}
     <button class="primary sm"
             on:click={updateAllMods}
-            disabled={updateAllInProgress || updateAllBlockedByServer}
-            title={updateAllBlockedByServer ? 'Stop the server to update server or shared mods.' : 'Update all outdated mods'}>
+            disabled={modEditsBlocked || updateAllInProgress || updateAllBlockedByServer}
+            title={modEditLockTitle || (updateAllBlockedByServer ? 'Stop the server to update server or shared mods.' : 'Update all outdated mods')}>
       {#if updateAllBlockedByServer}🔒{/if} ⬆️ {updateAllInProgress ? 'Updating...' : `Update All (${updateCount})`}
     </button>
   {/if}
@@ -2418,7 +2536,7 @@
     {@const enabledSelected = selectedModsArray.filter(mod => !$disabledMods.has(mod))}
     {@const disabledSelected = selectedModsArray.filter(mod => $disabledMods.has(mod))}
     {@const selectionHasNonClientOnlyMods = $activeContentType === CONTENT_TYPES.MODS && selectionHasNonClientOnly(selectedModsArray)}
-    {@const bulkActionBlockedByServer = serverRunning && ($activeContentType !== CONTENT_TYPES.MODS || selectionHasNonClientOnlyMods)}
+    {@const bulkActionBlockedByServer = modEditsBlocked || disabledSaveInProgress || (serverRunning && ($activeContentType !== CONTENT_TYPES.MODS || selectionHasNonClientOnlyMods))}
     {@const buttonText = disabledSelected.length > 0 && enabledSelected.length === 0 ? 'Enable' : 
                         enabledSelected.length > 0 && disabledSelected.length === 0 ? 'Disable' : 
                         'Toggle'}
@@ -2506,8 +2624,8 @@
           <button 
             class="bulk-download-btn"
             on:click={() => handleBulkDependencyDownload(allMissingDependencies)}
-            disabled={serverRunning || bulkDownloadInProgress}
-            title={serverRunning ? 'Server must be stopped to install dependencies' : `Download all ${uniqueMissingDependencies.length} missing dependencies`}
+            disabled={modEditsBlocked || serverRunning || bulkDownloadInProgress}
+            title={modEditLockTitle || (serverRunning ? 'Server must be stopped to install dependencies' : `Download all ${uniqueMissingDependencies.length} missing dependencies`)}
           >
             {#if serverRunning}🔒{:else if bulkDownloadInProgress}⏳{:else}📦{/if} 
             {bulkDownloadInProgress ? `Downloading... (${bulkDownloadProgress}/${uniqueMissingDependencies.length})` : `Download All Dependencies (${uniqueMissingDependencies.length})`}
@@ -2540,8 +2658,8 @@
                 <button 
                   class="dependency-download-btn"
                   on:click={() => handleDependencyDownload(dependencyGroup.dependency)}
-                  disabled={serverRunning}
-                  title={serverRunning ? 'Server must be stopped to install dependencies' : `Download ${dependencyGroup.dependency.name}`}
+                  disabled={modEditsBlocked || serverRunning}
+                  title={modEditLockTitle || (serverRunning ? 'Server must be stopped to install dependencies' : `Download ${dependencyGroup.dependency.name}`)}
                 >
                   {#if serverRunning}🔒{/if} Download
                 </button>
@@ -2584,7 +2702,7 @@
         <div class="drop-icon">📦</div>
         <p>Drag and drop .jar files here</p>
         <p class="drop-or">or</p>
-        <button class="browse-btn" on:click={handleBrowseFiles}>Browse Files</button>
+        <button class="browse-btn" disabled={modEditsBlocked} on:click={handleBrowseFiles}>Browse Files</button>
       </div>
       <button class="collapse-btn" on:click={toggleDropZone} title="Collapse drop zone">−</button>
     </div>
@@ -2622,7 +2740,7 @@
               title={suggestedLocationAssignments.length
                 ? `Fill ${suggestedLocationAssignments.length} unassigned mod location${suggestedLocationAssignments.length === 1 ? '' : 's'} with the suggested value`
                 : 'No unassigned mods with suggestions right now'}
-              disabled={applyingSuggestedLocations || suggestedLocationAssignments.length === 0}
+              disabled={modEditsBlocked || applyingSuggestedLocations || suggestedLocationAssignments.length === 0}
               on:click={handleApplySuggestedLocations}>
               {#if applyingSuggestedLocations}
                 Applying...
@@ -2656,9 +2774,9 @@
         {@const recommendedLocation = recommendedLocationByFile.get(mod)}
         {@const isDisabled = $disabledMods.has(mod)}
         {@const canUpdateWhileRunning = location === 'client-only'}
-        {@const updateBlockedByServer = serverRunning && !canUpdateWhileRunning}
-        {@const manageBlockedByServer = serverRunning && !canUpdateWhileRunning}
-        {@const locationSelectionDisabled = isDisabled || (serverRunning && location !== UNASSIGNED_CATEGORY && location !== 'client-only')}
+        {@const updateBlockedByServer = modEditsBlocked || (serverRunning && !canUpdateWhileRunning)}
+        {@const manageBlockedByServer = modEditsBlocked || disabledSaveInProgress || (serverRunning && !canUpdateWhileRunning)}
+        {@const locationSelectionDisabled = modEditsBlocked || isDisabled || (serverRunning && location !== UNASSIGNED_CATEGORY && location !== 'client-only')}
         {@const borderColor = locColor[location] || '#2c82ff'}
         
         <tr class:selected={selectedMods.has(mod)} 
@@ -2692,7 +2810,7 @@
         <td>
           <select
             class={`loc-select loc-select--${location}`}
-            title={getLocationSelectTitle(recommendedLocation)}
+            title={modEditLockTitle || getLocationSelectTitle(recommendedLocation)}
             disabled={locationSelectionDisabled}
             value={location}
             on:change={(e) => handleCategoryChange(mod, e)}>
@@ -2828,11 +2946,10 @@
                 <button class="tag new clickable upd-btn"
                         disabled={updateBlockedByServer}
                         on:click={() => handleEnableAndUpdate(mod)}
-                        title={updateBlockedByServer ? 'Stop the server to enable and update server or shared mods.' : `Enable and update to ${disabledUpdateInfo.latestVersion}`}>
+                        title={modEditLockTitle || (updateBlockedByServer ? 'Stop the server to enable and update server or shared mods.' : `Enable and update to ${disabledUpdateInfo.latestVersion}`)}>
                   {#if updateBlockedByServer}🔒{/if} ↑ <span class="ver-label">{disabledUpdateInfo.latestVersion}</span>
                 </button>
                 <button class="ghost sm ignore-btn"
-                        disabled={updateBlockedByServer}
                         aria-label="Ignore this version"
                         title="Ignore this version (won't show until a newer one exists)"
                         on:click={() => {
@@ -2861,11 +2978,10 @@
               <button class="tag new clickable upd-btn"
                       disabled={updateBlockedByServer}
                       on:click={() => updateModToLatest(mod)}
-                      title={updateBlockedByServer ? 'Stop the server to update server or shared mods.' : `Update to ${updateInfo.versionNumber}`}>
+                      title={modEditLockTitle || (updateBlockedByServer ? 'Stop the server to update server or shared mods.' : `Update to ${updateInfo.versionNumber}`)}>
                 {#if updateBlockedByServer}🔒{/if} ↑ <span class="ver-label">{updateInfo.versionNumber}</span>
               </button>
               <button class="ghost sm ignore-btn"
-                      disabled={updateBlockedByServer}
                       aria-label="Ignore this version"
                       title="Ignore this version (won't show until a newer one exists)"
                       on:click={() => {
@@ -2894,7 +3010,7 @@
         <td class="act">
           <button class="danger sm"
                   disabled={manageBlockedByServer}
-                  title={manageBlockedByServer ? 'Stop the server to delete server or shared mods' : 'Delete mod'}
+                  title={modEditLockTitle || (manageBlockedByServer ? 'Stop the server to delete server or shared mods' : 'Delete mod')}
                   on:click={() => showDeleteConfirmation(mod)}>
             {#if manageBlockedByServer}🔒{/if} 🗑
           </button>
@@ -2902,20 +3018,20 @@
             {#if isDisabled}
               <button class="primary sm"
                       disabled={manageBlockedByServer}
-                      title={manageBlockedByServer ? 'Stop the server to enable server or shared mods' : 'Enable mod'}
+                      title={modEditLockTitle || (manageBlockedByServer ? 'Stop the server to enable server or shared mods' : 'Enable mod')}
                       on:click={() => confirmToggleModStatus(mod, true)}>
                 {#if manageBlockedByServer}🔒{/if} Enable
               </button>
             {:else}
           <button class="warn sm"
                   disabled={manageBlockedByServer}
-                  title={manageBlockedByServer ? 'Stop the server to disable server or shared mods' : 'Disable mod'}
+                  title={modEditLockTitle || (manageBlockedByServer ? 'Stop the server to disable server or shared mods' : 'Disable mod')}
                       on:click={() => confirmToggleModStatus(mod, false)}>
                 {#if manageBlockedByServer}🔒{/if} Disable
           </button>
               
               <button class="ghost sm" 
-                      title="Change version" 
+                      title={modEditLockTitle || 'Change version'}
                       disabled={manageBlockedByServer}
                       on:click={() => toggleVersionSelector(mod)}>
                 {#if manageBlockedByServer}🔒{/if} {$expandedInstalledMod === mod ? '▲' : '▼'}
@@ -2943,7 +3059,7 @@
                   {@const isCurrentVersion = modInfo && modInfo.versionId === version.id}
                   <button
                     class:sel={isCurrentVersion}
-                    disabled={isCurrentVersion}
+                    disabled={modEditsBlocked || isCurrentVersion}
                     on:click={() => switchToVersion(mod, projectId, version.id)}>
                     {version.versionNumber || version.name}
                     {#if isCurrentVersion} (current){/if}

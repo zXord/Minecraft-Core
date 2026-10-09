@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -144,6 +145,57 @@ class TrackingSignal {
     for (const listener of [...this.listeners]) listener();
   }
 }
+
+test('persistent failures retain bounded, distinguishable diagnostics without private child data', async (t) => {
+  const { runtimeDiagnosticFor } = require('../../electron/services/runtime-diagnostic.cjs');
+  const cases = [
+    ['cold timeout', { responseFor: () => null }, false, 'reparse-startup', 'timeout', 1],
+    ['warm timeout', { responseFor: request => request.id === 1 ? { id: 1, version: 1, isReparsePoint: false } : null }, true, 'reparse-request', 'timeout', 1],
+    ['native io', { exitFor: () => ({ code: 66 }) }, false, 'reparse-native', 'io', 2],
+    ['native invalid', { exitFor: () => ({ code: 67 }) }, false, 'reparse-native', 'invalid-input', 1],
+    ['native open io', { exitFor: () => ({ code: 68 }) }, false, 'reparse-native-open', 'io', 2],
+    ['native identity io', { exitFor: () => ({ code: 69 }) }, false, 'reparse-native-identity', 'io', 2],
+    ['native finalpath io', { exitFor: () => ({ code: 70 }) }, false, 'reparse-native-finalpath', 'io', 2],
+    ['native tag invalid', { exitFor: () => ({ code: 71 }) }, false, 'reparse-native-tag', 'invalid-input', 1],
+    ['native path redirected', { exitFor: () => ({ code: 72 }) }, false, 'reparse-native-path', 'invalid-input', 1],
+    ['native identity changed', { exitFor: () => ({ code: 73 }) }, false, 'reparse-native-identity', 'identity-changed', 1],
+    ['unexpected exit', { exitFor: () => ({ code: 999 }) }, false, 'reparse-exit', 'dependency', 1],
+    ['malformed protocol', { responseFor: () => 'private-secret C:\\private\\secret.jar' }, false, 'reparse-protocol', 'protocol', 1]
+  ];
+  for (const [name, behavior, warm, stage, reason, attempts] of cases) await t.test(name, async () => {
+    const harness = persistentSpawnHarness(behavior);
+    const inspector = new WindowsReparseInspector({ platform: 'win32', spawnProcess: harness.spawnProcess,
+      persistent: true, timeoutMs: 10, startupTimeoutMs: 10 });
+    t.after(() => inspector.close());
+    if (warm) assert.equal(await inspector.isReparsePoint('C:\\private\\warm.jar'), false);
+    await assert.rejects(inspector.isReparsePoint('C:\\private\\secret.jar'), error => {
+      assert.equal(error.code, 'REPARSE_INSPECTION_FAILED');
+      assert.deepEqual(runtimeDiagnosticFor(error, 'finalizer-fresh-record'), { stage, reason });
+      assert.doesNotMatch(JSON.stringify(error), /private|secret|999/);
+      return true;
+    });
+    assert.equal(harness.calls.length, attempts);
+  });
+});
+
+test('persistent spawn and pipe errors expose only their fixed diagnostic categories', async (t) => {
+  for (const mode of ['spawn', 'pipe']) await t.test(mode, async () => {
+    const harness = persistentSpawnHarness({ responseFor: () => null });
+    const inspector = new WindowsReparseInspector({ platform: 'win32', persistent: true,
+      spawnProcess(...args) {
+        if (mode === 'spawn') throw new Error('private-secret');
+        const child = harness.spawnProcess(...args);
+        setImmediate(() => child.stdin.emit('error', new Error('private-secret')));
+        return child;
+      } });
+    await assert.rejects(inspector.isReparsePoint('C:\\private\\secret.jar'), error => {
+      assert.deepEqual(error.runtimeDiagnostic, { stage: `reparse-${mode}`, reason: 'io' });
+      assert.doesNotMatch(JSON.stringify(error), /private|secret/);
+      return true;
+    });
+    inspector.close();
+  });
+});
 
 test('inspector sends the absolute path only as bounded UTF-8 JSON stdin to pinned PowerShell', async () => {
   const harness = spawnHarness({ stdout: '{"version":1,"isReparsePoint":true}' });
@@ -495,6 +547,19 @@ test('production Windows inspector permits a regular local file beyond legacy MA
   assert.equal(await inspector.isReparsePoint(regular), false);
 });
 
+test('production Windows probe transports a controlled unavailable-handle category without its path', { skip: process.platform !== 'win32' }, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-reparse-diagnostic-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const inspector = new WindowsReparseInspector();
+  t.after(() => inspector.close());
+  await assert.rejects(inspector.isReparsePoint(path.join(root, 'private-missing-file.jar')), error => {
+    assert.equal(error.code, 'REPARSE_INSPECTION_FAILED');
+    assert.deepEqual(error.runtimeDiagnostic, { stage: 'reparse-native-open', reason: 'io' });
+    assert.doesNotMatch(JSON.stringify(error), /private-missing|mc-reparse-diagnostic/);
+    return true;
+  });
+});
+
 test('production probe classifies only name-surrogate tags as redirecting reparses', () => {
   const source = require('node:fs').readFileSync(path.join(__dirname, '..', '..', 'electron', 'services', 'modpacks', 'local', 'windows-reparse-inspector.cjs'), 'utf8');
   assert.match(source, /FileAttributeTagInfo\s*=\s*9/);
@@ -504,4 +569,53 @@ test('production probe classifies only name-surrogate tags as redirecting repars
   assert.match(source, /afterTag\.FileAttributes\s*&\s*FileAttributeReparsePoint/);
   assert.doesNotMatch(source, /beforeTag\.FileAttributes\s*!=\s*afterTag\.FileAttributes/);
   assert.doesNotMatch(source, /FileAttributes\.ReparsePoint\)\s*!=\s*0\s*\}\s*$/m);
+});
+
+test('production native identity structure matches the Windows ABI and decodes identity sentinels', { skip: process.platform !== 'win32' }, async () => {
+  const harness = spawnHarness();
+  const inspector = new WindowsReparseInspector({ platform: 'win32', spawnProcess: harness.spawnProcess });
+  await inspector.isReparsePoint('C:\\temporary-layout-fixture');
+  const args = harness.calls[0].args;
+  const script = Buffer.from(args[args.indexOf('-EncodedCommand') + 1], 'base64').toString('utf16le');
+  // Compile the actual source sent by the production inspector, not a test-side structure.
+  const source = script.match(/\$probeSource = @'\r?\n([\s\S]*?)\r?\n'@/)[1];
+  const layoutScript = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$source = @'
+${source}
+'@
+Add-Type -TypeDefinition $source -Language CSharp
+$type = [MinecraftCoreReparseProbe].GetNestedType('ByHandleFileInformation', [Reflection.BindingFlags]::NonPublic)
+$offsets = [ordered]@{}
+foreach ($field in $type.GetFields([Reflection.BindingFlags]'Instance,NonPublic')) {
+  $offsets[$field.Name] = [int][Runtime.InteropServices.Marshal]::OffsetOf($type, $field.Name)
+}
+$bytes = New-Object byte[] 52
+[BitConverter]::GetBytes([uint32]305419896).CopyTo($bytes, 28)
+[BitConverter]::GetBytes([uint32]591751049).CopyTo($bytes, 44)
+[BitConverter]::GetBytes([uint32]878082202).CopyTo($bytes, 48)
+$memory = [Runtime.InteropServices.Marshal]::AllocHGlobal(56)
+try {
+  # Four trailing zero bytes keep the known incorrect 56-byte baseline safe to decode.
+  [Runtime.InteropServices.Marshal]::WriteInt32($memory, 52, 0)
+  [Runtime.InteropServices.Marshal]::Copy($bytes, 0, $memory, 52)
+  $marshal = [Runtime.InteropServices.Marshal]
+  $decode = $marshal.GetMethod('PtrToStructure', [type[]]@([IntPtr], [Type]))
+  $value = $decode.Invoke($null, [object[]]@($memory, $type))
+  $decoded = @{}
+  foreach ($name in @('VolumeSerialNumber','FileIndexHigh','FileIndexLow')) {
+    $decoded[$name] = $type.GetField($name, [Reflection.BindingFlags]'Instance,NonPublic').GetValue($value)
+  }
+  $size = $marshal.GetMethod('SizeOf', [type[]]@([Type])).Invoke($null, [object[]]@($type))
+  @{ size = $size; offsets = $offsets; decoded = $decoded } | ConvertTo-Json -Compress
+} finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($memory) }
+`;
+  const output = execFileSync(harness.calls[0].executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+    Buffer.from(layoutScript, 'utf16le').toString('base64')], { windowsHide: true, timeout: 30_000, encoding: 'utf8' });
+  const actual = JSON.parse(output.trim());
+  assert.equal(actual.size, 52);
+  assert.deepEqual(actual.offsets, { FileAttributes: 0, CreationTime: 4, LastAccessTime: 12, LastWriteTime: 20,
+    VolumeSerialNumber: 28, FileSizeHigh: 32, FileSizeLow: 36, NumberOfLinks: 40, FileIndexHigh: 44, FileIndexLow: 48 });
+  assert.deepEqual(actual.decoded, { VolumeSerialNumber: 305419896, FileIndexHigh: 591751049, FileIndexLow: 878082202 });
 });

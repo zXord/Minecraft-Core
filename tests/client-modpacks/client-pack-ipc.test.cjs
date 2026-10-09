@@ -17,6 +17,18 @@ function fixture(overrides={}) {
   const api=create({clientPackService,companionService}); const owner=sender(1),other=sender(2);
   return {...api,owner,other,call:(name,input,from=owner)=>api.handlers[`client-packs:${name}`]({sender:from},input)};
 }
+
+test('IPC returns bounded trusted server drift refusal without unmanaged success', async () => {
+  const message = "The server's managed mod files differ from the installed pack. Use Modpack Verify and Repair before installing or launching its matching client pack.";
+  const fail = async () => { throw new ModpackError('CLIENT_PACK_SERVER_CHANGED', message, { details: { path: 'C:\\private', token: 'secret' } }); };
+  const f = fixture({ client: { getState: fail }, companion: { getStatus: fail } });
+  for (const [name, input] of [['get-state', { clientId: 'client-one' }], ['get-companion', { serverId: 'server-one' }]]) {
+    const result = await f.call(name, input);
+    assert.equal(result.ok, false); assert.equal(result.error.code, 'CLIENT_PACK_SERVER_CHANGED');
+    assert.deepEqual(result.error.details, {}); assert.equal(result.error.message, message);
+  }
+  await f.dispose();
+});
 test('registered ID request succeeds but renderer filesystem and runtime authority never reaches services',async()=>{
   let calls=0; const f=fixture({client:{getState:async({clientId})=>{calls++;return{clientId,status:'unmanaged',verified:false,descriptor:null};}}});
   assert.deepEqual(await f.call('get-state',{clientId:'client-qa'}),{ok:true,value:{clientId:'client-qa',status:'unmanaged',verified:false,descriptor:null}});

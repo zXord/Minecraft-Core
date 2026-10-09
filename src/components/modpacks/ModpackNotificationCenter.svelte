@@ -129,7 +129,7 @@
 {/if}
 
 <style>
-  .notification-host { position: relative; z-index: 950; text-align: left; }
+  .notification-host { position: relative; z-index: 1; text-align: left; }
   .notification-button { position: relative; width: 42px; height: 42px; display: grid; place-items: center; padding: 0; border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 999px; background: rgba(25, 28, 38, 0.96); color: white; box-shadow: 0 8px 26px rgba(0, 0, 0, 0.3); }
   .contextual .notification-button { width: auto; grid-auto-flow: column; gap: 0.45rem; padding: 0 0.8rem; border-radius: 8px; box-shadow: none; }
   .notification-label { font-size: 0.82rem; font-weight: 650; }

@@ -4,7 +4,7 @@
 
 The user approved matching client-pack support on 2026-10-08 after native testing proved that a GitHub ServerPack creates a working server but cannot prepare its client. Success means a person can choose the matching client pack in Minecraft Core, connect a client instance, install all required client content and exact runtime, and launch/join without manually copying files. Existing instances must remain safe. The user explicitly delegates design/plan review and implementation; no further plan-approval pause is required.
 
-Native acceptance uses only the disposable profile `minecraft-core-native-qa-20261008-a1` and disposable server/client folders. Never use the user's existing Server or Client folders. The exact acceptance pack is TerraFirmaGreg-Team/Modpack-Modern 0.13.4, ServerPack plus the official same-release MRPACK client asset.
+Native acceptance uses only disposable profiles and server/client folders. The original `minecraft-core-native-qa-20261008-a1` interrupted operation is preserved; active acceptance now uses the separate `minecraft-core-native-qa-20261008-control-b1` profile and explicitly named b1 QA folders recorded in the native evidence ledger. Never use the user's existing Server or Client folders. The exact acceptance pack is TerraFirmaGreg-Team/Modpack-Modern 0.13.4, ServerPack plus the official same-release MRPACK client asset.
 
 ## Approach
 
@@ -55,5 +55,15 @@ Acceptance includes TFG 0.13.4 install, stop/restart, 0.13.5 upgrade and 0.13.4 
 Reference: [official MRPACK format](https://support.modrinth.com/en/articles/8802351-modrinth-modpack-format-mrpack), inspected 2026-10-08. Its client environment and override layering inform the projection; application ownership/recovery rules are Minecraft Core's policy.
 
 ## Self-review
+
+### Native-test addendum: managed server mod edits
+
+The normal UI test exposed two independent defects: the production companion adapter consumed a repository envelope as a flat state, and ordinary JAR edits left the original companion advertised. Correct the adapter without changing persisted contracts. Active managed servers must reject loose JAR writers in main, under the existing mutation reservation, and mirror that restriction in Mods. Settings, worlds, auth, metadata and ignored-update preferences remain usable. Detach is an explicit reviewed choice that keeps files and enables individual mod management. This intentionally also restricts editing user-added JARs while managed; it does not take ownership of or delete those files.
+
+Companion availability must separately establish that expected replaceable pack-owned mod JARs are intact. Config rewrites and preserved user files are not part of that JAR check. Canonical pairing fingerprints remain unchanged so repair/rollback can reuse the exact source pairing. Missing, disabled, unsafe or changed expected JARs produce an actionable unavailable error, never an unmanaged null fallback or a ready claim. Status checks may reuse hashes only after revalidating root, manifest and each file's identity including change time; new or changed files are hashed asynchronously with stable pre/open/post evidence. Cache entries are bounded, process-local and discarded on failure/state change; watchers alone are not proof. Pair acceptance requires a fresh hash check under its existing reservation. This is not a claim of adversarial continuous integrity, automatic custom client-pack creation or compatibility of extra user JARs.
+
+Do not add another full-tree check or a new server-start prerequisite. Existing runtime and lifecycle health checks retain their authority; this addendum changes companion readiness and loose mod edits, not ordinary server startup. A server with external JAR drift cannot advertise a matching client; the owner can use Verify/Repair or explicit Detach. Native tests must exercise real UI refusal/restoration and companion behavior separately from controlled tests.
+
+Large Verify results retain exact total counts and health/Repair availability, but expose a byte/count-bounded display list with clear shown-versus-total guidance. Generic job size/redaction limits and internal verification results stay unchanged. Normal config rewrites are reported as differences, not hidden or treated as proof of failed installation.
 
 The companion registry does not alter server journal schemas. Main-owned identity is authoritative across UI, management API and launch. Client candidate publication and live-process proof are inseparable release requirements, not optional hardening. Format scope is explicitly MRPACK v1; no promise of arbitrary client ZIP compatibility. All original server feature verification remains outstanding until recorded with fresh evidence.

@@ -1399,6 +1399,124 @@ test('main lifecycle does not require EULA acceptance for non-runtime management
   }
 });
 
+for (const cancelledAttempt of [false, true]) {
+  test(`failure settlement publishes ${cancelledAttempt ? 'cancellation' : 'failure'} progress before abandonment settles`, async () => {
+    // Removing the settlement update must leave stale boot/file work visible here.
+    const validation = deferred();
+    validation.entered = deferred();
+    const abandonment = deferred();
+    abandonment.entered = deferred();
+    const original = new ModpackError('HEALTH_CHECK_FAILED', 'candidate boot failed');
+    const fixture = mutationFixture('update', {
+      failureAt: 'validateCandidate', failureErrors: { validateCandidate: original },
+      gates: { validateCandidate: validation, abandonCandidate: abandonment }
+    });
+    const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+    await validation.entered.promise;
+    const record = fixture.operationStore.records.get(queued.jobId);
+    record.progress = { percent: 57, message: 'Boot-testing the candidate on loopback', currentItem: 'old.jar',
+      completedItems: 2, totalItems: 4, processedBytes: 100, totalBytes: 200 };
+    if (cancelledAttempt) await fixture.service.cancelJob(queued.jobId);
+    validation.resolve();
+    await abandonment.entered.promise;
+    try {
+      const current = await fixture.service.getJob(queued.jobId);
+      assert.equal(current.phase, cancelledAttempt ? 'cancelling' : 'validating-candidate');
+      assert.deepEqual(current.progress, { percent: 57,
+        message: cancelledAttempt ? 'Cancelling; verifying safe cleanup of the candidate.'
+          : 'The attempt failed; verifying safe cleanup of the candidate.', currentItem: null });
+      assert.equal(current.outcome, null);
+      assert.deepEqual(fixture.released, []);
+    } finally { abandonment.resolve(); }
+    const terminal = await waitForPhase(fixture.operationStore, queued.jobId, cancelledAttempt ? 'cancelled' : 'failed');
+    assert.equal(terminal.outcome.errorCode, 'HEALTH_CHECK_FAILED');
+    assert.equal(terminal.outcome.cleanupPending, false);
+    assert.deepEqual(fixture.released, ['job-one']);
+    assert.equal(fixture.calls.some(([name]) => name === 'restorePriorState'), true);
+  });
+}
+
+test('failure settlement progress survives an OperationStore persistence roundtrip', { timeout: 10000 }, async t => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const { OperationStore } = require('../../electron/services/modpack-lifecycle/operation-store.cjs');
+  const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
+  const userDataPath = fs.mkdtempSync(path.join(os.tmpdir(), 'failure-cleanup-progress-'));
+  t.after(() => fs.rmSync(userDataPath, { recursive: true, force: true }));
+  const durableFs = createDurableFs({ allowedRoots: [userDataPath], durableClient: {
+    moveWriteThrough: fs.renameSync, replaceFileWriteThrough: fs.renameSync,
+    async moveWriteThroughAsync(a, b) { await fs.promises.rename(a, b); },
+    async replaceFileWriteThroughAsync(a, b) { await fs.promises.rename(a, b); },
+    flushDirectory() {}, async flushDirectoryAsync() {}
+  } });
+  const options = { userDataPath, durableFs };
+  const store = new OperationStore(options);
+  await store.initialize();
+  const abandonment = deferred(); abandonment.entered = deferred();
+  const fixture = mutationFixture('update', { failureAt: 'validateCandidate',
+    failureErrors: { validateCandidate: new ModpackError('HEALTH_CHECK_FAILED', 'candidate failed') },
+    gates: { abandonCandidate: abandonment } });
+  fixture.service.operationStore = store;
+  const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+  await abandonment.entered.promise;
+  try {
+    const reopened = new OperationStore(options); await reopened.initialize();
+    const current = await reopened.get(queued.jobId);
+    assert.equal(current.phase, 'validating-candidate');
+    assert.deepEqual(current.progress, { percent: 50,
+      message: 'The attempt failed; verifying safe cleanup of the candidate.', currentItem: null });
+  } finally { abandonment.resolve(); }
+  await fixture.service.activeOperations.get(queued.jobId).settled;
+  const terminal = await store.get(queued.jobId);
+  assert.equal(terminal.phase, 'failed'); assert.equal(terminal.outcome.errorCode, 'HEALTH_CHECK_FAILED');
+  assert.equal(terminal.outcome.cleanupPending, false);
+});
+
+for (const publicationMode of ['reject', 'missing', 'cancel-race', 'cancel-error', 'absent-progress', 'get-reject']) {
+  test(`failure settlement remains authoritative with ${publicationMode} progress publication`, async () => {
+    const fixture = mutationFixture('update', { failureAt: 'validateCandidate', failureErrors: {
+      validateCandidate: new ModpackError(publicationMode === 'cancel-error' ? 'CANCELLED' : 'HEALTH_CHECK_FAILED', 'original failure')
+    } });
+    const validate = fixture.service.mutationRuntime.validateCandidate;
+    fixture.service.mutationRuntime.validateCandidate = async context => {
+      if (publicationMode === 'absent-progress') fixture.operationStore.records.get(context.jobId).progress = null;
+      if (publicationMode === 'get-reject') {
+        const get = fixture.operationStore.get.bind(fixture.operationStore);
+        let reads = 0;
+        fixture.operationStore.get = async jobId => {
+          if (++reads === 2) throw new Error('optional fresh read rejected');
+          return get(jobId);
+        };
+      }
+      return validate(context);
+    };
+    const update = fixture.operationStore.updateProgress.bind(fixture.operationStore);
+    let attempts = 0;
+    if (publicationMode === 'missing') fixture.operationStore.updateProgress = undefined;
+    else fixture.operationStore.updateProgress = async (jobId, request) => {
+      if (request.progress.message.includes('verifying safe cleanup')) {
+        attempts++;
+        if (publicationMode === 'reject') throw new ModpackError('COMMIT_FAILED', 'optional progress rejected');
+        // Simulate a persisted cancellation winning the get/update CAS gap.
+        // Public cancelJob intentionally waits once this service is settling.
+        if (publicationMode === 'cancel-race') await fixture.operationStore.requestCancellation(jobId);
+      }
+      return update(jobId, request);
+    };
+    const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+    await fixture.service.activeOperations.get(queued.jobId).settled;
+    const terminal = await fixture.operationStore.get(queued.jobId);
+    assert.equal(terminal.phase, ['cancel-race', 'cancel-error'].includes(publicationMode) ? 'cancelled' : 'failed');
+    if (publicationMode !== 'missing') assert.equal(attempts, publicationMode === 'get-reject' ? 0 : 1);
+    if (publicationMode === 'absent-progress') assert.equal(terminal.progress.percent, 0);
+    if (publicationMode === 'cancel-error') assert.equal(terminal.progress.message, 'Cancelling; verifying safe cleanup of the candidate.');
+    assert.equal(terminal.outcome.errorCode, publicationMode === 'cancel-error' ? 'CANCELLED' : 'HEALTH_CHECK_FAILED');
+    assert.equal(terminal.outcome.cleanupPending, false);
+    assert.equal(fixture.calls.filter(([name]) => name === 'abandonCandidate').length, 1);
+    assert.equal(fixture.calls.some(([name]) => name === 'restorePriorState'), true);
+    assert.deepEqual(fixture.released, ['job-one']);
+  });
+}
+
 test('partial candidate cleanup failure is persisted as cleanup pending', async () => {
   const fixture = mutationFixture('rollback-restore-point', { failureAt: 'buildCandidate' });
   fixture.service.mutationRuntime.abandonCandidate = async context => {
@@ -1434,6 +1552,78 @@ test('unproven runtime shutdown reports recovery with the original error and ret
   assert.equal(fixture.calls.filter(([name]) => name === 'quarantine').length, 1);
   assert.equal(fixture.calls.some(([name]) => name === 'restorePriorState'), false);
   assert.deepEqual(fixture.released, []);
+});
+
+test('exact snapshot diagnostic roundtrip uses production lifecycle, durable store and IPC with closed data only', { timeout: 10000 }, async t => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const { OperationStore } = require('../../electron/services/modpack-lifecycle/operation-store.cjs');
+  const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
+  const { normalizeRuntimeDiagnostic } = require('../../electron/services/runtime-diagnostic.cjs');
+  const userDataPath = fs.mkdtempSync(path.join(os.tmpdir(), 'exact-snapshot-diagnostic-transport-'));
+  t.after(() => fs.rmSync(userDataPath, { recursive: true, force: true }));
+  const durableFs = createDurableFs({ allowedRoots: [userDataPath], durableClient: {
+    moveWriteThrough: fs.renameSync, replaceFileWriteThrough: fs.renameSync,
+    async moveWriteThroughAsync(a, b) { await fs.promises.rename(a, b); },
+    async replaceFileWriteThroughAsync(a, b) { await fs.promises.rename(a, b); },
+    flushDirectory() {}, async flushDirectoryAsync() {}
+  } });
+  const options = { userDataPath, durableFs };
+  const store = new OperationStore(options);
+  await store.initialize();
+  const diagnostic = { stage: 'exact-snapshot-final-identity', reason: 'identity-changed', changedIdentityFields: 32 };
+  let accessorReads = 0;
+  const accessor = { stage: diagnostic.stage, get reason() { accessorReads++; return 'identity-changed'; } };
+  const malformed = [
+    { ...diagnostic, stage: 'unknown-snapshot-location' },
+    { ...diagnostic, reason: 'C:\\private\\reason' },
+    { ...diagnostic, path: 'C:\\private\\properties' },
+    { ...diagnostic, bytes: 'private-bytes' },
+    { ...diagnostic, sha256: 'private-hash' },
+    { ...diagnostic, value: 'private-stat-value' },
+    { ...diagnostic, stack: 'private-stack' },
+    { ...diagnostic, message: 'private-message' }, accessor
+  ];
+  for (const bad of malformed) assert.throws(() => normalizeRuntimeDiagnostic(bad));
+  // Each run crosses the real service's error extractor before persistence;
+  // malformed metadata must not turn into a public diagnostic or raw text.
+  for (const [index, input] of [diagnostic, ...malformed].entries()) {
+    const failure = Object.assign(new ModpackError('RECOVERY_REQUIRED', 'The server publication requires recovery', {
+      cause: new Error('C:\\private\\properties private-bytes private-hash private-stat-value private-stack private-message')
+    }), { runtimeDiagnostic: input });
+    const fixture = mutationFixture('update', { failureAt: 'buildCandidate', failureErrors: { buildCandidate: failure } });
+    const jobId = `job-diagnostic-${index}`;
+    const claim = fixture.planRegistry.claim;
+    fixture.planRegistry.claim = request => ({ ...claim(request), jobId });
+    fixture.planRegistry.releaseClaim = releasedId => { assert.equal(releasedId, jobId); return true; };
+    fixture.service.operationStore = store;
+    const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+    await fixture.service.activeOperations.get(jobId).settled;
+    await fixture.service.getJob(queued.jobId);
+    const reopened = new OperationStore(options);
+    await reopened.initialize();
+    fixture.service.operationStore = reopened;
+    const noop = async () => ({});
+    const handlers = createModpackHandlers({
+      providers: { modrinth: { searchProjects: noop, getProject: noop, listVersions: noop }, github: { listReleases: noop, loadUploadedAssets: noop } },
+      localArtifactSource: { selectWithNativeDialog: noop }, destinationReservationService: { reserveWithNativeDialog: noop, release: noop },
+      lifecycleService: fixture.service, recoveryService: { listRecovery: noop, recover: noop },
+      notificationStore: { list: noop, acknowledge: noop }, releaseMonitor: { checkAll: noop, checkOne: noop },
+      releaseTrackingStore: { upsert: noop, list: noop }, outcomeActionService: { performSafeAction: noop }
+    });
+    const result = await handlers['modpacks:get-job']({}, { jobId });
+    assert.equal(result.ok, true);
+    assert.equal(result.value.outcome.errorCode, 'RECOVERY_REQUIRED');
+    assert.equal(result.value.outcome.cleanupPending, false);
+    if (index === 0) {
+      assert.deepEqual(result.value.outcome.runtimeDiagnostic, diagnostic);
+      assert.equal(result.value.events.some(event => event.details?.runtimeDiagnostic?.stage === diagnostic.stage), true);
+    } else {
+      assert.equal(Object.hasOwn(result.value.outcome, 'runtimeDiagnostic'), false);
+      assert.equal(result.value.events.some(event => event.details?.runtimeDiagnostic), false);
+    }
+    assert.doesNotMatch(JSON.stringify(result), /private|sha256|bytes|stat-value|stack/i);
+  }
+  assert.equal(accessorReads, 0);
 });
 
 test('cancellation cannot report success while runtime writers remain unproven', async () => {
@@ -1610,6 +1800,8 @@ test('cleanup failure leaves healthy canonical bytes in cleanup-pending without 
   assert.equal(fixture.calls.some(([name]) => name === 'rollback'), false);
   assert.deepEqual(fixture.released, []);
   assert.equal(fixture.operationStore.invalidTransitionRequests, 0);
+  assert.equal(fixture.operationStore.progressHistory.get(queued.jobId)
+    .some(progress => progress.message.includes('verifying safe cleanup')), false);
 });
 
 test('outcome persistence failure after durable live validation never rolls back the healthy canonical server', async () => {

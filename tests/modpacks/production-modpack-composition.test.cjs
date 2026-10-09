@@ -101,6 +101,7 @@ function fixture(t, { useDefaultMutationRuntime = false, useDefaultArchiveRuntim
     github: { repository() {}, async getRelease() {}, async buildArtifactSetPlan() {}, async getRepositoryIdentity() {}, async listUploadedAssets() {} }
   };
   const recoveryRegistry = {
+    async initialize() { return { records: await this.listActive(), pendingTerminalPublications: [] }; },
     async listActive() { return []; },
     async create(value) { return value; },
     async load() { return null; },
@@ -1171,3 +1172,81 @@ for (const recoveryAction of ['pre-publication-cleanup', 'new-health-failed']) {
     assert.equal(composition.destinationReservationService.release(retry.instanceId), true);
   });
 }
+
+for (const registrationState of ['registered', 'absent']) test(`authenticated metadata ${registrationState} completion preserves production reservation and reconciliation semantics`, {
+  skip: process.platform !== 'win32'
+}, async t => {
+  const { RecoveryRegistry } = require('../../electron/services/modpack-lifecycle/recovery-registry.cjs');
+  const { ModpackRecoveryService } = require('../../electron/services/modpack-lifecycle/modpack-recovery-service.cjs');
+  const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
+  const { createServerMutationContext } = require('../../electron/services/server-mutation-context.cjs');
+  const context = fixture(t);
+  const unexpected = () => assert.fail('metadata recovery crossed into source/runtime work');
+  const coordinator = new ServerMutationCoordinator({ context: createServerMutationContext(), readContentRevision: () => 0, bumpContentRevision: unexpected });
+  context.input.coordinator = coordinator;
+  const targetPath = path.join(context.input.userDataPath, `metadata-${registrationState}`);
+  fs.mkdirSync(targetPath);
+  context.input.dialog = { async showOpenDialog() { return { canceled: false, filePaths: [targetPath] }; } };
+  let failEnvelope = true;
+  const base = context.input.durableFsFactory();
+  const registry = new RecoveryRegistry({ userDataPath: context.input.userDataPath, durableFs: { ...base,
+    async renameDurableAsync(from, to, options) {
+      if (failEnvelope && from.endsWith('.target.json')) throw new Error('injected envelope move failure');
+      return base.renameDurableAsync(from, to, options);
+    }
+  } });
+  await registry.initialize();
+  const service = new ModpackRecoveryService({ coordinator, recoveryRegistry: registry, contextFactory: unexpected,
+    runtimeWriterAuthority: { assertRecoveryAllowed: unexpected }, runtimePolicy: {
+      suspend: unexpected, ensureStopped: unexpected, adoptValidatedHandoff: unexpected, restoreAutoRestart: unexpected
+    }
+  });
+  Object.assign(context.input.rawRecoveryServices, { registry, recoveryService: service });
+  const composition = await createProductionModpackComposition(context.input); t.after(() => composition.dispose());
+  const reserved = await composition.destinationReservationService.reserveWithNativeDialog({});
+  const jobId = `job-metadata-${registrationState}`;
+  const operationStore = new OperationStore({ userDataPath: context.input.userDataPath, durableFs: context.input.durableFsFactory() });
+  await operationStore.initialize();
+  let job = await operationStore.create({ jobId, operationKind: 'install-new', serverId: reserved.instanceId, planFingerprint: SHA256 });
+  const phases = registrationState === 'registered'
+    ? ['preflight', 'snapshotting', 'staging', 'validating-candidate', 'committing', 'publishing', 'published', 'registering']
+    : ['preflight', 'snapshotting', 'staging'];
+  for (const phase of phases) job = await operationStore.transition(jobId, { expectedPhase: job.phase, nextPhase: phase, patch: {} });
+  const initial = await registry.create({ schemaVersion: 2, sequence: 0, jobId, operationKind: 'install',
+    target: { kind: 'new', stableServerId: reserved.instanceId, path: targetPath }, candidatePath: null, rollbackPath: null,
+    failedPath: null, restorePoint: null, restoreCreation: null, journalPath: null,
+    priorRuntime: { running: false, autoRestart: false }, phase: 'queued', swapStep: 'none',
+    directoryIdentities: { target: null, candidate: null, rollback: null, failed: null },
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z', outcome: null });
+  if (registrationState === 'registered') context.input.store.set('instances', [{ id: reserved.instanceId, type: 'server', name: 'Metadata Server', path: targetPath }]);
+  const outcome = registrationState === 'registered' ? { revisionEvent: { eventId: `revision:${jobId}`, published: true } }
+    : { recovery: { action: 'pre-publication-cleanup', operationId: jobId }, failure: { stage: 'durable-move', category: 'sharing-violation' } };
+  await assert.rejects(registry.finish(jobId, { terminalPhase: registrationState === 'registered' ? 'completed' : 'failed', outcome }), { code: 'COMMIT_FAILED' });
+  const historicalPath = path.join(registry.historyPath, `${jobId}.json`);
+  const bytes = fs.readFileSync(historicalPath);
+  coordinator.installRecoveryBlocks([{ operationId: jobId, selector: { instanceId: reserved.instanceId, serverPath: targetPath } }]);
+  coordinator.completeStartupRecovery([{ selector: { instanceId: reserved.instanceId, serverPath: targetPath }, resolved: false }]);
+  await composition.initialize();
+  assert.equal((await composition.lifecycleService.getJob(jobId)).phase, registrationState === 'registered' ? 'completed' : 'failed');
+  // The existing history reader may reconcile an operation before publication;
+  // that callback/read is not authority to clear the coordinator block.
+  await assert.rejects(coordinator.runMutation({ instanceId: reserved.instanceId, serverPath: targetPath }, {
+    operation: 'probe', operationId: 'metadata-probe', revisionMode: 'none'
+  }, unexpected), { code: 'RECOVERY_REQUIRED' });
+  const item = (await composition.recoveryService.listRecovery()).items[0];
+  assert.deepEqual(item.actions, [{ actionId: 'retry-history-publication', label: 'Finish recovery bookkeeping', recommended: true }]);
+  const request = { recoveryId: item.recoveryId, actionId: 'retry-history-publication' };
+  await assert.rejects(composition.recoveryService.recover(request), { code: 'RECOVERY_REQUIRED' });
+  assert.ok(composition.destinationReservationService.resolve(reserved.instanceId));
+  assert.equal(fs.existsSync(path.join(registry.activePath, `${jobId}.target.json`)), true);
+  failEnvelope = false;
+  const result = await composition.recoveryService.recover(request);
+  assert.equal(result.resolved, true); assert.equal(result.operationStateReconciled, true);
+  assert.equal(composition.destinationReservationService.resolve(reserved.instanceId), null);
+  assert.deepEqual(fs.readFileSync(historicalPath), bytes); assert.deepEqual((await registry.initialize()).blocks, []);
+  context.input.store.set('instances', []);
+  const next = await composition.destinationReservationService.reserveWithNativeDialog({});
+  if (registrationState === 'registered') assert.notEqual(next.instanceId, reserved.instanceId);
+  else assert.equal(next.instanceId, reserved.instanceId);
+  composition.destinationReservationService.release(next.instanceId);
+});

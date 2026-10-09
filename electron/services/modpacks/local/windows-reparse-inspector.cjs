@@ -1,6 +1,7 @@
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const { TextDecoder } = require('node:util');
+const { normalizeRuntimeDiagnostic } = require('../../runtime-diagnostic.cjs');
 
 const MAX_INPUT_BYTES = 128 * 1024;
 const MAX_OUTPUT_BYTES = 256;
@@ -42,12 +43,19 @@ public static class MinecraftCoreReparseProbe
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct FileTime
+    {
+        internal uint LowDateTime;
+        internal uint HighDateTime;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct ByHandleFileInformation
     {
         internal uint FileAttributes;
-        internal long CreationTime;
-        internal long LastAccessTime;
-        internal long LastWriteTime;
+        internal FileTime CreationTime;
+        internal FileTime LastAccessTime;
+        internal FileTime LastWriteTime;
         internal uint VolumeSerialNumber;
         internal uint FileSizeHigh;
         internal uint FileSizeLow;
@@ -69,37 +77,45 @@ public static class MinecraftCoreReparseProbe
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint length, uint flags);
 
+    private static Exception ProbeFailure(bool invalid, int code)
+    {
+        Exception error = invalid ? (Exception)new InvalidDataException("Reparse evidence invalid")
+            : new IOException("Reparse evidence unavailable");
+        error.Data["MinecraftCoreProbeFailure"] = code;
+        return error;
+    }
+
     public static bool IsNameSurrogate(string value)
     {
         string expected = Path.GetFullPath(value);
         using (SafeFileHandle handle = CreateFile(expected, FileReadAttributes, FileShareRead | FileShareWrite | FileShareDelete,
             IntPtr.Zero, OpenExisting, FileFlagOpenReparsePoint | FileFlagBackupSemantics, IntPtr.Zero))
         {
-            if (handle.IsInvalid) throw new IOException("Reparse handle unavailable");
+            if (handle.IsInvalid) throw ProbeFailure(false, 68);
             FileAttributeTagInformation beforeTag;
             FileAttributeTagInformation afterTag;
             ByHandleFileInformation beforeIdentity;
             ByHandleFileInformation afterIdentity;
             if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, out beforeTag, (uint)Marshal.SizeOf(typeof(FileAttributeTagInformation))) ||
-                !GetFileInformationByHandle(handle, out beforeIdentity)) throw new IOException("Reparse identity unavailable");
+                !GetFileInformationByHandle(handle, out beforeIdentity)) throw ProbeFailure(false, 69);
             bool hasReparse = (beforeTag.FileAttributes & FileAttributeReparsePoint) != 0;
-            if (hasReparse != (beforeTag.ReparseTag != 0)) throw new InvalidDataException("Reparse tag invalid");
+            if (hasReparse != (beforeTag.ReparseTag != 0)) throw ProbeFailure(true, 71);
             var finalPath = new StringBuilder(32768);
             uint length = GetFinalPathNameByHandle(handle, finalPath, (uint)finalPath.Capacity, 0);
-            if (length == 0 || length >= finalPath.Capacity) throw new IOException("Reparse final path unavailable");
+            if (length == 0 || length >= finalPath.Capacity) throw ProbeFailure(false, 70);
             string actual = finalPath.ToString();
-            if (actual.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("UNC path rejected");
+            if (actual.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) throw ProbeFailure(true, 72);
             if (actual.StartsWith(@"\\?\", StringComparison.Ordinal)) actual = actual.Substring(4);
             if (!string.Equals(expected, Path.GetFullPath(actual), StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("Reparse path redirected");
+                throw ProbeFailure(true, 72);
             if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, out afterTag, (uint)Marshal.SizeOf(typeof(FileAttributeTagInformation))) ||
-                !GetFileInformationByHandle(handle, out afterIdentity)) throw new IOException("Reparse identity unavailable");
+                !GetFileInformationByHandle(handle, out afterIdentity)) throw ProbeFailure(false, 69);
             bool hasReparseAfter = (afterTag.FileAttributes & FileAttributeReparsePoint) != 0;
-            if (hasReparseAfter != (afterTag.ReparseTag != 0)) throw new InvalidDataException("Reparse tag invalid");
+            if (hasReparseAfter != (afterTag.ReparseTag != 0)) throw ProbeFailure(true, 71);
             if (hasReparse != hasReparseAfter || beforeTag.ReparseTag != afterTag.ReparseTag ||
                 beforeIdentity.VolumeSerialNumber != afterIdentity.VolumeSerialNumber ||
                 beforeIdentity.FileIndexHigh != afterIdentity.FileIndexHigh || beforeIdentity.FileIndexLow != afterIdentity.FileIndexLow)
-                throw new InvalidDataException("Reparse identity changed");
+                throw ProbeFailure(true, 73);
             return (beforeTag.ReparseTag & IoReparseTagNameSurrogate) != 0;
         }
     }
@@ -109,6 +125,12 @@ Add-Type -TypeDefinition $probeSource -Language CSharp
 function Exit-ReparseProbeFailure($errorRecord) {
   $exception = $errorRecord.Exception
   while ($null -ne $exception.InnerException) { $exception = $exception.InnerException }
+  $probeCode = $exception.Data['MinecraftCoreProbeFailure']
+  if ($exception -is [System.IO.InvalidDataException]) {
+    if ($probeCode -is [int] -and $probeCode -ge 71 -and $probeCode -le 73) { exit $probeCode }
+  } elseif ($exception -is [System.IO.IOException]) {
+    if ($probeCode -is [int] -and $probeCode -ge 68 -and $probeCode -le 70) { exit $probeCode }
+  }
   if ($exception -is [System.IO.InvalidDataException]) { exit 67 }
   exit 66
 }
@@ -198,15 +220,29 @@ const PERSISTENT_POWERSHELL_ARGS = Object.freeze([
   PERSISTENT_ENCODED_SCRIPT
 ]);
 
-function inspectionError() {
+function inspectionError(stage = 'reparse-protocol', reason = 'protocol') {
   const error = new Error('Windows reparse-point inspection failed');
   error.code = 'REPARSE_INSPECTION_FAILED';
+  error.runtimeDiagnostic = normalizeRuntimeDiagnostic({ stage, reason });
   return error;
 }
 
 function unexpectedWorkerExitError(exitCode) {
-  const error = inspectionError();
-  if (exitCode === 66) Object.defineProperty(error, RETRYABLE_WORKER_EXIT, { value: true });
+  const nativeFailures = {
+    68: ['reparse-native-open', 'io'],
+    69: ['reparse-native-identity', 'io'],
+    70: ['reparse-native-finalpath', 'io'],
+    71: ['reparse-native-tag', 'invalid-input'],
+    72: ['reparse-native-path', 'invalid-input'],
+    73: ['reparse-native-identity', 'identity-changed']
+  };
+  const error = Object.hasOwn(nativeFailures, exitCode) ? inspectionError(...nativeFailures[exitCode])
+    : exitCode === 66 ? inspectionError('reparse-native', 'io')
+    : exitCode === 67 ? inspectionError('reparse-native', 'invalid-input')
+    : exitCode === 64 || exitCode === 65 ? inspectionError('reparse-protocol', 'invalid-input')
+    : inspectionError('reparse-exit', 'dependency');
+  if (exitCode === 66 || exitCode === 68 || exitCode === 69 || exitCode === 70)
+    Object.defineProperty(error, RETRYABLE_WORKER_EXIT, { value: true });
   return error;
 }
 
@@ -258,7 +294,7 @@ function runBoundedPowerShell({ executable, spawnProcess, input, signal, timeout
         stdio: ['pipe', 'pipe', 'pipe']
       });
     } catch {
-      reject(inspectionError());
+      reject(inspectionError('reparse-spawn', 'io'));
       return;
     }
 
@@ -266,7 +302,7 @@ function runBoundedPowerShell({ executable, spawnProcess, input, signal, timeout
       !child.stdin || typeof child.stdin.end !== 'function' || !child.stdout || typeof child.stdout.on !== 'function' ||
       !child.stderr || typeof child.stderr.on !== 'function') {
       try { child?.kill?.(); } catch { /* fail closed below */ }
-      reject(inspectionError());
+      reject(inspectionError('reparse-spawn', 'io'));
       return;
     }
 
@@ -277,7 +313,7 @@ function runBoundedPowerShell({ executable, spawnProcess, input, signal, timeout
     const stdout = [];
     let abortListener;
     let killWaitTimer;
-    const timeoutTimer = setTimeout(() => fail(inspectionError()), timeoutMs);
+    const timeoutTimer = setTimeout(() => fail(inspectionError('reparse-request', 'timeout')), timeoutMs);
 
     const cleanup = () => {
       clearTimeout(timeoutTimer);
@@ -324,15 +360,15 @@ function runBoundedPowerShell({ executable, spawnProcess, input, signal, timeout
       stderrBytes += chunk.length;
       if (stderrBytes > MAX_STDERR_BYTES) fail(inspectionError());
     });
-    child.stdin.on?.('error', () => fail(inspectionError()));
-    child.once('error', () => fail(inspectionError()));
+    child.stdin.on?.('error', () => fail(inspectionError('reparse-pipe', 'io')));
+    child.once('error', () => fail(inspectionError('reparse-spawn', 'io')));
     child.once('close', (code, closeSignal) => {
       if (terminalError) {
         settle(terminalError);
         return;
       }
       if (code !== 0 || closeSignal !== null) {
-        settle(inspectionError());
+        settle(unexpectedWorkerExitError(code));
         return;
       }
       settle(null, Buffer.concat(stdout));
@@ -346,7 +382,7 @@ function runBoundedPowerShell({ executable, spawnProcess, input, signal, timeout
     }
     if (!terminalError) {
       try { child.stdin.end(input); }
-      catch { fail(inspectionError()); }
+      catch { fail(inspectionError('reparse-pipe', 'io')); }
     }
   });
 }
@@ -391,13 +427,13 @@ class PersistentPowerShellProbe {
         stdio: ['pipe', 'pipe', 'pipe']
       });
     } catch {
-      throw inspectionError();
+      throw inspectionError('reparse-spawn', 'io');
     }
     if (!child || typeof child.once !== 'function' || typeof child.kill !== 'function' ||
         !child.stdin || typeof child.stdin.write !== 'function' || !child.stdout || typeof child.stdout.on !== 'function' ||
         !child.stderr || typeof child.stderr.on !== 'function') {
       try { child?.kill?.(); } catch { /* fail closed below */ }
-      throw inspectionError();
+      throw inspectionError('reparse-spawn', 'io');
     }
     const worker = {
       child,
@@ -410,8 +446,8 @@ class PersistentPowerShellProbe {
     this.worker = worker;
     child.stdout.on('data', chunk => this.#handleStdout(worker, chunk));
     child.stderr.on('data', chunk => this.#handleStderr(worker, chunk));
-    child.stdin.on?.('error', () => this.#terminate(worker, inspectionError()));
-    child.once('error', () => this.#terminate(worker, inspectionError()));
+    child.stdin.on?.('error', () => this.#terminate(worker, inspectionError('reparse-pipe', 'io')));
+    child.once('error', () => this.#terminate(worker, inspectionError('reparse-spawn', 'io')));
     child.once('close', (code, closeSignal) => {
       if (this.worker !== worker) return;
       this.worker = null;
@@ -454,7 +490,7 @@ class PersistentPowerShellProbe {
       }
       let abortListener = null;
       const timeoutTimer = setTimeout(
-        () => this.#terminate(worker, inspectionError()),
+        () => this.#terminate(worker, inspectionError(coldStart ? 'reparse-startup' : 'reparse-request', 'timeout')),
         coldStart ? this.startupTimeoutMs : this.timeoutMs
       );
       const cleanup = () => {
@@ -477,7 +513,7 @@ class PersistentPowerShellProbe {
         }
       }
       try { worker.child.stdin.write(input); }
-      catch { this.#terminate(worker, inspectionError()); }
+      catch { this.#terminate(worker, inspectionError('reparse-pipe', 'io')); }
     });
   }
 

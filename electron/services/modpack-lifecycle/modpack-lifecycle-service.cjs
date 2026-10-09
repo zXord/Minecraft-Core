@@ -32,6 +32,9 @@ const TERMINAL_JOB_PHASES = new Set(['completed', 'cancelled', 'rolled-back', 'f
 const TERMINAL_RESOLUTION_KIND = 'terminal-resolution';
 const CANDIDATE_PROGRESS_PHASES = new Set(['staging', 'validating-candidate']);
 const MAX_OUTCOME_ACTIONS = 16;
+const MAX_PUBLIC_VERIFY_MISMATCHES = 64;
+// Leave headroom under OperationStore's unchanged 16 KiB object limit.
+const MAX_PUBLIC_VERIFY_OUTCOME_BYTES = 12 * 1024;
 const MAX_PUBLIC_INSPECTION_ROOT_CANDIDATES = 4_096;
 const SAFE_FAILURE_STEPS = new Set([
   'acquire-mutation', 'suspend-auto-restart', 'quiesce', 'revalidate-plan'
@@ -179,6 +182,60 @@ function publicView(value) {
     ])
   }, 'public');
   return deepFreeze(normalized);
+}
+
+function publicVerificationOutcome(outcome, instanceId, fullResult) {
+  const { mismatches } = fullResult;
+  if (!Array.isArray(mismatches) || fullResult.mismatchCount !== String(mismatches.length) ||
+      fullResult.healthy !== (mismatches.length === 0)) throw invalid();
+  const result = {
+    instanceId,
+    type: fullResult.type,
+    contentRevision: fullResult.contentRevision,
+    checkedFiles: fullResult.checkedFiles,
+    mismatchCount: fullResult.mismatchCount,
+    healthy: fullResult.healthy,
+    repairAvailable: fullResult.repairAvailable,
+    repair: fullResult.repair === null ? null : {
+      operationKind: fullResult.repair.operationKind,
+      mismatchCount: fullResult.repair.mismatchCount
+    },
+    mismatches: [],
+    verifiedAt: fullResult.verifiedAt
+  };
+  const projected = { ...outcome, result };
+  const updateSampleCounts = () => {
+    result.shownMismatchCount = String(result.mismatches.length);
+    result.omittedMismatchCount = String(mismatches.length - result.mismatches.length);
+    result.mismatchesTruncated = result.mismatches.length < mismatches.length;
+  };
+  // Omit labels needing shortening or redaction: displayed names are complete
+  // relative labels, never shortened filesystem/action capabilities. The store
+  // remains the final redaction boundary; these checks also prevent redaction
+  // expansion from invalidating the measured UTF-8 budget.
+  const safeLabel = value => typeof value === 'string' && value.length > 0 && value.length <= 1024 &&
+    !/(?:\b(?:https?|file):\/\/|\\\\|\b[A-Za-z]:[\\/]|\bBearer\s+|\b(?:token|password|secret)\s*[=:])/iu.test(value);
+  for (const mismatch of mismatches) {
+    if (result.mismatches.length >= MAX_PUBLIC_VERIFY_MISMATCHES) break;
+    if (![mismatch.entryName, mismatch.origin, mismatch.role, mismatch.status].every(safeLabel) ||
+        /^[\\/]/u.test(mismatch.entryName) || /(?:^|[\\/])\.\.(?:[\\/]|$)/u.test(mismatch.entryName)) continue;
+    result.mismatches.push({
+      entryName: mismatch.entryName, origin: mismatch.origin, role: mismatch.role, status: mismatch.status
+    });
+    updateSampleCounts();
+    if (Buffer.byteLength(JSON.stringify(projected), 'utf8') > MAX_PUBLIC_VERIFY_OUTCOME_BYTES) {
+      result.mismatches.pop();
+    }
+  }
+  updateSampleCounts();
+  if (!result.mismatchesTruncated) {
+    // Existing small results retain their public DTO shape.
+    delete result.shownMismatchCount;
+    delete result.omittedMismatchCount;
+    delete result.mismatchesTruncated;
+  }
+  if (Buffer.byteLength(JSON.stringify(projected), 'utf8') > MAX_PUBLIC_VERIFY_OUTCOME_BYTES) throw invalid();
+  return projected;
 }
 
 function boundedPublicRootCandidates(value) {
@@ -1089,8 +1146,7 @@ class ModpackLifecycleService {
       const outcome = await this.#withIssuedActions({
         status: 'completed',
         message: result.healthy ? 'All managed files match the installed manifest' : 'Managed file differences were found',
-        operationKind: 'verify',
-        result: { instanceId, ...result }
+        operationKind: 'verify'
       }, {
         jobId,
         operationKind: 'verify',
@@ -1102,7 +1158,8 @@ class ModpackLifecycleService {
         restorePointId: null,
         automaticRecovery: false
       });
-      await this.#transition(jobId, 'completed', 100, 'Managed files verified', signal, outcome);
+      await this.#transition(jobId, 'completed', 100, 'Managed files verified', signal,
+        publicVerificationOutcome(outcome, instanceId, result));
     } catch (error) {
       active.beginSettlement();
       await this.#finishVerificationFailure({ jobId, instanceId, error });
@@ -1622,6 +1679,15 @@ class ModpackLifecycleService {
     }
 
     if (state.committedHealthy || ['committed-healthy', 'cleanup'].includes(job.phase)) {
+      // Settlement runs under the original mutation authority. Production must
+      // hand unresolved healthy-source cleanup to the coordinator before that
+      // lease is released; authenticated archive completion makes later policy
+      // or claim errors ancillary. Never invent authority in after-release retry.
+      if (lease && typeof this.mutationRuntime.quarantinePendingCleanup === 'function') {
+        await this.mutationRuntime.quarantinePendingCleanup({
+          jobId: claimed.jobId, operationKind, plan, resolved, lease, error
+        });
+      }
       if (state.committedHealthy && job.phase === 'registering') {
         job = await this.operationStore.transition(claimed.jobId, {
           expectedPhase: 'registering', nextPhase: 'committed-healthy', patch: {}
@@ -1649,6 +1715,24 @@ class ModpackLifecycleService {
     }
 
     if (!state.commitStarted) {
+      // Presentation only: cancellation and optional publication failures must
+      // never bypass precommit settlement under the original mutation lease.
+      try {
+        const current = await this.operationStore.get(claimed.jobId);
+        if (current && !TERMINAL_JOB_PHASES.has(current.phase) && current.phase !== 'cleanup-pending' &&
+            typeof this.operationStore.updateProgress === 'function') {
+          await this.operationStore.updateProgress(claimed.jobId, {
+            expectedPhase: current.phase,
+            progress: {
+              percent: current.progress?.percent ?? 0,
+              message: current.phase === 'cancelling' || current.cancellationRequested || error?.code === 'CANCELLED'
+                ? 'Cancelling; verifying safe cleanup of the candidate.'
+                : 'The attempt failed; verifying safe cleanup of the candidate.',
+              currentItem: null
+            }
+          });
+        }
+      } catch { /* optional progress must not replace the original failure or cleanup */ }
       let cleanupError = null;
       if ((state.recoveryRecordPrepared || state.candidateBuilt || state.restorePointAttempted ||
            state.restorePoint !== null) && resolved) {

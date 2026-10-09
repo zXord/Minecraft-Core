@@ -295,35 +295,44 @@ class RecoveryRegistry {
     if (this.initialized) this.#revalidateRegistryDirectories();
     else this.#initializeDirectories();
     this.#revalidateRegistryDirectories();
-    const entries = this.fs.readdirSync(this.activePath, { withFileTypes: true });
-    this.#revalidateRegistryDirectories();
     const jobs = new Map();
     let globalBlock = false;
-    for (const entry of entries) {
-      if (!entry.isFile() || entry.isSymbolicLink()) {
-        globalBlock = true;
-        continue;
+    for (const [location, directory] of [['active', this.activePath], ['history', this.historyPath]]) {
+      const entries = this.fs.readdirSync(directory, { withFileTypes: true });
+      this.#revalidateRegistryDirectories();
+      for (const entry of entries) {
+        if (!entry.isFile() || entry.isSymbolicLink()) {
+          globalBlock = true;
+          continue;
+        }
+        const match = /^([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\.target)?\.json$/.exec(entry.name);
+        if (!match) {
+          globalBlock = true;
+          continue;
+        }
+        const item = jobs.get(match[1]) || { record: false, envelope: false, historyRecord: false, historyEnvelope: false };
+        const key = location === 'history' ? (match[2] ? 'historyEnvelope' : 'historyRecord') : (match[2] ? 'envelope' : 'record');
+        item[key] = true;
+        jobs.set(match[1], item);
       }
-      const match = /^([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\.target)?\.json$/.exec(entry.name);
-      if (!match) {
-        globalBlock = true;
-        continue;
-      }
-      const item = jobs.get(match[1]) || { record: false, envelope: false };
-      if (match[2]) item.envelope = true;
-      else item.record = true;
-      jobs.set(match[1], item);
     }
 
     const records = [];
+    const pendingTerminalPublications = [];
     const corrupt = [];
     const blocks = [];
     for (const [jobId, presence] of [...jobs].sort(([left], [right]) => left.localeCompare(right))) {
+      let publication = null;
+      if (presence.historyRecord || presence.historyEnvelope) {
+        try { publication = this.#classifyTerminalPublication(jobId); } catch { /* Retain all identifying blocks below. */ }
+        if (publication?.status === 'already-published') continue;
+        if (publication?.status === 'pending') pendingTerminalPublications.push(publication.record.value);
+      }
       let recordFromHistory = false;
       let recordResult = presence.record
         ? this.#tryReadRecord(this.#recordPath(jobId), jobId)
         : { value: null, identifyingValue: null, error: null };
-      if (!presence.record && presence.envelope) {
+      if (!presence.record && presence.historyRecord) {
         const historicalResult = this.#tryReadRecord(this.#historyRecordPath(jobId), jobId);
         if (historicalResult.value || historicalResult.identifyingValue) {
           recordResult = historicalResult;
@@ -339,13 +348,24 @@ class RecoveryRegistry {
         identifyingEnvelopes.push(createRecoveryTargetEnvelope(recordResult.identifyingValue));
       }
       if (envelopeResult.value) identifyingEnvelopes.push(envelopeResult.value);
+      if (presence.record && presence.historyRecord) {
+        const historical = this.#tryReadRecord(this.#historyRecordPath(jobId), jobId);
+        if (historical.value || historical.identifyingValue) {
+          identifyingEnvelopes.push(createRecoveryTargetEnvelope(historical.value || historical.identifyingValue));
+        }
+      }
+      if (presence.historyEnvelope) {
+        const historicalEnvelope = this.#tryReadEnvelope(this.#historyEnvelopePath(jobId));
+        if (historicalEnvelope.value) identifyingEnvelopes.push(historicalEnvelope.value);
+      }
 
       const recordEnvelope = recordResult.value ? createRecoveryTargetEnvelope(recordResult.value) : null;
       const evidenceMatches = Boolean(recordEnvelope && envelopeResult.value &&
         envelopeResult.value.jobId === jobId &&
         envelopeResult.value.targetPathHash === recordEnvelope.targetPathHash &&
         envelopeResult.value.stableServerId === recordEnvelope.stableServerId);
-      const isCorrupt = !recordResult.value || !envelopeResult.value || !evidenceMatches;
+      const hasHistoryEvidence = presence.historyRecord || presence.historyEnvelope;
+      const isCorrupt = hasHistoryEvidence ? !publication : !recordResult.value || !envelopeResult.value || !evidenceMatches;
       if (isCorrupt) {
         corrupt.push({
           jobId,
@@ -378,6 +398,7 @@ class RecoveryRegistry {
 
     return Object.freeze({
       records: Object.freeze(records.map(item => Object.freeze(strictJsonClone(item)))),
+      pendingTerminalPublications: Object.freeze(pendingTerminalPublications.map(item => Object.freeze(strictJsonClone(item)))),
       corrupt: Object.freeze(corrupt.map(item => Object.freeze(item))),
       blocks: Object.freeze(blocks.map(item => Object.freeze(item))),
       globalBlock
@@ -440,6 +461,65 @@ class RecoveryRegistry {
   async listActive() {
     const scan = await this.initialize();
     return scan.records;
+  }
+
+  async retryTerminalPublication(jobId, request) {
+    this.#assertInitialized();
+    assertIdentifier(jobId, JOB_ID_PATTERN);
+    assertStrictObject(request, ['expectedTarget', 'expectedOperationKind']);
+    assertStrictObject(request.expectedTarget, TARGET_KEYS);
+    const target = request.expectedTarget;
+    if (!['new', 'existing'].includes(target.kind) || !OPERATION_KINDS.has(request.expectedOperationKind)) throw invalid();
+    const stableServerId = target.stableServerId === null ? null : assertIdentifier(target.stableServerId);
+    if (target.kind === 'existing' && stableServerId === null) throw invalid();
+    const binding = { target: { kind: target.kind, stableServerId, path: normalizeRecoveryTargetPath(target.path) },
+      operationKind: request.expectedOperationKind };
+    const release = await this.#acquireHistoryPublication();
+    try {
+      const before = this.#classifyTerminalPublication(jobId, binding);
+      if (before.status === 'already-published') {
+        return Object.freeze({ status: before.status, record: Object.freeze(strictJsonClone(before.record.value)) });
+      }
+      await this.yieldControl();
+      this.#revalidateRegistryDirectories();
+      if (this.#entryExists(this.#historyEnvelopePath(jobId))) throw targetExists();
+      await this.durableFs.renameDurableAsync(this.#envelopePath(jobId), this.#historyEnvelopePath(jobId), {
+        expectedSourceSha256: before.envelope.sha256
+      });
+      this.#revalidateRegistryDirectories();
+      await this.yieldControl();
+      const after = this.#classifyTerminalPublication(jobId, binding);
+      if (after.status !== 'already-published' || after.record.sha256 !== before.record.sha256 ||
+          !sameJson(after.record.value, before.record.value)) throw recoveryRequired();
+      return Object.freeze({ status: 'published', record: Object.freeze(strictJsonClone(after.record.value)) });
+    } catch (error) {
+      throw commitFailure(error);
+    } finally {
+      release();
+    }
+  }
+
+  // Explicit locations are essential: the ordinary history reader deliberately
+  // accepts an active envelope, which is not proof of completed publication.
+  #classifyTerminalPublication(jobId, binding = null) {
+    this.#revalidateRegistryDirectories();
+    for (const filePath of [this.#recordPath(jobId), this.#historyRecordPath(jobId),
+      this.#envelopePath(jobId), this.#historyEnvelopePath(jobId)]) {
+      if (this.#entryExists(filePath) && BigInt(this.fs.lstatSync(filePath, { bigint: true }).nlink) !== 1n) throw recoveryRequired();
+    }
+    if (this.#entryExists(this.#recordPath(jobId)) || !this.#entryExists(this.#historyRecordPath(jobId))) throw recoveryRequired();
+    const activeEnvelope = this.#entryExists(this.#envelopePath(jobId));
+    const historyEnvelope = this.#entryExists(this.#historyEnvelopePath(jobId));
+    if (activeEnvelope === historyEnvelope) throw recoveryRequired();
+    const record = this.#readRecord(this.#historyRecordPath(jobId), { allowMissing: false, expectedJobId: jobId });
+    if (!TERMINAL_PHASES.has(record.value.phase) || record.value.outcome?.runtimeWriterAuthority?.state === 'unproven') throw recoveryRequired();
+    if (binding && (record.value.operationKind !== binding.operationKind || !sameJson(record.value.target, binding.target))) throw recoveryRequired();
+    const envelope = this.#tryReadEnvelope(activeEnvelope ? this.#envelopePath(jobId) : this.#historyEnvelopePath(jobId));
+    const expected = createRecoveryTargetEnvelope(record.value);
+    if (!envelope.value || envelope.value.jobId !== jobId || envelope.value.stableServerId !== expected.stableServerId ||
+        envelope.value.targetPathHash !== expected.targetPathHash) throw recoveryRequired(envelope.error);
+    this.#revalidateRegistryDirectories();
+    return { status: activeEnvelope ? 'pending' : 'already-published', record, envelope };
   }
 
   async transition(jobId, request) {

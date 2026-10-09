@@ -64,10 +64,10 @@ function readPortableServerConfig(serverPath) {
 
 function persistInviteMetadata(serverPath, { host, secret }) {
   if (!serverPath) return null;
-  return updateServerConfig(serverPath, {
-    managementInviteHost: typeof host === 'string' ? host : undefined,
-    managementInviteSecret: typeof secret === 'string' ? secret : undefined
-  }, getServerConfigDefaults());
+  const updates = {};
+  if (typeof host === 'string') updates.managementInviteHost = host;
+  if (typeof secret === 'string') updates.managementInviteSecret = secret;
+  return updateServerConfig(serverPath, updates, getServerConfigDefaults());
 }
 
 function getConfiguredInviteHost(serverPath, instance = null, configValue = undefined) {
@@ -309,8 +309,8 @@ function createManagementServerHandlers(win) {
         const managementServer = getManagementServer({ instanceId, serverPath: targetPath });
         const host = typeof hostIP === 'string' ? hostIP.trim() : '';
         if (targetPath) {
-          updateServerInstance(targetPath, { managementInviteHost: host || '' });
           persistInviteMetadata(targetPath, { host: host || '' });
+          updateServerInstance(targetPath, { managementInviteHost: host || '' });
         }
         managementServer.setExternalHost(host || null);
         
@@ -419,8 +419,8 @@ function createManagementServerHandlers(win) {
           return { success: false, error: 'No server path available' };
         }
         const trimmed = typeof host === 'string' ? host.trim() : '';
-        updateServerInstance(targetPath, { managementInviteHost: trimmed || '' });
         persistInviteMetadata(targetPath, { host: trimmed || '' });
+        updateServerInstance(targetPath, { managementInviteHost: trimmed || '' });
         managementServer.setExternalHost(trimmed || null);
         return { success: true, host: trimmed || null };
       } catch (error) {
@@ -441,11 +441,12 @@ function createManagementServerHandlers(win) {
         }
         ensureEncryptionAvailable();
         const secret = generateInviteSecret();
-        updateServerInstance(targetPath, { managementInviteSecret: packSecret(secret) });
+        const packedSecret = packSecret(secret);
         persistInviteMetadata(targetPath, {
           host: getConfiguredInviteHost(targetPath, findServerInstanceByPath(targetPath)),
           secret
         });
+        updateServerInstance(targetPath, { managementInviteSecret: packedSecret });
         managementServer.setInviteSecret(secret);
         return { success: true, secret };
       } catch (error) {

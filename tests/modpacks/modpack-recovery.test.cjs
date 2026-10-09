@@ -133,6 +133,15 @@ class FakeRegistry {
     return clone(this.current);
   }
 
+  async retryTerminalPublication(jobId, { expectedTarget, expectedOperationKind }) {
+    const historical = this.finishes.at(-1)?.record;
+    assert.equal(this.current, null);
+    assert.equal(historical?.jobId, jobId);
+    assert.deepEqual(historical.target, expectedTarget);
+    assert.equal(historical.operationKind, expectedOperationKind);
+    return { status: 'already-published', record: clone(historical) };
+  }
+
   async clearRestoreCreationAfterCleanup(jobId, request) {
     assert.equal(jobId, this.current?.jobId);
     assert.equal(this.current.phase, request.expectedPhase);
@@ -528,6 +537,11 @@ function fixture(initialRecord, entries, options = {}) {
     }
   };
   const coordinator = {
+    assertMutationLease(lease, selector, operationId) {
+      assert.equal(lease.operationId, operationId);
+      assert.equal(lease.instanceId, selector.instanceId);
+      assert.equal(lease.serverPath, selector.serverPath);
+    },
     async runRecoveryMutation(selector, request, work) {
       calls.push(`lease:${request.operationId}:${selector.instanceId}`);
       return work(Object.freeze({
@@ -1419,7 +1433,7 @@ test('publishing through registering new servers reconstruct and finish one dura
     }]);
 
     const repeated = await service.recover(initial);
-    assert.deepEqual(repeated, { jobId: 'job-alpha', resolved: true, action: 'already-finished' });
+    assert.deepEqual(repeated, { jobId: 'job-alpha', resolved: true, action: 'already-finished', historyPublication: 'already-published' });
     assert.equal(value.revisionEvents.length, 1);
   }
 });
@@ -1462,6 +1476,7 @@ test('a concurrent replay that finds recovery already finished does not install 
   }, { runtimePolicy });
   let mutationQueue = Promise.resolve();
   value.coordinator = {
+    assertMutationLease: value.coordinator.assertMutationLease,
     runRecoveryMutation(selector, request, work) {
       const operation = mutationQueue.then(() => work(Object.freeze({
         kind: 'mutation',
@@ -1483,7 +1498,7 @@ test('a concurrent replay that finds recovery already finished does not install 
   assert.equal((await first).resolved, true);
   releaseLateSuspend();
 
-  assert.deepEqual(await replay, { jobId: 'job-alpha', resolved: true, action: 'already-finished' });
+  assert.deepEqual(await replay, { jobId: 'job-alpha', resolved: true, action: 'already-finished', historyPublication: 'already-published' });
   assert.equal(suspendCalls, 1);
   assert.equal(held, false);
 });

@@ -9,6 +9,15 @@ test('client requests unwrap failures and never authorize legacy on unknown stat
   for (const state of [null, {}, { status: 'unpaired' }, { status: 'future-state' }]) assert.equal(allowsLegacyClient(state), false);
   assert.equal(allowsLegacyClient({ status: 'unmanaged' }), true);
 });
+
+test('server drift stays a refusal with renderer-local Verify and Repair guidance', async () => {
+  const { clientPackApi, allowsLegacyClient } = await modulePromise;
+  global.window = { electron: { invoke: async () => ({ ok: false,
+    error: { code: 'CLIENT_PACK_SERVER_CHANGED', message: 'C:\\private token=secret run-command', retryable: false } }) } };
+  await assert.rejects(clientPackApi.getState('a'), error => error.code === 'CLIENT_PACK_SERVER_CHANGED' &&
+    /Use Modpack Verify and Repair/.test(error.message) && !error.message.includes('secret'));
+  assert.equal(allowsLegacyClient({ status: 'error', code: 'CLIENT_PACK_SERVER_CHANGED' }), false);
+});
 test('progress uses both scope identifiers and removes only its own listener on settlement', async () => {
   const { clientPackApi } = await modulePromise;
   const listeners = new Set();

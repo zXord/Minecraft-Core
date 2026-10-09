@@ -15,13 +15,15 @@ test.beforeAll(async () => {
     <script>
       import Archive from './src/components/setup/ArchiveGuidedReview.svelte';
       import Planning from './src/components/modpacks/ModpackPlanningProgress.svelte';
+      import Job from './src/components/modpacks/ModpackJobProgress.svelte';
       let kind = null;
       let props = {};
       export function show(nextKind, nextProps) { kind = nextKind; props = nextProps; }
       export function update(nextProps) { props = { ...props, ...nextProps }; }
     </script>
     {#if kind === 'archive'}<Archive {...props} />
-    {:else if kind === 'planning'}<Planning {...props} />{/if}
+    {:else if kind === 'planning'}<Planning {...props} />
+    {:else if kind === 'job'}<Job {...props} on:return={() => window.jobTest.returns++} />{/if}
   `;
   const result = await build({
     absWorkingDir: ROOT,
@@ -70,7 +72,99 @@ test.beforeAll(async () => {
 test.beforeEach(async ({ page }) => {
   await page.route('**/*', route => route.abort());
   await page.setContent('<!doctype html><title>Modpack progress reactivity</title><main id="fixture"></main>');
+  await page.evaluate(() => {
+    window.jobTest = { job: null, returns: 0, actions: [], requests: [] };
+    window.electron = {
+      on() {}, removeListener() {},
+      async invoke(channel, request) {
+        window.jobTest.requests.push({ channel, request });
+        if (channel === 'modpacks:get-job') return { ok: true, value: window.jobTest.job };
+        if (channel === 'modpacks:perform-safe-action') {
+          window.jobTest.actions.push(request);
+          return { ok: true, value: { status: 'opened' } };
+        }
+        throw new Error(`Unexpected IPC: ${channel}`);
+      }
+    };
+  });
   await page.addScriptTag({ content: bundle });
+});
+
+async function showJob(page, phase, outcome, operationKind = 'repair') {
+  await page.evaluate(({ phase, outcome, operationKind }) => {
+    const job = { jobId: 'recovery-job', phase, operationKind, outcome };
+    window.jobTest.job = job;
+    window.progressFixture.show('job', { job });
+  }, { phase, outcome, operationKind });
+}
+
+for (const [phase, outcome] of [
+  ['failed', { retainedDownload: { verified: true } }],
+  ['failed', {}],
+  ['cancelled', {}],
+  ['failed', { kind: 'nothing-changed', retainedDownload: true }],
+  ['failed', { kind: 'retained-download', retainedDownload: true }],
+  ['rolled-back', { kind: 'restored' }],
+  ['recovery-required', { kind: 'automatic-recovery', automatic: true }],
+  ['completed', { kind: 'completed' }]
+]) {
+  test(`terminal cleanup warning overrides ${phase}/${outcome.kind || (outcome.retainedDownload ? 'cache' : 'plain')}`, async ({ page }) => {
+    await showJob(page, phase, { ...outcome, cleanupPending: true, errorCode: 'PLAN_STALE', cleanupErrorCode: 'RECOVERY_REQUIRED', actions: [
+      { actionId: 'retry', opaqueRef: 'retry-ref' },
+      { actionId: 'remove-retained-download', opaqueRef: 'remove-ref' },
+      { actionId: 'choose-another-asset', opaqueRef: 'choose-ref' }
+    ] });
+    await expect(page.getByRole('heading', { name: 'Recovery needs review' })).toHaveCount(2);
+    const result = page.locator('section.outcome');
+    await expect(result).toContainText('This operation stopped before cleanup could finish. Open the Modpack page to check its current recovery status before retrying.');
+    await expect(result).toContainText('Operation error: PLAN_STALE');
+    await expect(result).toContainText('Cleanup error: RECOVERY_REQUIRED');
+    await expect(result).not.toContainText(/No server files were changed|byte-for-byte|restored successfully|remains.*blocked/u);
+    await expect(result.getByRole('button')).toHaveText(['Review recovery status']);
+    await result.getByRole('button', { name: 'Review recovery status' }).click();
+    expect(await page.evaluate(() => window.jobTest)).toMatchObject({ returns: 1, actions: [] });
+    expect(await page.evaluate(() => window.jobTest.requests)).toEqual([{ channel: 'modpacks:get-job', request: { jobId: 'recovery-job' } }]);
+  });
+}
+
+test('cleanup warning exposes only issued cache opening and omits malformed codes', async ({ page }) => {
+  await showJob(page, 'failed', { cleanupPending: true, retainedDownload: true, errorCode: 'C:\\private\\bad', cleanupErrorCode: 'run command', actions: [{ actionId: 'open-retained-download-folder', opaqueRef: 'cache-ref' }] });
+  const result = page.locator('section.outcome');
+  await expect(result).toContainText('The verified download remains available in the controlled cache.');
+  await expect(result).not.toContainText(/private|run command|Operation error:|Cleanup error:/u);
+  await result.getByRole('button', { name: 'Open folder' }).click();
+  expect(await page.evaluate(() => window.jobTest.actions)).toEqual([{ actionId: 'open-retained-download-folder', opaqueRef: 'cache-ref' }]);
+});
+
+test('cleanup warning does not repeat legacy safe-stop diagnostics or retry guidance', async ({ page }) => {
+  await showJob(page, 'failed', { cleanupPending: true, kind: 'nothing-changed', failureReason: 'destination-recovery-required', failure: { stage: 'candidate-boot', boundary: 'readiness', category: 'process-exited' } }, 'install-new');
+  await expect(page.locator('section.outcome')).not.toContainText('Try another pack version or asset, then retry.');
+  await expect(page.locator('section.outcome')).not.toContainText('The existing server files were not touched.');
+});
+
+for (const code of ['', 'a', 'BAD-CODE', 'A'.repeat(65), 1, null]) {
+  test(`cleanup warning omits unsafe diagnostic code ${JSON.stringify(code)}`, async ({ page }) => {
+    await showJob(page, 'failed', { cleanupPending: true, errorCode: code, cleanupErrorCode: code });
+    await expect(page.locator('section.outcome')).not.toContainText(/Operation error:|Cleanup error:/u);
+  });
+}
+
+for (const cleanupPending of [false, 'true', 1, null]) {
+  test(`nonboolean pending ${JSON.stringify(cleanupPending)} retains ordinary no-change result`, async ({ page }) => {
+    await showJob(page, 'failed', { cleanupPending });
+    await expect(page.getByRole('heading', { name: 'Stopped before server changes' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Review recovery status' })).toHaveCount(0);
+  });
+}
+
+test('ordinary retained cache and completed Verify/result presentation remain intact', async ({ page }) => {
+  await showJob(page, 'failed', { retainedDownload: true });
+  await expect(page.getByRole('heading', { name: 'Downloaded file retained for manual use' })).toBeVisible();
+  await showJob(page, 'completed', { result: { healthy: false, checkedFiles: 5, mismatchCount: 1, mismatches: [{ entryName: 'example.jar', status: 'modified' }], repairAvailable: true } }, 'verify');
+  await expect(page.getByRole('heading', { name: 'Differences found' })).toBeVisible();
+  await expect(page.locator('section.outcome')).toContainText('Checked files: 5 · Mismatches: 1');
+  await showJob(page, 'completed', {});
+  await expect(page.locator('section.outcome').getByRole('heading', { name: 'Completed' })).toBeVisible();
 });
 
 function propsFor(kind, progress) {

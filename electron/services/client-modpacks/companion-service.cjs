@@ -38,7 +38,7 @@ class CompanionService {
     return this.#run(undefined, async signal => {
       request(value, ['serverId']); identifier(value.serverId);
       await this.#prune(); cancelled(signal);
-      const installed = await this.#installed(value.serverId);
+      const installed = await this.#installed(value.serverId, undefined, { signal });
       if (!installed) return null;
       const record = await this.store.get(value.serverId, installed.fingerprint);
       if (!record) return normalizeCompanionDescriptor({ schemaVersion: 1, status: 'unpaired', serverFingerprint: installed.fingerprint,
@@ -52,7 +52,7 @@ class CompanionService {
     return this.#run(undefined, async signal => {
       request(value, ['serverId']); identifier(value.serverId);
       await this.#prune(); cancelled(signal);
-      const installed = await this.#installed(value.serverId);
+      const installed = await this.#installed(value.serverId, undefined, { signal });
       if (!installed) throw fail('CLIENT_PACK_UNAVAILABLE');
       const source = installed.state.source;
       let assets;
@@ -75,7 +75,7 @@ class CompanionService {
       const slot = await this.#reserve();
       try {
         cancelled(signal);
-        const installed = await this.#installed(value.serverId, value.expectedServerFingerprint);
+        const installed = await this.#installed(value.serverId, value.expectedServerFingerprint, { signal });
         const source = installed.state.source;
         let resolved; let companionSource;
         if (source.provider === 'github') {
@@ -103,7 +103,7 @@ class CompanionService {
         if (!sameRuntime(installed.state.runtime, inspected.runtime)) throw fail('RUNTIME_INCOMPLETE');
         const descriptor = normalizeCompanionDescriptor({ schemaVersion: 1, status: 'ready', serverFingerprint: installed.fingerprint,
           serverVersion: source.version, source: companionSource, runtime: inspected.runtime, artifactSha256: verified.artifactSet.parts[0].calculatedDigests.sha256 });
-        await this.#installed(value.serverId, installed.fingerprint);
+        await this.#installed(value.serverId, installed.fingerprint, { signal });
         cancelled(signal);
         Object.assign(slot, { serverId: value.serverId, descriptor, active: false, createdAt: this.clock() });
         return deepFreeze({ inspectionId: slot.inspectionId, ...descriptor, name: inspected.name, version: inspected.version,
@@ -131,7 +131,7 @@ class CompanionService {
         const result = await this.coordinator.runMutation(selector, { operation: 'pair-client-pack', operationId: `pair-client-${crypto.randomUUID()}`, revisionMode: 'none', signal }, async () => {
           const registered = await this.resolveServer(value.serverId);
           if (!registered || registered.instanceId !== selector.instanceId || registered.serverPath !== selector.serverPath) throw fail('PLAN_STALE');
-          const installed = await this.#installed(value.serverId, value.expectedServerFingerprint);
+          const installed = await this.#installed(value.serverId, value.expectedServerFingerprint, { force: true, signal });
           if (!sameRuntime(installed.state.runtime, slot.descriptor.runtime)) throw fail('PLAN_STALE');
           cancelled(signal);
           const expectedSequence = this.store.sequence;
@@ -163,9 +163,9 @@ class CompanionService {
     pending.finally(() => { this.operations.delete(pending); externalSignal?.removeEventListener('abort', abort); }).catch(() => {});
     return pending;
   }
-  async #installed(serverId, expected) {
+  async #installed(serverId, expected, options) {
     if (!await this.resolveServer(serverId)) throw fail('CLIENT_PACK_UNAVAILABLE');
-    const state = await this.readServerState(serverId);
+    const state = await this.readServerState(serverId, options);
     if (!state || state.modpackManaged !== true) { if (expected) throw fail('PLAN_STALE'); return null; }
     const actual = serverPackFingerprint(state);
     if (expected && expected !== actual) throw fail('PLAN_STALE');

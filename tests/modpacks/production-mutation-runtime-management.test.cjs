@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { fixtureAuthority, fixtureDurableFs, fixtureRegistry, fixtureRecovery,
+  recordFixtureCandidate } = require('./runtime-authority-fixture.cjs');
 
 const { computePreflightPlanFingerprint } = require('../../electron/services/modpacks/planning/plan-fingerprint.cjs');
 const {
@@ -28,22 +30,6 @@ const LATER_WORLD_BYTES = Buffer.from([0x00, 0x7f, 0x80, 0xff, 0x2a]);
 
 function digest(value) {
   return crypto.createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex');
-}
-
-function registryDouble() {
-  let record = null;
-  return {
-    get record() { return structuredClone(record); },
-    async create(value) { record = structuredClone(value); return structuredClone(record); },
-    async load() { return record && structuredClone(record); },
-    async transition(jobId, request) {
-      assert.equal(jobId, record.jobId);
-      assert.equal(request.expectedPhase, record.phase);
-      record = { ...record, ...structuredClone(request.patch), phase: request.nextPhase, sequence: record.sequence + 1 };
-      return structuredClone(record);
-    },
-    async finish() { record = null; return null; }
-  };
 }
 
 function productionCandidateHealthValidator() {
@@ -238,7 +224,9 @@ function managementFixture(t, kind, {
     selectedRestorePoint: kind === 'rollback-restore-point' ? selectedPrivate : null,
     serverKind: 'existing', serverPath: targetPath, source: currentSource
   };
-  const recoveryRegistry = registryDouble();
+  const recoveryRegistry = fixtureRegistry(root);
+  const authority = fixtureAuthority({ instanceId: 'server-managed', serverPath: targetPath,
+    jobId: 'job-management', baseRevision: currentCoordinatorRevision, registry: recoveryRegistry });
   const durableFs = {
     flushDirectory() {},
     async flushDirectoryAsync() {},
@@ -346,7 +334,27 @@ function managementFixture(t, kind, {
     },
     async appendHistoryAsync(_serverPath, entry) { histories.push(structuredClone(entry)); }
   };
+  const recoveryServices = {
+    registry: recoveryRegistry,
+    runtimeWriterAuthority: { async run(_jobId, work) { return work(); }, async assertRecoveryAllowed(record) { return record; } },
+    runtimePolicy: {
+        async suspend() { return { held: true }; }, async ensureStopped() { return { stopped: true }; },
+        async adoptValidatedHandoff() { runtimePolicyRequests.push({ kind: 'adopt' }); return { adopted: true }; },
+        async restoreAutoRestart(request) {
+          runtimePolicyRequests.push({ kind: 'auto-restart', enabled: request.enabled });
+          return { restored: true };
+        }
+      },
+    ...(releaseTrackingReconciler ? { releaseTrackingReconciler } : {})
+  };
+  recoveryServices.recoveryService = fixtureRecovery({ authority, registry: recoveryRegistry,
+    durableFs: fixtureDurableFs(root), runtimePolicy: recoveryServices.runtimePolicy,
+    reparseInspector: { async isReparsePoint() { return false; } }, healthValidator: healthValidator || {
+      async validateCandidate() {},
+      async validateLive() { return { evidence: { ok: true } }; }
+    }, onRecoverWithLease() { recoveryCalls.push('recover'); } });
   const runtime = new ProductionMutationRuntime({
+    coordinator: authority.coordinator,
     availableBytes: async () => {
       availableBytesCalls += 1;
       return typeof availableBytesValue === 'function'
@@ -362,6 +370,7 @@ function managementFixture(t, kind, {
         await context.authorizeSourceSnapshot(structuredClone(copySourceSnapshot));
       }
       fs.mkdirSync(context.candidatePath, { recursive: true });
+      await recordFixtureCandidate(recoveryRegistry, context);
       fs.mkdirSync(path.join(context.candidatePath, '.minecraft-core-state', 'operations', context.jobId), { recursive: true });
       fs.mkdirSync(path.join(context.candidatePath, '.minecraft-core-state', 'history'), { recursive: true });
       fs.writeFileSync(
@@ -419,24 +428,7 @@ function managementFixture(t, kind, {
       getExecutionRecord(received) { assert.equal(received, plan); return executionRecord; }
     },
     planValidator() { throw new Error('source preflight validator must not receive management plans'); },
-    recoveryServices: {
-      registry: recoveryRegistry,
-      runtimeWriterAuthority: { async run(_jobId, work) { return work(); }, async assertRecoveryAllowed(record) { return record; } },
-      recoveryService: {
-        async recoverWithLease() { recoveryCalls.push('recover'); return { resolved: true }; },
-        async rollbackWithLease() { recoveryCalls.push('rollback'); return { resolved: true }; },
-        async failNewWithLease() { recoveryCalls.push('fail-new'); return { resolved: true }; }
-      },
-      runtimePolicy: {
-        async suspend() { return { held: true }; }, async ensureStopped() { return { stopped: true }; },
-        async adoptValidatedHandoff() { runtimePolicyRequests.push({ kind: 'adopt' }); return { adopted: true }; },
-        async restoreAutoRestart(request) {
-          runtimePolicyRequests.push({ kind: 'auto-restart', enabled: request.enabled });
-          return { restored: true };
-        }
-      },
-      ...(releaseTrackingReconciler ? { releaseTrackingReconciler } : {})
-    },
+    recoveryServices,
     releaseTrackingStore: {
       async list() { return [{ trackingId: 'tracking-old', serverId: 'server-managed' }]; },
       async remove(id) { trackingRemovals.push(id); return true; },
@@ -564,29 +556,29 @@ function managementFixture(t, kind, {
     }
   });
   const resolved = { instanceId: 'server-managed', serverPath: targetPath, priorRunning };
-  const lease = {
-    kind: 'mutation', instanceId: 'server-managed', serverPath: targetPath, baseRevision: currentCoordinatorRevision,
-    markDirty() {}, assertOwnedPath(value) { return value; }
-  };
   async function revalidate() {
     await runtime.revalidate({
       jobId: 'job-management', plan,
       choices: { acceptEula: false, startAfterInstall: false, restorePointId: kind === 'rollback-restore-point' ? 'restore-selected' : null },
       selectedRestorePoint: kind === 'rollback-restore-point' ? selectedPublic : null,
-      resolved, lease
+      resolved, lease: authority.lease
     });
   }
-  return {
+  const context = {
+    authority,
+    get lease() { return authority.lease; },
+    withLease(work) { return authority.run(() => work(context)); },
     availableBytesCalls: () => availableBytesCalls,
-    builtOperationKinds, candidateHealthAuthorizations, histories, lease, plan, revalidate, recoveryCalls, recoveryRegistry,
+    builtOperationKinds, candidateHealthAuthorizations, histories, plan, revalidate, recoveryCalls, recoveryRegistry,
     resolved, restoreCalls, runtime,
     restoredState, runtimePolicyRequests, safetyReference, selectedPrivate, trackingRemovals, trackingUpserts,
     transactionCalls, writtenStates, targetPath
   };
+  return context;
 }
 
 test('production issues Forge candidate health authorization only after the verified restore is published and recorded', async t => {
-  const context = managementFixture(t, 'rollback-restore-point');
+  await managementFixture(t, 'rollback-restore-point').withLease(async context => {
   const choices = {
     acceptEula: false,
     startAfterInstall: false,
@@ -640,10 +632,11 @@ test('production issues Forge candidate health authorization only after the veri
     serverPath: context.targetPath,
     sourceRevision: context.plan.operation.expectedContentRevision
   }), true);
+  });
 });
 
 test('detach creates a safety point and stages a full sibling transaction without removing server files', async t => {
-  const context = managementFixture(t, 'detach');
+  await managementFixture(t, 'detach').withLease(async context => {
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
     jobId: 'job-management', plan: context.plan, resolved: context.resolved
@@ -677,10 +670,11 @@ test('detach creates a safety point and stages a full sibling transaction withou
   assert.equal(context.histories[0].restorePointSha256, 'e'.repeat(64));
   assert.deepEqual(context.transactionCalls, [{ kind: 'swap', operationKind: 'detach' }]);
   assert.deepEqual(context.trackingRemovals, ['tracking-old']);
+  });
 });
 
 test('uninstall persists the exact reviewed confirmation as inactive state and does not double-write history', async t => {
-  const context = managementFixture(t, 'uninstall');
+  await managementFixture(t, 'uninstall').withLease(async context => {
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
     jobId: 'job-management', plan: context.plan, resolved: context.resolved
@@ -701,10 +695,11 @@ test('uninstall persists the exact reviewed confirmation as inactive state and d
   assert.equal(context.writtenStates[0].uninstall.restorePointSha256, 'e'.repeat(64));
   assert.deepEqual(context.histories.map(entry => entry.kind), ['uninstall']);
   assert.deepEqual(context.trackingRemovals, ['tracking-old']);
+  });
 });
 
 test('rollback restores the privately pinned selected point and keeps the fresh safety backup separate', async t => {
-  const context = managementFixture(t, 'rollback-restore-point', {
+  await managementFixture(t, 'rollback-restore-point', {
     revisionChain: {
       currentStateRevision: 7,
       currentCoordinatorRevision: 7,
@@ -716,7 +711,7 @@ test('rollback restores the privately pinned selected point and keeps the fresh 
       linkedSourceRevision: 5,
       linkedTargetRevision: 7
     }
-  });
+  }).withLease(async context => {
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
     jobId: 'job-management', plan: context.plan, selectedRestorePoint: { id: 'restore-selected' },
@@ -797,28 +792,30 @@ test('rollback restores the privately pinned selected point and keeps the fresh 
   assert.deepEqual(context.histories.map(entry => entry.kind), ['rollback']);
   assert.equal(context.histories[0].restorePointId, 'restore-safety');
   assert.notEqual(selected.reference.id, safety.id);
+  });
 });
 
 test('management revalidation rejects fresh operation-specific disk growth before creating recovery state', async t => {
-  const context = managementFixture(t, 'detach', {
+  await managementFixture(t, 'detach', {
     availableBytesValue: '3000000000',
     snapshotDisk: {
       candidateBytes: '5000000000', restorePointBytes: '1', rollbackBytes: '0', journalBytes: '1'
     }
-  });
+  }).withLease(async context => {
 
   await assert.rejects(
     context.revalidate(),
     error => error?.code === 'PLAN_STALE' && error?.details?.field === 'availableBytes'
   );
   assert.equal(context.recoveryRegistry.record, null);
+  });
 });
 
 test('management revalidation accepts current capacity when the fresh server footprint shrank after review', async t => {
-  const context = managementFixture(t, 'detach', {
+  await managementFixture(t, 'detach', {
     availableBytesValue: '3000000000',
     reviewedMinimumAvailableBytes: '5000000000'
-  });
+  }).withLease(async context => {
 
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
@@ -831,6 +828,7 @@ test('management revalidation accepts current capacity when the fresh server foo
   });
 
   assert.equal(context.recoveryRegistry.record?.phase, 'committing');
+  });
 });
 
 test('existing candidate rechecks remaining capacity after the safety restore and before copying live bytes', async t => {
@@ -843,10 +841,10 @@ test('existing candidate rechecks remaining capacity after the safety restore an
       sha256: 'a'.repeat(64), dev: '1', ino: '2', birthtime: '3'
     }]
   };
-  const context = managementFixture(t, 'detach', {
+  await managementFixture(t, 'detach', {
     availableBytesValue: call => call === 1 ? '100000000000' : '2147483648',
     copySourceSnapshot
-  });
+  }).withLease(async context => {
 
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
@@ -861,6 +859,7 @@ test('existing candidate rechecks remaining capacity after the safety restore an
 
   assert.equal(context.availableBytesCalls(), 2);
   assert.equal(fs.existsSync(context.recoveryRegistry.record.candidatePath), false);
+  });
 });
 
 test('existing candidate accepts the exact post-restore remaining-capacity boundary', async t => {
@@ -873,10 +872,10 @@ test('existing candidate accepts the exact post-restore remaining-capacity bound
       sha256: 'a'.repeat(64), dev: '1', ino: '2', birthtime: '3'
     }]
   };
-  const context = managementFixture(t, 'detach', {
+  await managementFixture(t, 'detach', {
     availableBytesValue: call => call === 1 ? '100000000000' : '2147483650',
     copySourceSnapshot
-  });
+  }).withLease(async context => {
 
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
@@ -890,32 +889,35 @@ test('existing candidate accepts the exact post-restore remaining-capacity bound
 
   assert.equal(context.availableBytesCalls(), 2);
   assert.equal(context.recoveryRegistry.record.phase, 'committing');
+  });
 });
 
 test('rollback revalidation recomputes capacity from the exact selected restore expanded bytes', async t => {
-  const context = managementFixture(t, 'rollback-restore-point', {
+  await managementFixture(t, 'rollback-restore-point', {
     availableBytesValue: '3000000000',
     selectedRestoreTotalBytes: '2000000000'
-  });
+  }).withLease(async context => {
 
   await assert.rejects(
     context.revalidate(),
     error => error?.code === 'PLAN_STALE' && error?.details?.field === 'availableBytes'
   );
   assert.equal(context.recoveryRegistry.record, null);
+  });
 });
 
 test('rollback revalidation accepts the exact one-tree selected restore capacity boundary', async t => {
-  const context = managementFixture(t, 'rollback-restore-point', {
+  await managementFixture(t, 'rollback-restore-point', {
     // Four bytes of fresh server work + one 2,000,000,000-byte selected tree +
     // the 2 GiB reserve. Promotion is a same-volume rename, not a second tree.
     availableBytesValue: '4147483652',
     selectedRestoreTotalBytes: '2000000000'
-  });
+  }).withLease(async context => {
 
   await context.revalidate();
 
   assert.equal(context.recoveryRegistry.record?.phase, 'preflight');
+  });
 });
 
 test('rollback rejects a live write that occurred after its safety restore and before candidate creation', async t => {
@@ -933,10 +935,10 @@ test('rollback rejects a live write that occurred after its safety restore and b
       dev: '1', ino: '2', birthtime: '3'
     }]
   };
-  const context = managementFixture(t, 'rollback-restore-point', {
+  await managementFixture(t, 'rollback-restore-point', {
     copySourceSnapshot,
     safetyScopeSha256: crypto.createHash('sha256').update(JSON.stringify(baselineScope)).digest('hex')
-  });
+  }).withLease(async context => {
 
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
@@ -951,10 +953,11 @@ test('rollback rejects a live write that occurred after its safety restore and b
 
   assert.equal(fs.readFileSync(path.join(context.targetPath, 'live.txt'), 'utf8'), 'changed-live');
   assert.equal(fs.existsSync(context.recoveryRegistry.record.candidatePath), false);
+  });
 });
 
 test('rollback maps verified restore byte and file progress into the candidate lifecycle range', async t => {
-  const context = managementFixture(t, 'rollback-restore-point', {
+  await managementFixture(t, 'rollback-restore-point', {
     restoreProgress: [
       { phase: 'source-verification', processedBytes: 50, totalBytes: 100, processedItems: 1, totalItems: 2 },
       { phase: 'archive-hash', processedBytes: 100, totalBytes: 100, processedItems: 0, totalItems: 2 },
@@ -964,7 +967,7 @@ test('rollback maps verified restore byte and file progress into the candidate l
       { phase: 'output-verification', processedBytes: 100, totalBytes: 100, processedItems: 2, totalItems: 2 },
       { phase: 'complete', processedBytes: 100, totalBytes: 100, processedItems: 2, totalItems: 2 }
     ]
-  });
+  }).withLease(async context => {
   const progress = [];
   const controller = new AbortController();
   await context.revalidate();
@@ -984,6 +987,7 @@ test('rollback maps verified restore byte and file progress into the candidate l
   assert.deepEqual(progress.map(value => value.percent), [43, 43, 44, 45, 48, 49, 49]);
   assert.match(progress.find(value => value.percent === 48).message, /2 of 2 files, 100 of 100 bytes/u);
   assert.equal(progress.at(-1).message, 'Verified server snapshot restored');
+  });
 });
 
 test('rollback coalesces repeated restore progress by phase while a slow durable observer is active', async t => {
@@ -996,7 +1000,7 @@ test('rollback coalesces repeated restore progress by phase while a slow durable
     { phase: 'output-verification', processedBytes: 100, totalBytes: 100, processedItems: 4, totalItems: 4 },
     { phase: 'complete', processedBytes: 100, totalBytes: 100, processedItems: 4, totalItems: 4 }
   ];
-  const context = managementFixture(t, 'rollback-restore-point', { restoreProgress });
+  await managementFixture(t, 'rollback-restore-point', { restoreProgress }).withLease(async context => {
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
     jobId: 'job-management', plan: context.plan, selectedRestorePoint: { id: 'restore-selected' },
@@ -1030,6 +1034,7 @@ test('rollback coalesces repeated restore progress by phase while a slow durable
   assert.deepEqual(progress.map(value => value.percent), [43, 43, 44, 45, 47, 49, 49]);
   assert.match(progress.find(value => value.percent === 47).message, /3 of 4 files, 80 of 100 bytes/u);
   assert.equal(progress.at(-1).message, 'Verified server snapshot restored');
+  });
 });
 
 test('rollback candidate state publication awaits the asynchronous repository writer', async t => {
@@ -1038,12 +1043,12 @@ test('rollback candidate state publication awaits the asynchronous repository wr
   const writeGate = new Promise(resolve => { releaseWrite = resolve; });
   const writeStarted = new Promise(resolve => { signalWriteStarted = resolve; });
   t.after(() => releaseWrite());
-  const context = managementFixture(t, 'rollback-restore-point', {
+  await managementFixture(t, 'rollback-restore-point', {
     candidateWriteGate: writeGate,
     onCandidateWriteAsync: () => signalWriteStarted(),
     rejectSyncCandidateWrite: true,
     rejectSyncHistoryWrite: true
-  });
+  }).withLease(async context => {
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
     jobId: 'job-management', plan: context.plan, selectedRestorePoint: { id: 'restore-selected' },
@@ -1069,13 +1074,14 @@ test('rollback candidate state publication awaits the asynchronous repository wr
   const outcome = await buildOutcome;
   assert.equal(outcome.status, 'resolved', outcome.error?.stack);
   assert.equal(context.writtenStates.length, 1);
+  });
 });
 
 test('rollback preserves only the verified runtime ledger needed by production candidate health', async t => {
-  const context = managementFixture(t, 'rollback-restore-point', {
+  await managementFixture(t, 'rollback-restore-point', {
     healthValidator: productionCandidateHealthValidator(),
     includeArchivedState: true
-  });
+  }).withLease(async context => {
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
     jobId: 'job-management', plan: context.plan, selectedRestorePoint: { id: 'restore-selected' },
@@ -1097,10 +1103,11 @@ test('rollback preserves only the verified runtime ledger needed by production c
   assert.equal(fs.existsSync(path.join(
     candidate.candidatePath, '.minecraft-core-state', 'operations', 'job-management', 'journal.json'
   )), true);
+  });
 });
 
 test('rollback accepts an older managed state when exact coordinator-domain history binds the selected snapshot', async t => {
-  const context = managementFixture(t, 'rollback-restore-point', {
+  await managementFixture(t, 'rollback-restore-point', {
     revisionChain: {
       currentStateRevision: 10,
       currentCoordinatorRevision: 12,
@@ -1112,7 +1119,7 @@ test('rollback accepts an older managed state when exact coordinator-domain hist
       linkedSourceRevision: 9,
       linkedTargetRevision: 10
     }
-  });
+  }).withLease(async context => {
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
     jobId: 'job-management', plan: context.plan, selectedRestorePoint: { id: 'restore-selected' },
@@ -1128,6 +1135,7 @@ test('rollback accepts an older managed state when exact coordinator-domain hist
   assert.equal(context.selectedPrivate.sourceRevision, 9);
   assert.equal(context.writtenStates[0].state.contentRevision, 13);
   assert.deepEqual(context.writtenStates[0].state.manifest, context.restoredState.manifest);
+  });
 });
 
 test('rollback rejects revision chains that do not bind metadata, archive, history, and managed state', async t => {
@@ -1174,9 +1182,9 @@ test('rollback rejects revision chains that do not bind metadata, archive, histo
 
   for (const [name, revisionChain] of cases) {
     await t.test(name, async st => {
-      const context = managementFixture(st, 'rollback-restore-point', {
+      await managementFixture(st, 'rollback-restore-point', {
         revisionChain: { ...baseline, ...revisionChain }
-      });
+      }).withLease(async context => {
       await context.revalidate();
       const safety = await context.runtime.createRestorePoint({
         jobId: 'job-management', plan: context.plan, selectedRestorePoint: { id: 'restore-selected' },
@@ -1187,12 +1195,13 @@ test('rollback rejects revision chains that do not bind metadata, archive, histo
         choices: { acceptEula: false, startAfterInstall: false, restorePointId: 'restore-selected' },
         restorePoint: safety, resolved: context.resolved, lease: context.lease
       }), error => error?.code === 'PLAN_STALE');
+      });
     });
   }
 });
 
 test('rollback from inactive state creates a null-runtime safety point without substituting the selected target runtime', async t => {
-  const context = managementFixture(t, 'rollback-restore-point', { inactive: true });
+  await managementFixture(t, 'rollback-restore-point', { inactive: true }).withLease(async context => {
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
     jobId: 'job-management', plan: context.plan, resolved: context.resolved
@@ -1209,10 +1218,12 @@ test('rollback from inactive state creates a null-runtime safety point without s
   assert.equal(context.recoveryRegistry.record.outcome.runtime.target.minecraftVersion, '1.19.2');
   assert.equal(context.histories[0].sourceRuntime, undefined);
   assert.equal(context.histories[0].targetRuntime.minecraftVersion, '1.19.2');
+  });
 });
 
 test('a pre-swap prepared failure uses recovery cleanup instead of post-publication rollback', async t => {
   const context = managementFixture(t, 'detach');
+  await context.withLease(async () => {
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
     jobId: 'job-management', plan: context.plan, resolved: context.resolved
@@ -1229,10 +1240,21 @@ test('a pre-swap prepared failure uses recovery cleanup instead of post-publicat
 
   assert.deepEqual(context.recoveryCalls, ['recover']);
   assert.equal(fs.readFileSync(path.join(context.targetPath, 'live.txt'), 'utf8'), 'current-live');
+  assert.equal(await context.recoveryRegistry.load('job-management'), null);
+  const history = await context.recoveryRegistry.loadHistory('job-management');
+  assert.equal(history.phase, 'failed');
+  assert.equal(history.outcome.recovery.action, 'pre-swap-restored');
+  assert.equal(fs.existsSync(history.candidatePath), false);
+  });
+  const start = await context.authority.coordinator.acquireStart(context.authority.selector,
+    { operation: 'ordinary-start', operationId: 'probe-start' });
+  start.release();
+  await context.authority.coordinator.runMutation(context.authority.selector,
+    { operation: 'ordinary-write', operationId: 'probe-write', revisionMode: 'none' }, async () => {});
 });
 
 test('possible-non-runnable uninstall finalizes without health and keeps auto-restart disabled', async t => {
-  const context = managementFixture(t, 'uninstall', { priorRunning: true });
+  await managementFixture(t, 'uninstall', { priorRunning: true }).withLease(async context => {
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
     jobId: 'job-management', plan: context.plan, resolved: context.resolved
@@ -1259,11 +1281,12 @@ test('possible-non-runnable uninstall finalizes without health and keeps auto-re
     { kind: 'healthy', operationKind: 'uninstall', validateLive: false }
   ]);
   assert.deepEqual(context.runtimePolicyRequests, [{ kind: 'auto-restart', enabled: false }]);
+  });
 });
 
 test('existing-server validation has no fallible intent persist after the transaction committed boundary', async t => {
   let persistCalls = 0;
-  const context = managementFixture(t, 'detach', {
+  await managementFixture(t, 'detach', {
     releaseTrackingReconciler: {
       createIntent({ serverId }) {
         return {
@@ -1277,7 +1300,7 @@ test('existing-server validation has no fallible intent persist after the transa
       },
       async reconcile() { throw new Error('not part of live validation'); }
     }
-  });
+  }).withLease(async context => {
   await context.revalidate();
   const safety = await context.runtime.createRestorePoint({
     jobId: 'job-management', plan: context.plan, resolved: context.resolved
@@ -1298,4 +1321,5 @@ test('existing-server validation has no fallible intent persist after the transa
   assert.deepEqual(context.transactionCalls.filter(call => call.kind === 'healthy'), [
     { kind: 'healthy', operationKind: 'detach', validateLive: true }
   ]);
+  });
 });

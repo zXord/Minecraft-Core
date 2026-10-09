@@ -14,7 +14,7 @@
     const current=()=>mounted&&id===serverId&&epoch===generation&&token===operation;
     busy=true;error=null;progress=cancellable?{phase:'inspecting'}:null;
     try{const value=await action(id,{signal:owned?.signal,onProgress:event=>{if(current())progress=event;}});if(current())apply(value);}
-    catch(caught){if(current()){error=caught;if(caught.code==='PLAN_STALE'){inspection=null;assets=null;error={message:'The installed server release changed. Refresh the companion list and inspect a fresh selection.'};}else if(caught.code==='SERVER_RUNNING'){error={message:'Stop the server before accepting this matching client pack. The inspected pack has not been paired.'};}}}
+    catch(caught){if(current()){error=caught;if(caught.code==='PLAN_STALE'){inspection=null;assets=null;error={message:'The server or verification evidence changed during this request. Refresh the companion list and try again.'};}else if(caught.code==='SERVER_RUNNING'){error={message:'Stop the server before accepting this matching client pack. The inspected pack has not been paired.'};}}}
     finally{if(current()){busy=false;controller=null;progress=null;}}
   }
   function refresh(){inspection=null;return run(async id=>({descriptor:await clientPackApi.getCompanion(id),assets:await clientPackApi.listCompanionAssets(id)}),value=>{descriptor=value.descriptor;assets=value.assets;selected='';});}

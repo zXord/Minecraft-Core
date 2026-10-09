@@ -91,6 +91,7 @@ function setupIpcHandlers(win, dependencies = {}) {
     const serverMutationPolicy = dependencies.serverMutationPolicy || createServerMutationPolicy({
       coordinator: dependencies.serverMutationCoordinator,
       getClientPackIntegration: dependencies.modpacks ? () => dependencies.modpacks.clientPackIntegration : null,
+      getModpackStateRepository: dependencies.modpacks ? () => dependencies.modpacks.stateRepository : null,
       getInstances: () => store.get('instances') || []
     });
     // Get all handler modules

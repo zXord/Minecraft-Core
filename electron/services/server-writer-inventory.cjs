@@ -57,7 +57,7 @@ const SERVER_WRITER_WRITE_SITE_DIGESTS = Object.freeze({
   'electron/ipc/config-handlers.cjs': '151afb76a3edb57ddeeb9fb24a150b23269c31b38279014a9691bc704f5e0ec6',
   'electron/ipc/file-handlers.cjs': 'be918d651aed580a58ed756f1cb2f39dc69ab9a20cb46974da62fb6240028707',
   'electron/ipc/install-handlers.cjs': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
-  'electron/ipc/management-server-handlers.cjs': '06db24fae0d97eebccffa6f3a44790dcfaf53f992eea1fa277952d3d1fb4e9aa',
+  'electron/ipc/management-server-handlers.cjs': 'cf28bfc4ae27930e34673299f97b144b204e8b131f9d9cf552cf8f5a9ab187cd',
   'electron/ipc/minecraft-launcher-handlers.cjs': 'ba99f7b69ae92a82f4e2cdf201a8bcebf584b4a1c342cd3b8a4b1784bebb7e58',
   'electron/ipc/mod-availability-handlers.cjs': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
   'electron/ipc/mod-handlers.cjs': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',

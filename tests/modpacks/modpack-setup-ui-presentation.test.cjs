@@ -145,6 +145,118 @@ test('terminal operation outcomes expose semantic border classes', async () => {
   assert.match(renderPhase('completed'), /class="[^"]*outcome[^"]*good[^"]*"/u);
 });
 
+async function renderVerification(result) {
+  const { render } = await import('svelte/server');
+  const Component = await loadServerComponent('src/components/modpacks/ModpackJobProgress.svelte');
+  return render(Component, {
+    props: { job: { jobId: 'verify-result', operationKind: 'verify', phase: 'completed', outcome: { kind: 'completed', result } } }
+  }).body;
+}
+
+const healthyVerification = {
+  type: 'modpack-verification-result', contentRevision: 1,
+  checkedFiles: '2', mismatchCount: '0', healthy: true, repairAvailable: false,
+  repair: null, mismatches: [], verifiedAt: '2026-10-09T00:00:00.000Z'
+};
+
+test('healthy Verify reports checked content without claiming a server commit', async () => {
+  // Catches Verify falling through to ordinary install success copy.
+  const html = await renderVerification(healthyVerification);
+  assert.match(html, /Verified healthy/u);
+  assert.match(html, /Checked files: 2/u);
+  assert.match(html, /Mismatches: 0/u);
+  assert.match(html, /No server files were changed/u);
+  assert.match(html, /Repair is not needed/u);
+  assert.match(html, /mp-badge good/u);
+  assert.match(html, /Return to server/u);
+  assert.doesNotMatch(html, /committed, validated from its final location, and recorded in history/u);
+});
+
+test('unhealthy Verify shows warning counts and relative mismatch names separately from Repair', async () => {
+  // Catches a completed-but-unhealthy Verify being painted green or hiding differences.
+  const html = await renderVerification({
+    ...healthyVerification, checkedFiles: '3', mismatchCount: '2', healthy: false, repairAvailable: true,
+    repair: { operationKind: 'repair', mismatchCount: '2' },
+    mismatches: [
+      { entryName: 'mods/managed.jar', origin: 'pack', role: 'mod', status: 'modified' },
+      { entryName: 'libraries/runtime.jar', origin: 'runtime', role: 'runtime', status: 'missing' }
+    ]
+  });
+  assert.match(html, /Differences found/u);
+  assert.match(html, /Checked files: 3/u);
+  assert.match(html, /Mismatches: 2/u);
+  assert.match(html, /mods\/managed.jar/u);
+  assert.match(html, /modified/u);
+  assert.match(html, /libraries\/runtime.jar/u);
+  assert.match(html, /missing/u);
+  assert.match(html, /No server files were changed/u);
+  assert.match(html, /Repair is available separately/u);
+  assert.match(html, /mp-badge warn/u);
+  assert.match(html, /class="[^"]*outcome[^"]*warn/u);
+  assert.doesNotMatch(html, /mp-badge good|committed, validated from its final location/u);
+});
+
+test('truncated Verify results explain shown versus full totals even when no labels fit', async () => {
+  // Catches sampled lists being presented as the complete mismatch inventory.
+  for (const mismatches of [[{ entryName: 'config/sample.json', status: 'modified' }], []]) {
+    const html = await renderVerification({
+      ...healthyVerification, healthy: false, mismatchCount: '148', repairAvailable: true,
+      mismatches, shownMismatchCount: String(mismatches.length),
+      omittedMismatchCount: String(148 - mismatches.length), mismatchesTruncated: true
+    });
+    assert.match(html, new RegExp(`Showing ${mismatches.length} of 148 differences`, 'u'));
+    assert.match(html, new RegExp(`${148 - mismatches.length} additional differences are not listed`, 'u'));
+    assert.match(html, /Differences found/u);
+    assert.match(html, /No server files were changed/u);
+    assert.match(html, /Repair is available separately/u);
+    assert.doesNotMatch(html, /Verified healthy|mp-badge good/u);
+  }
+  const complete = await renderVerification({
+    ...healthyVerification, healthy: false, mismatchCount: '1', repairAvailable: true,
+    mismatches: [{ entryName: 'mods/managed.jar', status: 'modified' }]
+  });
+  assert.doesNotMatch(complete, /additional differences are not listed/u);
+});
+
+test('legacy or incomplete Verify results never fabricate a healthy pass or counts', async () => {
+  // Catches absent health/counts being treated as successful verification.
+  for (const result of [undefined, { repairAvailable: true }, { healthy: true },
+    { ...healthyVerification, mismatchCount: undefined }, { ...healthyVerification, checkedFiles: 'unknown' }]) {
+    const html = await renderVerification(result);
+    assert.match(html, /Verification result unavailable/u);
+    assert.match(html, /Return to the Modpack page and run Verify again/u);
+    assert.match(html, /No server files were changed/u);
+    assert.match(html, /mp-badge warn/u);
+    assert.doesNotMatch(html, /Verified healthy|mp-badge good|Checked files:|Mismatches:|committed, validated/u);
+  }
+});
+
+test('Verify mismatch content is escaped rather than interpreted as markup', async () => {
+  // Catches unsafe HTML rendering of publisher or local filenames/statuses.
+  const html = await renderVerification({
+    ...healthyVerification, healthy: false, mismatchCount: '1', repairAvailable: true,
+    mismatches: [{ entryName: 'mods/<img src=x onerror=alert(1)>&.jar', status: '<script>bad()</script>' }]
+  });
+  assert.match(html, /mods\/&lt;img src=x onerror=alert\(1\)>&amp;.jar/u);
+  assert.match(html, /&lt;script>bad\(\)&lt;\/script>/u);
+  assert.doesNotMatch(html, /<img|<script>/u);
+});
+
+test('ordinary install success keeps committed-state copy and existing actions', async () => {
+  // Catches a Verify-only result branch accidentally replacing ordinary completion.
+  const { render } = await import('svelte/server');
+  const Component = await loadServerComponent('src/components/modpacks/ModpackJobProgress.svelte');
+  const html = render(Component, { props: { job: {
+    jobId: 'install-result', operationKind: 'install-existing', phase: 'completed',
+    outcome: { kind: 'completed', actions: [{ actionId: 'open-details', opaqueRef: 'details-ref' }] }
+  } } }).body;
+  assert.match(html, /committed, validated from its final location, and recorded in history/u);
+  assert.match(html, /mp-badge good/u);
+  assert.match(html, /Return to server/u);
+  assert.match(html, /Open details/u);
+  assert.doesNotMatch(html, /Verification result unavailable|No server files were changed/u);
+});
+
 test('neutral button hover does not erase primary or destructive hierarchy', () => {
   const shared = source('src/components/modpacks/modpack-ui.css');
 

@@ -1,13 +1,27 @@
 // Informational only: these values never authorize cleanup or process settlement.
 const STAGES = new Set([
-  'unknown', 'managed-target', 'managed-load', 'managed-java', 'managed-prepare',
+  'unknown', 'reparse-startup', 'reparse-request', 'reparse-spawn', 'reparse-pipe',
+  'reparse-exit', 'reparse-native', 'reparse-protocol', 'managed-target', 'managed-load', 'managed-java', 'managed-prepare',
+  'reparse-native-open', 'reparse-native-identity', 'reparse-native-finalpath', 'reparse-native-tag', 'reparse-native-path',
   'managed-verify', 'managed-result', 'java-validation', 'base-preparation',
   'forge-installer', 'forge-library-completion', 'forge-shim', 'forge-finalizer', 'artifact-digest', 'finalizer-load',
   'finalizer-layout', 'finalizer-artifact-collection', 'finalizer-artifact-digest',
   'finalizer-fresh-record', 'finalizer-stability-before-publish', 'finalizer-publish',
-  'finalizer-readback', 'finalizer-stability-after-publish', 'finalizer-response'
+  'finalizer-readback', 'finalizer-stability-after-publish', 'finalizer-response',
+  'candidate-health-call', 'candidate-properties-check', 'candidate-progress-60',
+  'exact-snapshot-initial-stat', 'exact-snapshot-initial-type', 'exact-snapshot-initial-symlink',
+  'exact-snapshot-initial-links', 'exact-snapshot-initial-size', 'exact-snapshot-initial-reparse',
+  'exact-snapshot-open', 'exact-snapshot-opened-stat', 'exact-snapshot-opened-identity',
+  'exact-snapshot-opened-type', 'exact-snapshot-opened-symlink', 'exact-snapshot-opened-links',
+  'exact-snapshot-opened-size', 'exact-snapshot-read', 'exact-snapshot-read-count',
+  'exact-snapshot-accumulated-safe-integer', 'exact-snapshot-accumulated-size',
+  'exact-snapshot-yield', 'exact-snapshot-yield-path-stat', 'exact-snapshot-yield-path-missing',
+  'exact-snapshot-yield-path-identity', 'exact-snapshot-post-handle-stat', 'exact-snapshot-post-path-stat',
+  'exact-snapshot-post-path-missing', 'exact-snapshot-post-handle-identity', 'exact-snapshot-post-path-identity',
+  'exact-snapshot-byte-count', 'exact-snapshot-final-reparse', 'exact-snapshot-final-stat',
+  'exact-snapshot-final-path-missing', 'exact-snapshot-final-identity', 'exact-snapshot-bytes'
 ]);
-const REASONS = new Set(['unknown', 'io', 'invalid-input', 'identity-changed', 'digest-mismatch', 'limit', 'dependency', 'protocol']);
+const REASONS = new Set(['unknown', 'io', 'invalid-input', 'identity-changed', 'digest-mismatch', 'limit', 'dependency', 'protocol', 'timeout']);
 const OS_CODES = new Set(['EACCES', 'EPERM', 'ENOENT', 'EEXIST', 'EBUSY', 'EIO', 'ENOSPC', 'EMFILE', 'ENFILE', 'ENOTDIR', 'EISDIR', 'ENOTEMPTY', 'EROFS', 'EINVAL', 'EXDEV']);
 
 function invalidDiagnostic() {

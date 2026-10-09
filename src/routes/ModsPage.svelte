@@ -1,5 +1,7 @@
 <script>
   export let serverPath = '';
+  export let modpackManaged = null;
+  export let modpackStateGeneration = 0;
   import { onMount, onDestroy } from 'svelte';
   import ServerModManager from '../components/server/ServerModManager.svelte';
   import logger from '../utils/logger.js';
@@ -188,7 +190,7 @@
   </div>
   
   <div class="mods-content">
-    <ServerModManager {serverPath} />
+    <ServerModManager {serverPath} {modpackManaged} {modpackStateGeneration} on:openModpack />
   </div>
 </div>
 

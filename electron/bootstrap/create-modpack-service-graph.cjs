@@ -667,6 +667,7 @@ function createModpackServiceGraph(deps = {}) {
   const serverMutationPolicy = deps.serverMutationPolicy || createServerMutationPolicy({
     coordinator,
     getClientPackIntegration: () => modpackServices?.clientPackIntegration || null,
+    getModpackStateRepository: () => modpackServices?.stateRepository || null,
     getInstances: () => store.get('instances') || [],
     createOperationId: channel => `${channel}-${randomUUID()}`
   });
@@ -778,6 +779,7 @@ function createModpackServiceGraph(deps = {}) {
 
   const modpacks = {};
   Object.defineProperties(modpacks, {
+    stateRepository: { enumerable: true, get: () => modpackServices?.stateRepository || null },
     clientPackService: { enumerable: true, get: () => modpackServices?.clientPackService || null },
     companionService: { enumerable: true, get: () => modpackServices?.companionService || null },
     clientPackIntegration: { enumerable: true, get: () => modpackServices?.clientPackIntegration || null },

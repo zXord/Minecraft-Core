@@ -976,7 +976,9 @@ export function showDependencyModal(mod, dependencies) {
  * @param {string} mainContentType - Content type for the main content
  * @returns {Promise<boolean>} - True if successful
  */
-export async function installWithDependencies(serverPath, installFn = installMod, mainContentType = null) {
+export async function installWithDependencies(serverPath, installFn = installMod, mainContentType = null, options = {}) {
+  const isCurrent = options.isCurrent || (() => true);
+  if (!isCurrent()) return false;
   const mod = get(modToInstall);
   
   logger.info('Starting installation with dependencies', {
@@ -1032,6 +1034,7 @@ export async function installWithDependencies(serverPath, installFn = installMod
     
     // Install dependencies first
     for (const dependency of dependencies) {
+      if (!isCurrent()) return false;
       logger.debug('Processing dependency for installation', {
         category: 'mods',
         data: {
@@ -1063,6 +1066,7 @@ export async function installWithDependencies(serverPath, installFn = installMod
         }
         
         const depName = await resolveDependencyInstallName(dependency);
+        if (!isCurrent()) return false;
         if (!depName) {
           throw new Error(`Required dependency ${dependency.projectId || 'unknown'} could not be resolved`);
         }
@@ -1090,6 +1094,7 @@ export async function installWithDependencies(serverPath, installFn = installMod
             loader,
             mcVersion
           });
+          if (!isCurrent()) return false;
           
           if (versions && versions.length > 0) {
             // Sort versions by release date (newest first)
@@ -1149,7 +1154,8 @@ export async function installWithDependencies(serverPath, installFn = installMod
         });
         
         // Install the dependency - dependencies are always mods, regardless of main content type
-        const dependencyInstalled = await installFn(depMod, serverPath, { contentType: 'mods' });
+        const dependencyInstalled = await installFn(depMod, serverPath, { ...options, contentType: 'mods' });
+        if (!isCurrent()) return false;
         if (dependencyInstalled) {
           installedCount++;
         } else {
@@ -1171,8 +1177,10 @@ export async function installWithDependencies(serverPath, installFn = installMod
     }
     
     // Now install the main content with the correct content type
-    const installOptions = mainContentType ? { contentType: mainContentType } : {};
+    if (!isCurrent()) return false;
+    const installOptions = mainContentType ? { ...options, contentType: mainContentType } : options;
     const mainInstalled = await installFn(mod, serverPath, installOptions);
+    if (!isCurrent()) return false;
     if (!mainInstalled) {
       throw new Error(`Failed to install ${mod.name || mod.id}`);
     }
@@ -1197,6 +1205,7 @@ export async function installWithDependencies(serverPath, installFn = installMod
     
     return true;
   } catch (err) {
+    if (!isCurrent()) return false;
     logger.error('Failed to install with dependencies', {
       category: 'mods',
       data: {

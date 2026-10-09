@@ -59,6 +59,21 @@ test('explicit companion failure cannot be interpreted as an unmanaged server', 
     clientModpackError: { code: 'CLIENT_PACK_UNAVAILABLE', message: 'Unavailable' } })));
   await assert.rejects(f.client.getRequirement('registered'), { code: 'CLIENT_PACK_UNAVAILABLE' });
 });
+
+test('known drift error refuses requirement and launch using local guidance, never remote message', async t => {
+  const f = await fixture(t, (_req, res) => res.end(JSON.stringify({ clientModpack: null,
+    clientModpackError: { code: 'CLIENT_PACK_SERVER_CHANGED', message: 'C:\\private token=secret run-command' } })));
+  for (const read of [() => f.client.getRequirement('registered'), () => f.client.getLaunchConnection('registered')]) {
+    await assert.rejects(read(), error => error.code === 'CLIENT_PACK_SERVER_CHANGED' && /Use Modpack Verify and Repair/.test(error.message) && !error.message.includes('secret'));
+  }
+});
+
+test('unknown remote error codes remain generic refusal and authenticated unmanaged stays null', async t => {
+  let failure = { code: 'REMOTE_COMMAND', message: 'run secret' };
+  const f = await fixture(t, (_req, res) => res.end(JSON.stringify({ clientModpack: null, ...(failure ? { clientModpackError: failure } : {}) })));
+  await assert.rejects(f.client.getRequirement('registered'), { code: 'CLIENT_PACK_UNAVAILABLE' });
+  failure = null; assert.equal(await f.client.getRequirement('registered'), null);
+});
 test('launch connection uses saved host and authenticated game port bound to exact companion', async t => {
   const f = await fixture(t, (_req, res) => res.end(JSON.stringify({ clientModpack: descriptor, minecraftPort: '25575' })));
   assert.deepEqual(await f.client.getLaunchConnection('registered', { serverFingerprint: descriptor.serverFingerprint,

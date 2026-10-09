@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
 import harness from './fixtures/modpack-harness.cjs';
+import os from 'node:os';
+import path from 'node:path';
 
 async function chooseModrinthFromOverview(page, version) {
   await page.getByRole('button', { name: 'Install modpack' }).click();
@@ -223,14 +225,26 @@ test.describe.serial('managed modpack lifecycle', () => {
     expect(fixture.readState().state.source).toMatchObject({ provider: 'local', version: 'local-1' });
   });
 
-  test('verify enables targeted repair and rollback restores an exact recorded point', async () => {
+  test('verify enables targeted repair and rollback restores an exact recorded point', async ({}, testInfo) => {
     const { page } = fixture;
     await page.getByRole('button', { name: 'Actions' }).click();
     const repair = page.getByRole('button', { name: 'Repair', exact: true });
     await expect(repair).toBeDisabled();
     await expect(page.getByText(/Repair is offered separately and only when managed content differs from the manifest\./u)).toBeVisible();
     await page.getByRole('button', { name: 'Verify', exact: true }).click();
-    await expectCompleted(page);
+    const verification = page.locator('section.outcome');
+    await expect(verification.getByRole('heading', { name: 'Differences found' })).toBeVisible();
+    await expect(verification).toBeFocused();
+    await expect(verification).toHaveClass(/\bwarn\b/u);
+    await expect(verification).toContainText('Checked files: 2');
+    await expect(verification).toContainText('Mismatches: 1');
+    await expect(verification).toContainText('mods/managed.jar');
+    await expect(verification).toContainText('modified');
+    await expect(verification).toContainText('No server files were changed');
+    await expect(verification).toContainText('Repair is available separately');
+    await expect(verification).not.toContainText('committed, validated from its final location');
+    await page.screenshot({ path: testInfo.outputPath('verify-differences.png'), fullPage: false });
+    await expect(page.getByText('Operation status error', { exact: true })).not.toBeVisible();
     await returnToOverview(page);
 
     await page.getByRole('button', { name: 'Actions' }).click();
@@ -655,6 +669,11 @@ test('managed modpack notifications stay on the Modpack tab and page instead of 
   });
   try {
     const { page } = fixture;
+    const rendererErrors = [];
+    page.on('pageerror', error => rendererErrors.push(error.message));
+    expect(page.url()).toContain('/dist/index.html');
+    await expect(page).toHaveTitle('Minecraft Core');
+    await expect(page.locator('vite-error-overlay')).toHaveCount(0);
     const header = page.locator('.server-header');
     const settings = header.getByRole('button', { name: 'Open app settings' });
     await expect(settings).toBeVisible();
@@ -674,6 +693,38 @@ test('managed modpack notifications stay on the Modpack tab and page instead of 
     const contextualPanel = page.locator('.modpack-page').getByRole('region', { name: 'Persistent modpack notifications' });
     await expect(contextualPanel.getByText('Exact modpack update available', { exact: true })).toBeVisible();
     await expect(contextualPanel.getByText('Other server update', { exact: true })).toHaveCount(0);
+    // Actual styled App: the ordinary selector overlay must own hit-testing
+    // even while contextual notifications remain mounted underneath it.
+    await page.getByRole('button', { name: '☰' }).click();
+    await page.getByRole('button', { name: '+ Add Instance', exact: true }).click();
+    const selector = page.getByRole('dialog').filter({ hasText: 'Welcome to Minecraft Core' });
+    await expect(selector).toBeVisible();
+    await page.screenshot({ path: path.join(os.tmpdir(), 'minecraft-core-task6-notification-selector.png') });
+    const stacking = await page.evaluate(() => {
+      const overlay = document.querySelector('.modal-overlay');
+      const host = document.querySelector('.modpack-page .notification-host.contextual');
+      return { overlay: Number(getComputedStyle(overlay).zIndex), host: Number(getComputedStyle(host).zIndex) };
+    });
+    expect(stacking.overlay).toBeGreaterThan(stacking.host);
+    for (const target of [contextualBell, contextualPanel.getByRole('button', { name: 'Close notifications' })]) {
+      const point = await target.evaluate(element => {
+        const bounds = element.getBoundingClientRect();
+        const x = bounds.left + bounds.width / 2;
+        const y = bounds.top + bounds.height / 2;
+        return { x, y, overlayOwnsPoint: Boolean(document.elementFromPoint(x, y)?.closest('.modal-overlay')) };
+      });
+      expect(point.overlayOwnsPoint).toBe(true);
+      await page.mouse.click(point.x, point.y);
+      // Backdrop dismissal cannot activate the notification underneath.
+      await expect(contextualPanel).toBeVisible();
+      if (!await selector.isVisible()) {
+        await page.getByRole('button', { name: '+ Add Instance', exact: true }).click();
+        await expect(selector).toBeVisible();
+      }
+    }
+    await selector.press('Escape');
+    await expect(selector).toHaveCount(0);
+    await page.getByRole('button', { name: '☰' }).click();
     await contextualPanel.getByRole('button', { name: 'Close notifications' }).click();
     await expect(contextualPanel).toHaveCount(0);
     await expect(contextualBell).toBeFocused();
@@ -681,9 +732,92 @@ test('managed modpack notifications stay on the Modpack tab and page instead of 
     await page.getByRole('button', { name: 'Switch modpack' }).click();
     await expect(contextualBell).toBeVisible();
     await expect(page.getByRole('button', { name: 'Back to Modpack overview' })).toBeVisible();
+    expect(rendererErrors).toEqual([]);
   } finally {
     await fixture.close();
   }
+});
+
+const dashboardStarts = page => page.locator('.server-controls').getByRole('button', { name: 'Start', exact: true });
+const dashboardRecovery = page => page.getByRole('status', { name: 'Server recovery status' });
+
+async function openDashboard(page) {
+  await page.locator('.server-tabs').getByRole('button', { name: /Dashboard/u }).click();
+  await expect(page.getByRole('heading', { name: 'Minecraft Server Control Panel' })).toBeVisible();
+}
+
+test('Dashboard Modpack Dashboard always rechecks recovery and normal completion restores both Starts', async () => {
+  const fixture = await harness.launchModpackApp({
+    profile: 'managed',
+    recoveryRecords: [{ recoveryId: `recovery-${'a'.repeat(32)}`, serverId: 'server-e2e', phase: 'failed', title: 'Unfinished cleanup', automaticPossible: true, actions: [{ actionId: 'recover-safely', label: 'Retry verified recovery', recommended: true }] }],
+    recoveryListFixture: { allowRegisteredResolution: true }
+  });
+  try {
+    const { page } = fixture;
+    await expect(dashboardRecovery(page)).toContainText('Recovery is pending for this server.');
+    await expect(dashboardStarts(page).nth(0)).toBeDisabled();
+    await expect(dashboardStarts(page).nth(1)).toBeDisabled();
+    await dashboardRecovery(page).getByRole('button', { name: 'Review Modpack' }).click();
+    await expect(page.getByRole('region', { name: 'Modpack recovery' })).toBeVisible();
+    await openDashboard(page);
+    await expect(dashboardRecovery(page)).toContainText('Recovery is pending for this server.');
+    await fixture.openModpack();
+    await page.getByRole('button', { name: 'Retry verified recovery' }).click();
+    await expect.poll(() => fixture.readState().recovery.length).toBe(0);
+    const callsBeforeDashboard = fixture.readState().recoveryListCalls;
+    await openDashboard(page);
+    await expect(dashboardRecovery(page)).toHaveCount(0);
+    await expect(dashboardStarts(page).nth(0)).toBeEnabled();
+    await expect(dashboardStarts(page).nth(1)).toBeEnabled();
+    expect(fixture.readState().recoveryListCalls).toBeGreaterThan(callsBeforeDashboard);
+    expect(fixture.readState().recoveryRuns).toBe(1);
+  } finally { await fixture.close(); }
+});
+
+for (const staleReply of ['success', 'rejection']) {
+test(`actual App server switch ignores an older delayed recovery ${staleReply}`, async () => {
+  const fixture = await harness.launchModpackApp({
+    profile: 'managed', secondaryServerState: { schemaVersion: 1, modpackManaged: false, lifecycleMode: 'unmanaged', source: null, runtime: null, installedAt: null, contentRevision: 0, managedFileCount: 0 },
+    recoveryRecords: [{ recoveryId: 'other-recovery', serverId: 'server-e2e' }],
+    // Keep the initial ownership read from starting an immediate generation
+    // refresh before the delayed recovery read has been exercised/switched.
+    refreshFixture: { stateDelayMsByInstanceId: { 'server-e2e': 6000 } },
+    recoveryListFixture: { delayMsByCall: { 1: 2000 }, failureCalls: staleReply === 'rejection' ? [1] : [] }
+  });
+  try {
+    const { page } = fixture;
+    await expect(dashboardRecovery(page)).toContainText('Checking recovery status');
+    await expect(dashboardStarts(page).nth(0)).toBeDisabled();
+    await page.getByRole('button', { name: '☰' }).click();
+    await page.locator('.instance-item').filter({ hasText: 'E2E Secondary Server' }).click();
+    await expect(dashboardStarts(page).nth(0)).toBeEnabled();
+    await expect(dashboardStarts(page).nth(1)).toBeEnabled();
+    await expect.poll(() => fixture.readState().recoveryListCompletedCalls.includes(1)).toBe(true);
+    await expect(dashboardRecovery(page)).toHaveCount(0);
+    await expect(dashboardStarts(page).nth(0)).toBeEnabled();
+    // Selecting an instance intentionally leaves the sidebar overlay open.
+    // Dismiss it normally before navigating, without bypassing hit-testing.
+    await page.getByRole('button', { name: '☰' }).click();
+    await fixture.openModpack();
+    await expect(page.getByRole('region', { name: 'Modpack recovery' })).toHaveCount(0);
+    await openDashboard(page);
+    await expect(dashboardStarts(page).nth(0)).toBeEnabled();
+  } finally { await fixture.close(); }
+});
+}
+
+test('actual App unavailable recovery cannot enable Start and ordinary Retry check confirms empty', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'unmanaged', recoveryListFixture: { failureCalls: [1] } });
+  try {
+    const { page } = fixture;
+    await expect(dashboardRecovery(page)).toContainText('Recovery status could not be checked');
+    await expect(dashboardStarts(page).nth(0)).toBeDisabled();
+    await expect(dashboardStarts(page).nth(1)).toBeDisabled();
+    await dashboardRecovery(page).getByRole('button', { name: 'Retry check' }).click();
+    await expect(dashboardRecovery(page)).toHaveCount(0);
+    await expect(dashboardStarts(page).nth(0)).toBeEnabled();
+    await expect(dashboardStarts(page).nth(1)).toBeEnabled();
+  } finally { await fixture.close(); }
 });
 
 test('an unmanaged server shows neither a notification badge nor a notification control', async () => {

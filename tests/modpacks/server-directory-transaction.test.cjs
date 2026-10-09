@@ -1649,6 +1649,216 @@ test('canonical properties verification rejects synchronous content reads and yi
   assert.equal(fs.existsSync(fixture.paths.rollbackPath), false);
 });
 
+// Removing a snapshot guard annotation must lose the independently expected
+// bounded diagnostic below, without changing the transaction's rejection.
+function snapshotStatDouble(stat, overrides = {}) {
+  return new Proxy(stat, {
+    get(target, key) {
+      if (Object.hasOwn(overrides, key)) return overrides[key];
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  });
+}
+
+async function snapshotDiagnosticFixture(t, fault = {}) {
+  const fixture = await existingFixture(t);
+  let armed = false, pathStats = 0, handleStats = 0, probes = 0, reads = 0;
+  const validate = fixture.context.healthValidator.validateCandidate;
+  fixture.context.healthValidator.validateCandidate = async request => {
+    const result = await validate(request);
+    if (fault.health) await fault.health(request);
+    armed = true;
+    return result;
+  };
+  const isProperties = filePath => armed && filePath === path.join(fixture.paths.candidatePath, 'server.properties');
+  const fsPromises = Object.create(fs.promises);
+  fsPromises.lstat = async (filePath, ...args) => {
+    const stat = await fs.promises.lstat(filePath, ...args);
+    if (!isProperties(filePath)) return stat;
+    pathStats++;
+    return fault.pathStat ? fault.pathStat(stat, pathStats) : stat;
+  };
+  fsPromises.open = async (filePath, ...args) => {
+    if (isProperties(filePath) && fault.openError) throw fault.openError;
+    const handle = await fs.promises.open(filePath, ...args);
+    if (!isProperties(filePath)) return handle;
+    return new Proxy(handle, {
+      get(target, key) {
+        if (key === 'stat') return async (...statArgs) => {
+          const stat = await target.stat(...statArgs);
+          handleStats++;
+          return fault.handleStat ? fault.handleStat(stat, handleStats) : stat;
+        };
+        if (key === 'read') return async (...readArgs) => {
+          reads++;
+          return fault.read ? fault.read(target, readArgs, reads) : target.read(...readArgs);
+        };
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    });
+  };
+  fixture.context.fsPromises = fsPromises;
+  fixture.context.reparseInspector = { async isReparsePoint(filePath) {
+    if (!isProperties(filePath)) return false;
+    probes++;
+    return fault.probe ? fault.probe(probes) : false;
+  } };
+  return fixture;
+}
+
+const snapshotGuardCases = [
+  ['initial-type', 'invalid-input', { pathStat: (s, n) => n === 1 ? snapshotStatDouble(s, { isFile: () => false }) : s }],
+  ['initial-symlink', 'invalid-input', { pathStat: (s, n) => n === 1 ? snapshotStatDouble(s, { isSymbolicLink: () => true }) : s }],
+  ['initial-links', 'invalid-input', { pathStat: (s, n) => n === 1 ? snapshotStatDouble(s, { nlink: 2n }) : s }],
+  ['initial-size', 'limit', { pathStat: (s, n) => n === 1 ? snapshotStatDouble(s, { size: 1048577n }) : s }],
+  ['initial-reparse', 'protocol', { probe: n => n === 1 ? { unexpected: true } : false }],
+  ['opened-identity', 'identity-changed', { handleStat: (s, n) => n === 1 ? snapshotStatDouble(s, { mtimeNs: s.mtimeNs + 1n }) : s }, 32],
+  ['opened-type', 'invalid-input', { handleStat: (s, n) => n === 1 ? snapshotStatDouble(s, { isFile: () => false }) : s }],
+  ['opened-symlink', 'invalid-input', { handleStat: (s, n) => n === 1 ? snapshotStatDouble(s, { isSymbolicLink: () => true }) : s }],
+  ['read-count', 'protocol', { read: async () => ({ bytesRead: -1 }) }],
+  ['read-count', 'protocol', { read: async () => ({ bytesRead: 1.5 }) }],
+  ['read-count', 'protocol', { read: async () => ({ bytesRead: 1048577 }) }],
+  ['read-count', 'protocol', { read: async () => undefined }],
+  ['accumulated-size', 'limit', { read: async (_h, args) => ({ bytesRead: args[2] }) }],
+  ['post-path-missing', 'identity-changed', { pathStat: (s, n) => { if (n === 2) throw Object.assign(new Error('private'), { code: 'ENOENT' }); return s; } }],
+  ['post-handle-identity', 'identity-changed', { handleStat: (s, n) => n === 2 ? snapshotStatDouble(s, { ctimeNs: s.ctimeNs + 1n }) : s }, 64],
+  ['post-path-identity', 'identity-changed', { pathStat: (s, n) => n === 2 ? snapshotStatDouble(s, { birthtimeNs: s.birthtimeNs + 1n }) : s }, 128],
+  ['byte-count', 'protocol', { read: async () => ({ bytesRead: 0 }) }],
+  ['final-reparse', 'protocol', { probe: n => n === 2 ? true : false }],
+  ['final-path-missing', 'identity-changed', { pathStat: (s, n) => { if (n === 3) throw Object.assign(new Error('private'), { code: 'ENOENT' }); return s; } }],
+  ['final-identity', 'identity-changed', { pathStat: (s, n) => n === 3 ? snapshotStatDouble(s, { nlink: 2n, dev: s.dev + 1n, ino: s.ino + 1n, size: s.size + 1n,
+    mtimeNs: s.mtimeNs + 1n, ctimeNs: s.ctimeNs + 1n, birthtimeNs: s.birthtimeNs + 1n, mode: s.mode + 1n }) : s }, 247]
+];
+for (const [index, [stage, reason, fault, mask]] of snapshotGuardCases.entries()) test(`exact snapshot diagnostic guard ${stage} (${index})`, async t => {
+  const fixture = await snapshotDiagnosticFixture(t, fault);
+  await assert.rejects(require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs').buildExistingCandidate(fixture.context), error => {
+    assert.equal(error.code, 'RECOVERY_REQUIRED');
+    assert.equal(error.message, 'The server publication requires recovery');
+    assert.deepEqual(error.runtimeDiagnostic, { stage: `exact-snapshot-${stage}`, reason,
+      ...(mask === undefined ? {} : { changedIdentityFields: mask }) });
+    return true;
+  });
+  assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'server.jar'), 'utf8'), 'old-server');
+  assert.equal(fs.existsSync(fixture.paths.rollbackPath), false);
+});
+
+test('exact snapshot diagnostic I/O failures preserve original identity and existing more-specific diagnostics', async t => {
+  const ioCases = [
+    ['initial-stat', error => ({ pathStat: (_s, n) => { if (n === 1) throw error; return _s; } })],
+    ['open', error => ({ openError: error })],
+    ['opened-stat', error => ({ handleStat: (_s, n) => { if (n === 1) throw error; return _s; } })],
+    ['read', error => ({ read: async () => { throw error; } })],
+    ['post-handle-stat', error => ({ handleStat: (_s, n) => { if (n === 2) throw error; return _s; } })],
+    ['post-path-stat', error => ({ pathStat: (_s, n) => { if (n === 2) throw error; return _s; } })],
+    ['final-stat', error => ({ pathStat: (_s, n) => { if (n === 3) throw error; return _s; } })],
+    ['initial-reparse', error => ({ probe: n => { if (n === 1) throw error; return false; } })],
+    ['final-reparse', error => ({ probe: n => { if (n === 2) throw error; return false; } })]
+  ];
+  const { retainRuntimeWorkerQuiescence, waitForRuntimeWorkerQuiescence } = require('../../electron/services/runtime-worker-quiescence.cjs');
+  for (const [stage, inject] of ioCases) await t.test(stage, async subtest => {
+    const failure = Object.assign(new Error('C:\\private\\properties raw failure'), { code: 'EACCES' });
+    retainRuntimeWorkerQuiescence(failure, Promise.resolve(true));
+    const fixture = await snapshotDiagnosticFixture(subtest, inject(failure));
+    const rejected = await require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs').buildExistingCandidate(fixture.context).then(
+      () => assert.fail('snapshot I/O failure must reject'), error => error);
+    assert.equal(rejected, failure);
+    await waitForRuntimeWorkerQuiescence(rejected);
+    assert.deepEqual(rejected.runtimeDiagnostic, { stage: `exact-snapshot-${stage}`, reason: 'io', osCode: 'EACCES' });
+  });
+  const failure = Object.assign(new Error('private probe'), { runtimeDiagnostic: { stage: 'reparse-native-tag', reason: 'protocol' } });
+  const fixture = await snapshotDiagnosticFixture(t, { probe: () => { throw failure; } });
+  await assert.rejects(require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs').buildExistingCandidate(fixture.context), error => {
+    assert.equal(error, failure);
+    assert.deepEqual(error.runtimeDiagnostic, { stage: 'reparse-native-tag', reason: 'protocol' });
+    return true;
+  });
+});
+
+test('exact snapshot diagnostic distinguishes health await, stable bytes mismatch and progress 60 rejection', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  await t.test('health await', async subtest => {
+    const failure = new Error('private health failure');
+    Object.defineProperty(failure, 'candidateBootDiagnostic', { value: { stage: 'candidate-boot', boundary: 'readiness', category: 'health-failure' } });
+    const fixture = await existingFixture(subtest, { candidateHealthError: failure });
+    await assert.rejects(transaction.buildExistingCandidate(fixture.context), error => {
+      assert.equal(error, failure);
+      assert.deepEqual(error.runtimeDiagnostic, { stage: 'candidate-health-call', reason: 'unknown' });
+      assert.equal(error.candidateBootDiagnostic.boundary, 'readiness');
+      return true;
+    });
+  });
+  await t.test('stable changed bytes', async subtest => {
+    const fixture = await existingFixture(subtest, { mutatePropertiesDuringCandidateHealth: true });
+    await assert.rejects(transaction.buildExistingCandidate(fixture.context), error => {
+      assert.equal(error.code, 'HEALTH_CHECK_FAILED');
+      assert.deepEqual(error.runtimeDiagnostic, { stage: 'exact-snapshot-bytes', reason: 'digest-mismatch' });
+      return true;
+    });
+  });
+  await t.test('progress 60', async subtest => {
+    const failure = new Error('private progress failure');
+    const fixture = await existingFixture(subtest);
+    fixture.context.onProgress = async progress => { if (progress.percent === 60) throw failure; };
+    await assert.rejects(transaction.buildExistingCandidate(fixture.context), error => {
+      assert.equal(error, failure);
+      assert.deepEqual(error.runtimeDiagnostic, { stage: 'candidate-progress-60', reason: 'unknown' });
+      return true;
+    });
+  });
+});
+
+test('exact snapshot diagnostic leaves overlay/restore successful but rejects within-read nanosecond mutation', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await snapshotDiagnosticFixture(t, { health: async ({ candidatePath }) => {
+    const properties = path.join(candidatePath, 'server.properties');
+    const bytes = fs.readFileSync(properties);
+    fs.writeFileSync(properties, 'server-port=25566\n');
+    fs.writeFileSync(properties, bytes);
+  } });
+  assert.equal((await transaction.buildExistingCandidate(fixture.context)).phase, 'committing');
+  let changed = false;
+  const mutation = await snapshotDiagnosticFixture(t, {
+    read: async (handle, args) => { const result = await handle.read(...args); if (result.bytesRead) changed = true; return result; },
+    handleStat: (s, n) => n === 2 && changed ? snapshotStatDouble(s, { mtimeNs: s.mtimeNs + 1n }) : s
+  });
+  await assert.rejects(transaction.buildExistingCandidate(mutation.context), error => {
+    assert.deepEqual(error.runtimeDiagnostic, { stage: 'exact-snapshot-post-handle-identity', reason: 'identity-changed', changedIdentityFields: 32 });
+    return true;
+  });
+});
+
+test('exact snapshot diagnostic annotation never masks frozen or accessor-bearing original failures', async t => {
+  let reads = 0;
+  const accessor = new Error('private accessor');
+  Object.defineProperty(accessor, 'runtimeDiagnostic', { get() { reads++; throw new Error('must not run'); } });
+  for (const failure of [Object.freeze(new Error('private frozen')), accessor]) {
+    const fixture = await snapshotDiagnosticFixture(t, { openError: failure });
+    await assert.rejects(require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs').buildExistingCandidate(fixture.context), error => error === failure);
+  }
+  assert.equal(reads, 0);
+});
+
+test('exact snapshot diagnostic preserves candidate cancellation and mode-only snapshot acceptance', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const cancellation = Object.assign(new Error('cancelled'), { code: 'CANCELLED' });
+  const health = await existingFixture(t, { candidateHealthError: cancellation });
+  await assert.rejects(transaction.buildExistingCandidate(health.context), error => error === cancellation && error.code === 'CANCELLED');
+  const controller = new AbortController();
+  const reading = await snapshotDiagnosticFixture(t, { read: async (handle, args) => {
+    const result = await handle.read(...args);
+    if (result.bytesRead) controller.abort();
+    return result;
+  } });
+  reading.context.signal = controller.signal;
+  await assert.rejects(transaction.buildExistingCandidate(reading.context), error => error.code === 'CANCELLED');
+  assert.equal(fs.existsSync(reading.paths.rollbackPath), false);
+  assert.equal(fs.readFileSync(path.join(reading.targetPath, 'server.jar'), 'utf8'), 'old-server');
+  const modeOnly = await snapshotDiagnosticFixture(t, { handleStat: (s, n) => n === 2 ? snapshotStatDouble(s, { mode: s.mode + 1n }) : s });
+  assert.equal((await transaction.buildExistingCandidate(modeOnly.context)).phase, 'committing');
+});
+
 test('links, hardlinks, reparse entries, and sibling aliases fail before the original live path moves', async (t) => {
   await t.test('hardlink', async (subtest) => {
     const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');

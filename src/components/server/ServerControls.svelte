@@ -13,6 +13,8 @@
   import { navigate } from '../../router.js';
   import logger from '../../utils/logger.js';
   import { getInviteDisplayState } from '../../utils/server/inviteDisplayState.js';
+  import { modpackApi } from '../../utils/modpacks/modpackApi.js';
+  import { filterRecoveryRecordsForServer } from '../../stores/modpackNotificationStore.js';
   
   // Import compareVersions function for semantic version comparison
   function compareVersions(versionA, versionB) {
@@ -81,6 +83,54 @@
   let port = 25565;
   let maxRam = 4;
   $: currentInstanceId = currentInstance?.type === 'server' ? currentInstance.id : null;
+  let recoveryMounted = false;
+  let recoveryStatus = 'unknown';
+  let recoveryPendingCount = 0;
+  let recoveryRequestSequence = 0;
+  let autoStartIntentionSequence = 0;
+  let loadedRecoveryScopeKey = '';
+  let unsubscribeRecoveryProgress;
+  const terminalRecoveryJobs = new Set();
+  const terminalRecoveryPhases = new Set(['completed', 'cancelled', 'rolled-back', 'failed', 'recovery-required']);
+  $: recoveryScopeKey = JSON.stringify([currentInstanceId, serverPath, modpackStateGeneration]);
+  $: if (recoveryMounted && recoveryScopeKey !== loadedRecoveryScopeKey) {
+    autoStartIntentionSequence += 1;
+    pendingAutoStart = false;
+    terminalRecoveryJobs.clear();
+    void refreshRecovery();
+  }
+  $: recoveryStartBlocked = !currentInstanceId || !serverPath || recoveryStatus !== 'ready' ||
+    recoveryPendingCount > 0 || recoveryScopeKey !== loadedRecoveryScopeKey;
+
+  function currentRecoveryScopeKey() {
+    return JSON.stringify([currentInstance?.type === 'server' ? currentInstance.id : null, serverPath, modpackStateGeneration]);
+  }
+
+  function canStartAfterRecoveryCheck() {
+    return recoveryMounted && Boolean(currentInstanceId && serverPath) && recoveryStatus === 'ready' &&
+      recoveryPendingCount === 0 && currentRecoveryScopeKey() === loadedRecoveryScopeKey;
+  }
+
+  async function refreshRecovery() {
+    const sequence = ++recoveryRequestSequence;
+    const scopeKey = currentRecoveryScopeKey();
+    const serverId = currentInstanceId;
+    loadedRecoveryScopeKey = scopeKey;
+    recoveryPendingCount = 0;
+    recoveryStatus = serverId && serverPath ? 'loading' : 'unknown';
+    if (!recoveryMounted || !serverId || !serverPath) return;
+    const isCurrent = () => recoveryMounted && sequence === recoveryRequestSequence && scopeKey === currentRecoveryScopeKey();
+    try {
+      const result = await modpackApi.listRecovery();
+      if (!isCurrent()) return;
+      const records = Array.isArray(result) ? result : result?.items;
+      if (!Array.isArray(records)) throw new Error('Recovery list unavailable');
+      recoveryPendingCount = filterRecoveryRecordsForServer(records, serverId).length;
+      recoveryStatus = 'ready';
+    } catch {
+      if (isCurrent()) recoveryStatus = 'error';
+    }
+  }
   const ACTIVE_SERVER_STATUSES = new Set(['Starting', 'Running', 'Stopping']);
   const TRANSITIONAL_SERVER_STATUSES = new Set(['Starting', 'Stopping']);
   $: status = $serverState.status;
@@ -881,7 +931,10 @@
       inviteError = 'Failed to copy invite link';
     }
   }
-  async function startServer() {
+  async function startServer(options = {}) {
+    const intention = options?.autoStartIntention;
+    const isCurrent = () => !intention || autoStartIntentionIsCurrent(intention);
+    if (!isCurrent() || !canStartAfterRecoveryCheck()) return;
     logger.info('Starting Minecraft server', {
       category: 'ui',
       data: {
@@ -902,17 +955,20 @@
         maxRam: maxRam,
         managementPort: managementPort
       });
+      if (!isCurrent()) return;
 
       if (result && result.success) {
         clearPortConflict('minecraft');
         errorMessage.set('');
         await checkServerStatus();
+        if (!isCurrent()) return;
         return;
       }
 
       if (result?.code === 'ALREADY_RUNNING') {
         errorMessage.set('');
         await checkServerStatus();
+        if (!isCurrent()) return;
         return;
       }
 
@@ -929,8 +985,10 @@
       if (result?.repairable) {
         maintenanceExpanded = true;
         await checkHealth();
+        if (!isCurrent()) return;
       }
     } catch (error) {
+      if (!isCurrent()) return;
       logger.error('Failed to start server', {
         category: 'ui',
         data: {
@@ -1049,6 +1107,19 @@
   }
 
   onMount(() => {
+    recoveryMounted = true;
+    const mountRecoveryScope = currentRecoveryScopeKey();
+    const initialRecoveryRead = refreshRecovery();
+    const initialRecoverySequence = recoveryRequestSequence;
+    unsubscribeRecoveryProgress = modpackApi.onJobProgress(event => {
+      if (!recoveryMounted || !currentInstanceId || event?.serverId !== currentInstanceId ||
+          !event?.jobId || !terminalRecoveryPhases.has(event.phase)) return;
+      const identity = `${event.jobId}:${event.phase}`;
+      if (terminalRecoveryJobs.has(identity)) return;
+      terminalRecoveryJobs.add(identity);
+      if (terminalRecoveryJobs.size > 100) terminalRecoveryJobs.delete(terminalRecoveryJobs.values().next().value);
+      void refreshRecovery();
+    });
     logger.info('ServerControls component mounted', {
       category: 'ui',
       data: {
@@ -1136,7 +1207,9 @@
         await refreshMaintenanceContext();
         
         // Handle auto-start servers if enabled (only on actual app startup, not tab switches)
-        if (!window.appStartupCompleted) {
+        await initialRecoveryRead;
+        if (recoveryMounted && currentRecoveryScopeKey() === mountRecoveryScope &&
+            recoveryRequestSequence === initialRecoverySequence && !window.appStartupCompleted) {
           await runAutoStartOnce();
         }
       } catch (err) {
@@ -1200,6 +1273,11 @@
   });
 
   onDestroy(() => {
+    autoStartIntentionSequence += 1;
+    recoveryMounted = false;
+    recoveryRequestSequence += 1;
+    pendingAutoStart = false;
+    unsubscribeRecoveryProgress?.();
     versionCheckRequestId += 1;
     // Clean up event listeners and intervals
     document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -1288,7 +1366,18 @@
     }
   }
   
+  function autoStartIntentionIsCurrent(intention) {
+    return recoveryMounted && !window.appStartupCompleted &&
+      intention.sequence === autoStartIntentionSequence &&
+      intention.scopeKey === currentRecoveryScopeKey() &&
+      intention.recoverySequence === recoveryRequestSequence && canStartAfterRecoveryCheck();
+  }
+
   async function runAutoStartOnce() {
+    if (!canStartAfterRecoveryCheck()) {
+      pendingAutoStart = false;
+      return;
+    }
     if (autoStartInProgress || window.appStartupCompleted) {
       return;
     }
@@ -1298,8 +1387,16 @@
     }
     autoStartInProgress = true;
     pendingAutoStart = false;
+    const intention = Object.freeze({
+      sequence: autoStartIntentionSequence,
+      scopeKey: currentRecoveryScopeKey(),
+      recoverySequence: recoveryRequestSequence,
+      startManagement: autoStartManagement,
+      startMinecraft: autoStartMinecraft
+    });
     try {
-      await handleAutoStart();
+      await handleAutoStart(intention);
+      if (!autoStartIntentionIsCurrent(intention)) return;
       window.appStartupCompleted = true;
     } finally {
       autoStartInProgress = false;
@@ -1307,25 +1404,30 @@
   }
 
   // Handle auto-start functionality
-  async function handleAutoStart() {
+  async function handleAutoStart(intention) {
+    if (!autoStartIntentionIsCurrent(intention)) return;
     if (!validateServerPath(serverPath)) {
       return;
     }
     
     // Auto-start management server first if enabled
-    if (autoStartManagement && managementServerStatus !== 'running' && managementServerStatus !== 'starting') {
+    if (intention.startManagement && managementServerStatus !== 'running' && managementServerStatus !== 'starting') {
       try {
-        await startManagementServer();
+        if (!autoStartIntentionIsCurrent(intention)) return;
+        await startManagementServer({ autoStartIntention: intention });
       } catch (error) {
       }
+      if (!autoStartIntentionIsCurrent(intention)) return;
     }
     
     // Auto-start Minecraft server if enabled
-    if (autoStartMinecraft && status === 'Stopped') {
+    if (intention.startMinecraft && status === 'Stopped') {
       try {
-        await startServer();
+        if (!autoStartIntentionIsCurrent(intention)) return;
+        await startServer({ autoStartIntention: intention });
       } catch (error) {
       }
+      if (!autoStartIntentionIsCurrent(intention)) return;
     }
   }
   // Show context menu for player
@@ -1335,7 +1437,10 @@
   }
   
   // Management server functions
-  async function startManagementServer() {
+  async function startManagementServer(options = {}) {
+    const intention = options?.autoStartIntention;
+    const isCurrent = () => !intention || autoStartIntentionIsCurrent(intention);
+    if (!isCurrent() || !canStartAfterRecoveryCheck()) return;
     if (!validateServerPath(serverPath)) {
       logger.warn('Cannot start management server - invalid server path', {
         category: 'ui',
@@ -1365,11 +1470,13 @@
         port: coercePort(managementPort) || managementPort,
         serverPath: serverPath
       });
+      if (!isCurrent()) return;
       
       if (result.success) {
         clearPortConflict('management');
         applyManagementStatus('running');
         await loadInviteInfo();
+        if (!isCurrent()) return;
         logger.info('Management server started successfully', {
           category: 'ui',
           data: {
@@ -1397,6 +1504,7 @@
         setTimeout(() => errorMessage.set(''), 5000);
       }
     } catch (error) {
+      if (!isCurrent()) return;
       applyManagementStatus('stopped');
       logger.error('Error starting management server', {
         category: 'ui',
@@ -1522,6 +1630,20 @@
   </div>
 
   <!-- MINECRAFT SERVER SECTION -->
+  {#if currentInstanceId && serverPath && recoveryStartBlocked}
+    <div class="server-warning-banner" role="status" aria-label="Server recovery status">
+      {#if recoveryStatus === 'ready' && recoveryPendingCount > 0}
+        <p>Recovery is pending for this server. Review Modpack recovery before starting.</p>
+        <button on:click={() => navigate('/modpack')}>Review Modpack</button>
+      {:else if recoveryStatus === 'error'}
+        <p>Recovery status could not be checked</p>
+        <button on:click={() => refreshRecovery()}>Retry check</button>
+        <button on:click={() => navigate('/modpack')}>Review Modpack</button>
+      {:else}
+        <p>Checking recovery status…</p>
+      {/if}
+    </div>
+  {/if}
   <div class="minecraft-server-section">
     <div class="minecraft-header">
       <h4>Minecraft Server</h4>
@@ -1604,7 +1726,7 @@
       <button 
         class="btn-compact start-button" 
         on:click={startServer}
-        disabled={isServerActive || !serverPath}
+        disabled={isServerActive || !serverPath || recoveryStartBlocked}
       >
         {isServerStarting ? 'Starting...' : 'Start'}
       </button>
@@ -1733,7 +1855,7 @@
           <button 
             class="btn-compact start-button" 
             on:click={startManagementServer}
-            disabled={managementServerStatus === 'running' || managementServerStatus === 'starting' || !serverPath}
+            disabled={managementServerStatus === 'running' || managementServerStatus === 'starting' || !serverPath || recoveryStartBlocked}
           >
             {managementServerStatus === 'starting' ? 'Starting...' : 'Start'}
           </button>

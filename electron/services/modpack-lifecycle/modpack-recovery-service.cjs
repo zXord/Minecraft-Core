@@ -333,6 +333,8 @@ class ModpackRecoveryService {
   async recoverAll(scanResult) {
     if (!scanResult || typeof scanResult !== 'object' || !Array.isArray(scanResult.records) ||
         !Array.isArray(scanResult.corrupt)) throw invalid();
+    if (scanResult.pendingTerminalPublications !== undefined && (!Array.isArray(scanResult.pendingTerminalPublications) ||
+        scanResult.pendingTerminalPublications.some(record => !record || typeof record.jobId !== 'string'))) throw invalid();
     const corrupt = new Set(scanResult.corrupt.map(item => item?.jobId).filter(value => typeof value === 'string'));
     const recovered = [];
     const unresolved = [];
@@ -351,6 +353,16 @@ class ModpackRecoveryService {
         else unresolved.push(current.jobId);
       } catch {
         unresolved.push(current.jobId);
+      }
+    }
+    for (const rawRecord of scanResult.pendingTerminalPublications || []) {
+      try {
+        const current = assertRecord(rawRecord);
+        if (corrupt.has(current.jobId)) { unresolved.push(current.jobId); continue; }
+        const result = await this.retryTerminalPublication(current);
+        (result.resolved ? recovered : unresolved).push(current.jobId);
+      } catch {
+        if (typeof rawRecord?.jobId === 'string') unresolved.push(rawRecord.jobId);
       }
     }
     for (const jobId of corrupt) {
@@ -418,7 +430,35 @@ class ModpackRecoveryService {
     });
   }
 
-  async #run(recordValue, work) {
+  // A discovered bookkeeping item must not fall through to source work.
+  retryTerminalPublication(recordValue) {
+    return this.#run(recordValue, null, { metadataOnly: true });
+  }
+
+  async #completeTerminalPublication(initial, mutationLease) {
+    requireMethod(this.coordinator, 'assertMutationLease');
+    this.coordinator.assertMutationLease(mutationLease, {
+      instanceId: initial.target.stableServerId, serverPath: initial.target.path
+    }, initial.jobId);
+    requireMethod(this.registry, 'retryTerminalPublication');
+    const publication = await this.registry.retryTerminalPublication(initial.jobId, {
+      expectedTarget: initial.target, expectedOperationKind: initial.operationKind
+    });
+    const record = assertRecord(publication.record);
+    this.#assertBinding(initial, record);
+    const failure = normalizeFailureDiagnostic(record.outcome?.failure);
+    return deepFreeze({ jobId: initial.jobId, resolved: true, action: 'already-finished',
+      historyPublication: publication.status, ...(failure ? { failure } : {}) });
+  }
+
+  #assertBinding(initial, durableRecord) {
+    if (durableRecord.jobId !== initial.jobId || durableRecord.operationKind !== initial.operationKind ||
+        durableRecord.target.kind !== initial.target.kind ||
+        durableRecord.target.stableServerId !== initial.target.stableServerId ||
+        !samePath(durableRecord.target.path, initial.target.path)) throw recoveryRequired();
+  }
+
+  async #run(recordValue, work, { metadataOnly = false } = {}) {
     const initial = assertRecord(recordValue);
     const paths = normalizePaths(initial);
     try {
@@ -426,10 +466,12 @@ class ModpackRecoveryService {
         instanceId: initial.target.stableServerId,
         serverPath: initial.target.path
       }, { operationId: initial.jobId }, async mutationLease => {
+        if (metadataOnly) return this.#completeTerminalPublication(initial, mutationLease);
         let durableRecord = await this.registry.load(initial.jobId);
-        if (!durableRecord) return deepFreeze({ jobId: initial.jobId, resolved: true, action: 'already-finished' });
+        if (!durableRecord) return this.#completeTerminalPublication(initial, mutationLease);
         assertRecord(durableRecord);
         normalizePaths(durableRecord);
+        this.#assertBinding(initial, durableRecord);
         durableRecord = await this.#assertRuntimeWriters(durableRecord, mutationLease);
         const hold = await this.runtimePolicy.suspend({
           instanceId: initial.target.stableServerId,
@@ -457,11 +499,10 @@ class ModpackRecoveryService {
           !samePath(mutationLease.serverPath, initial.target.path) ||
           typeof mutationLease.markDirty !== 'function') throw invalid();
       let durableRecord = await this.registry.load(initial.jobId);
-      if (!durableRecord) return deepFreeze({ jobId: initial.jobId, resolved: true, action: 'already-finished' });
+      if (!durableRecord) return await this.#completeTerminalPublication(initial, mutationLease);
       assertRecord(durableRecord);
       normalizePaths(durableRecord);
-      if (durableRecord.target.stableServerId !== initial.target.stableServerId ||
-          !samePath(durableRecord.target.path, initial.target.path)) throw recoveryRequired();
+      this.#assertBinding(initial, durableRecord);
       durableRecord = await this.#assertRuntimeWriters(durableRecord, mutationLease);
       const context = await this.contextFactory({ record: durableRecord, mutationLease });
       if (!context || typeof context !== 'object') throw recoveryRequired();
@@ -1170,7 +1211,88 @@ class ModpackRecoveryService {
     throw recoveryRequired();
   }
 
-  async #recoverTerminalExisting(record, context, paths) {
+  #canRetainStoppedOriginal(record, context, paths, terminal) {
+    if (record.priorRuntime.running !== false || record.priorRuntime.autoRestart !== false ||
+        record.swapStep !== 'none' || (terminal && (record.phase !== 'failed' ||
+          record.outcome?.recovery?.action !== 'pre-swap-restored'))) return false;
+    const outcome = record.outcome || {};
+    const original = terminal ? record.directoryIdentities.target
+      : record.directoryIdentities.rollback || record.directoryIdentities.target;
+    const fingerprint = outcome.rollback?.fingerprint || outcome.live?.fingerprint;
+    // This is retain-only authority. Neither an action label nor an empty candidate
+    // slot proves that publication never occurred.
+    if (!original || typeof fingerprint !== 'string' || !/^[a-f0-9]{64}$/u.test(fingerprint) ||
+        [outcome.live, outcome.rollback].some(evidence => evidence?.fingerprint !== undefined &&
+          (typeof evidence.fingerprint !== 'string' || !/^[a-f0-9]{64}$/u.test(evidence.fingerprint))) ||
+        (outcome.rollback?.fingerprint && outcome.live?.fingerprint &&
+          outcome.rollback.fingerprint !== outcome.live.fingerprint) ||
+        (record.directoryIdentities.target && !sameIdentity(original, record.directoryIdentities.target)) ||
+        (record.directoryIdentities.rollback && !sameIdentity(original, record.directoryIdentities.rollback)) ||
+        record.directoryIdentities.failed || sameIdentity(original, record.directoryIdentities.candidate) ||
+        ['publication', 'registration', 'liveValidation', 'revisionEvent'].some(key => outcome[key] != null) ||
+        (outcome.liveMutationAuthorized != null && outcome.liveMutationAuthorized !== false) ||
+        (outcome.swap != null && (typeof outcome.swap !== 'object' || Array.isArray(outcome.swap) ||
+          outcome.swap.step !== 'none' || Object.keys(outcome.swap).some(key => key !== 'step'))) ||
+        (terminal && (outcome.recovery.operationId !== record.jobId ||
+          !sameIdentity(original, record.directoryIdentities.rollback) || record.restoreCreation != null))) {
+      throw recoveryRequired();
+    }
+    // Initial original restoration remains authorized by the existing full
+    // fingerprint/exact-rename path. Retention requires canonical-only topology
+    // after that work; it makes no historical never-renamed claim.
+    const targetPresent = this.#exists(paths.targetPath, context);
+    const rollbackPresent = this.#exists(paths.rollbackPath, context);
+    return !this.#exists(paths.failedPath, context) && (terminal
+      ? targetPresent && !rollbackPresent : targetPresent !== rollbackPresent);
+  }
+
+  async #retainStoppedOriginal(record, context, paths, work) {
+    const lease = context.mutationLease;
+    if (!lease || lease.operationId !== record.jobId || lease.instanceId !== record.target.stableServerId ||
+        !samePath(lease.serverPath, paths.targetPath)) throw recoveryRequired();
+    const identityOptions = { fsApi: context.fsApi, reparseInspector: context.reparseInspector };
+    const originalIdentity = record.directoryIdentities.rollback || record.directoryIdentities.target;
+    const parentPath = path.dirname(paths.targetPath);
+    // Pin the current parent too: keeping the same child identity after moving it
+    // into a replacement parent must not silently release recovery.
+    const parentIdentity = await identifyServerDirectory(parentPath, identityOptions);
+    await this.#stopRuntime(record, context);
+    const reservation = await requireMethod(this.coordinator, 'acquireStart').acquireStart({
+      instanceId: record.target.stableServerId,
+      serverPath: paths.targetPath
+    }, { operation: 'modpack-recovery-retain-stopped', operationId: record.jobId, parentMutationLease: lease });
+    try {
+      requireMethod(reservation, 'release');
+      const proveRetained = async (current, beforeRestoration = false) => {
+        normalizePaths(current);
+        await assertServerDirectoryIdentity(parentPath, parentIdentity, identityOptions);
+        const rollbackOnly = beforeRestoration && !this.#exists(paths.targetPath, context);
+        await this.#verifyIdentity(context, rollbackOnly ? paths.rollbackPath : paths.targetPath, originalIdentity);
+        await assertServerDirectoryIdentity(parentPath, parentIdentity, identityOptions);
+        this.#assertAbsent(rollbackOnly ? paths.targetPath : paths.rollbackPath, context);
+        this.#assertAbsent(paths.failedPath, context);
+      };
+      await proveRetained(record, true);
+      const current = await work();
+      if (current.restoreCreation != null || !this.#canRetainStoppedOriginal(current, context, paths, true)) {
+        throw recoveryRequired();
+      }
+      await proveRetained(current);
+      this.#assertAbsent(paths.candidatePath, context);
+      await this.#restoreAutoRestart(current, context, 'source');
+      await proveRetained(current);
+      this.#assertAbsent(paths.candidatePath, context);
+      return await this.#finish(current, 'failed', 'pre-swap-restored');
+    } finally {
+      reservation.release();
+    }
+  }
+
+  async #recoverTerminalExisting(record, context, paths, retainingStopped = false) {
+    if (!retainingStopped && this.#canRetainStoppedOriginal(record, context, paths, true)) {
+      return this.#retainStoppedOriginal(record, context, paths, () =>
+        this.#recoverTerminalExisting(record, context, paths, true));
+    }
     const action = record.outcome?.recovery?.action;
     this.#assertAbsent(paths.rollbackPath, context);
     if (!this.#exists(paths.targetPath, context)) throw recoveryRequired();
@@ -1185,6 +1307,7 @@ class ModpackRecoveryService {
         current = await this.#removeCandidateForCleanup(current, context, paths.candidatePath, action);
       }
       this.#assertAbsent(paths.candidatePath, context);
+      if (retainingStopped) return current;
       await this.#restoreCanonicalPolicy(current, context, 'source');
       return this.#finish(current, 'failed', action);
     }
@@ -1217,7 +1340,11 @@ class ModpackRecoveryService {
     return this.#finish(record, 'rolled-back', action);
   }
 
-  async #recoverExistingBeforeSwap(record, context, paths) {
+  async #recoverExistingBeforeSwap(record, context, paths, retainingStopped = false) {
+    if (!retainingStopped && this.#canRetainStoppedOriginal(record, context, paths, false)) {
+      return this.#retainStoppedOriginal(record, context, paths, () =>
+        this.#recoverExistingBeforeSwap(record, context, paths, true));
+    }
     this.#assertAbsent(paths.failedPath, context);
     const targetPresent = this.#exists(paths.targetPath, context);
     const rollbackPresent = this.#exists(paths.rollbackPath, context);
@@ -1247,6 +1374,7 @@ class ModpackRecoveryService {
         throw recoveryRequired(error);
       }
     }
+    if (retainingStopped && record.restoreCreation != null) throw recoveryRequired();
     const originalIdentity = record.directoryIdentities.rollback || record.directoryIdentities.target;
     const originalFingerprint = record.outcome?.rollback?.fingerprint || record.outcome?.live?.fingerprint;
     if (candidatePresent && !record.outcome?.candidateCleanup) {
@@ -1287,6 +1415,7 @@ class ModpackRecoveryService {
         'pre-swap-restored'
       );
     }
+    if (retainingStopped) return current;
     await this.#restoreCanonicalPolicy(current, context, 'source');
     return this.#finish(current, 'failed', 'pre-swap-restored');
   }

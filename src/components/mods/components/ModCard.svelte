@@ -35,6 +35,7 @@
   export let loadOnMount = false; // New flag to control whether to load versions on mount
   export let installedVersionId = ''; // ID of the currently installed version
   export let serverManaged = false; // True if this mod is managed by the server
+  export let modEditsBlocked = false;
   
   // Local state
   let selectedVersionId = mod.selectedVersionId || installedVersionId;
@@ -467,7 +468,7 @@
    * @param {boolean} isVersionChange - Whether this is changing version of an installed mod
    */
   function handleInstall(isVersionChange = false) {
-    if (serverManaged) {
+    if (serverManaged || modEditsBlocked) {
       return;
     }
     // Mark mod as installing
@@ -805,7 +806,7 @@
         class:update-available={isInstalled && hasUpdate && !expanded}
         class:change-version={isChangingVersion && expanded && !isInstalling}
         class:installing={isInstalling}
-        disabled={serverManaged || isInstalling || (!isInstalled && versions.length > 0 && !selectedVersionId)}
+        disabled={modEditsBlocked || serverManaged || isInstalling || (!isInstalled && versions.length > 0 && !selectedVersionId)}
         on:click={(e) => {
           e.stopPropagation();
           if (isInstalled) {

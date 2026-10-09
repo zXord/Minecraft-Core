@@ -562,10 +562,10 @@
     const unsubscribeModpackState = modpackApi.onStateChanged(state => {
       const stateServerId = state?.instanceId || state?.serverId || "";
       if (!stateServerId || stateServerId !== activeServerId) return;
-      modpackStateRequestSequence += 1;
-      currentServerModpackManaged = state?.modpackManaged === true;
-      currentServerModpackStateKnown = typeof state?.modpackManaged === 'boolean';
-      if (currentServerModpackStateKnown) currentServerModpackStateGeneration += 1;
+      // Only a fresh main-owned state read can unlock loose mod edits after detach.
+      currentServerModpackStateKnown = false;
+      currentServerModpackStateGeneration += 1;
+      void refreshCurrentServerModpackState(stateServerId);
     });
     modpackStateTrackingReady = true;
 
@@ -1927,7 +1927,11 @@
                     <p>Loading Mods...</p>
                   </div>
                 {:then Component}
-                  <svelte:component this={Component} serverPath={activeServerPath} />
+                  <svelte:component this={Component} serverPath={activeServerPath}
+                    modpackStateGeneration={currentServerModpackStateGeneration}
+                    modpackManaged={trackedModpackServerId === activeServerId && currentServerModpackStateKnown
+                      ? currentServerModpackManaged : null}
+                    on:openModpack={() => navigate('/modpack')} />
                 {:catch error}
                   <div class="route-error">
                     <p>Failed to load Mods page. Please try again.</p>

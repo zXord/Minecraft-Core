@@ -8,6 +8,7 @@ const ACTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CLEANUP_PHASES = new Set(['committed-healthy', 'cleanup', 'cleanup-pending']);
 const ROLLBACK_SWAP_STEPS = new Set(['live-moved', 'candidate-published', 'failed-canonical-moved', 'rollback-restored']);
 const PENDING_NEW_SERVER_ACTION_ID = 'resolve-interrupted-setup';
+const HISTORY_PUBLICATION_ACTION = Object.freeze({ actionId: 'retry-history-publication', label: 'Finish recovery bookkeeping', recommended: true });
 
 function invalid() {
   return new ModpackError('INVALID_REQUEST', 'The recovery action is invalid');
@@ -130,7 +131,7 @@ function assertRequest(request) {
 
 class ModpackRecoveryFacade {
   constructor({ recoveryRegistry, recoveryService, canExposePendingNewServer, onResolved = null } = {}) {
-    requireMethod(recoveryRegistry, 'listActive');
+    requireMethod(recoveryRegistry, 'initialize');
     for (const method of ['recover', 'rollback', 'retryCommittedCleanup']) requireMethod(recoveryService, method);
     if (typeof canExposePendingNewServer !== 'function') throw invalid();
     if (onResolved !== null && typeof onResolved !== 'function') throw invalid();
@@ -141,9 +142,13 @@ class ModpackRecoveryFacade {
   }
 
   async listRecovery() {
-    const records = await this.registry.listActive();
+    const scan = await this.registry.initialize();
+    const records = scan.records;
     if (!Array.isArray(records)) throw invalid();
-    const items = records.map(record => publicRecord(record, this.canExposePendingNewServer))
+    const items = [...records.map(record => publicRecord(record, this.canExposePendingNewServer)),
+      ...(scan.pendingTerminalPublications || []).map(record => ({ ...publicRecord(record, this.canExposePendingNewServer),
+        automaticPossible: true, summary: 'The terminal operation is recorded. Its recovery bookkeeping can be finished.',
+        actions: [HISTORY_PUBLICATION_ACTION] }))]
       .sort((left, right) => left.recoveryId.localeCompare(right.recoveryId, 'en-US'));
     if (new Set(items.map(item => item.recoveryId)).size !== items.length) throw invalid();
     return deepFreeze({ items });
@@ -151,17 +156,22 @@ class ModpackRecoveryFacade {
 
   async recover(requestValue) {
     const request = assertRequest(requestValue);
-    const records = await this.registry.listActive();
+    const scan = await this.registry.initialize();
+    const records = [...scan.records, ...(scan.pendingTerminalPublications || [])];
     if (!Array.isArray(records)) throw invalid();
     const matching = records.filter(record => recoveryIdFor(assertRecord(record).jobId) === request.recoveryId);
     if (matching.length !== 1) throw stale();
     const record = matching[0];
+    const metadataOnly = (scan.pendingTerminalPublications || []).some(item => item.jobId === record.jobId);
     const visibilityScope = visibilityScopeFor(record, this.canExposePendingNewServer);
-    const allowed = actionsFor(record, visibilityScope);
+    const allowed = metadataOnly ? [HISTORY_PUBLICATION_ACTION] : actionsFor(record, visibilityScope);
     if (!allowed.some(action => action.actionId === request.actionId)) throw invalid();
 
     let result;
-    if (request.actionId === 'retry-cleanup') {
+    if (request.actionId === HISTORY_PUBLICATION_ACTION.actionId) {
+      requireMethod(this.recoveryService, 'retryTerminalPublication');
+      result = await this.recoveryService.retryTerminalPublication(record);
+    } else if (request.actionId === 'retry-cleanup') {
       result = await this.recoveryService.retryCommittedCleanup(record);
     } else if (request.actionId === 'rollback-server') {
       result = await this.recoveryService.rollback(record, 'user-reviewed-recovery');

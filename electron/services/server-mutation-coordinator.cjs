@@ -354,6 +354,15 @@ class ServerMutationCoordinator {
     return this._startMutationRun(selectorValues, optionsValue, work, true);
   }
 
+  assertMutationLease(lease, selectorValue, operationId) {
+    const state = this._validateParentLease(lease, this.context.getCurrentLease());
+    const normalized = normalizeSelector(selectorValue);
+    if (!state || state.record.mutation !== state.reservation || state.operationId !== assertOperationId(operationId) ||
+        !normalized.instance || normalized.instance.key !== state.record.instanceKey ||
+        !normalized.serverPath || normalized.serverPath.key !== state.record.pathKey) throw invalidRequest();
+    return true;
+  }
+
   runRecoveryMutation(selectorValue, optionsValue, work) {
     try {
       if (typeof work !== 'function') throw invalidRequest();

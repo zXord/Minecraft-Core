@@ -2,6 +2,104 @@
 
 Status: in progress. This is an evidence ledger, not a completion claim.
 
+## Current acceptance snapshot — 2026-10-09 08:13
+
+All current native work uses the disposable **b1** profile/server; the older a1 evidence below is historical. The user's real Server and Client folders have not been selected or changed. No release or push is authorized.
+
+| Current scenario | Latest native result |
+| --- | --- |
+| GitHub 0.13.4 ServerPack install and first boot | Passed on the b1 retry, operation `op2-1fe480865b168f5ff460215d86c1e7c5`. The earlier intermittent reparse failure is not attributed to a proven cause. |
+| Restart after first boot | Failed with a malformed SophisticatedCore config. The cached original config is complete; the subsequent writer is unknown. |
+| Verify and large mismatch display | Passed after the bounded-result fix: 4,596 checked, 147 differences, 64 displayed and 83 explicitly omitted. |
+| Repair and recovery | The previous `op2-375534f1b95e160ff10799980a78cfd8` recovery succeeded normally at 06:05. Latest Repair `op2-bd7d420d3c75e0796daff25f5bf01fb1` passed prior revalidation/staging failures and booted its candidate, but failed before publication at 07:01:04 with `RECOVERY_REQUIRED`; cleanup completed (`cleanupPending: false`). Cause under investigation. Repair is not accepted as passing. |
+| Matching client asset discovery | Correct same-release 0.13.4 MRPACK appears in normal Overview after the production adapter fix. |
+| Matching client inspection/pairing | Uninterrupted normal retry passed at 03:42. Review showed TerraFirmaGreg-Modern 0.13.4, Minecraft 1.20.1 / Forge 47.4.13 and 697,237,028 referenced bytes; Accept returned “Paired for this server release.” Pairing persisted across the normal 03:47 app restart. |
+| Current companion health | The 06:00 stale-release warning was not permanent: normal 06:16 dev restart/Overview recovered the exact saved 0.13.4 pairing, without Inspect/Accept. Warm visible Refresh succeeded within a six-second observation bound. The earlier failing predicate remains unknown. |
+| Ordinary managed JAR edits | Initial Disable succeeded, exposing the policy gap; the test JAR was restored through Enable. After correction/restart, native Mods displayed managed guidance and disabled individual JAR controls with correct explanatory titles. Independent correction review passed; actual Detach/unmanaged unlocking remains untested. |
+| Upgrade, downgrade, rollback | No successful end-to-end native version-change pass yet. Preserve the old a1 interrupted candidate. |
+| Client install, authenticated launch and actual server join | Pending. No fixture or unauthenticated simulation is counted as a join. |
+| Separate client setup | Normal folder picker created the new b1 client folder; invalid/empty invite validation passed. No connection, registration, authentication or client installation yet. Test app closed normally at 05:09. |
+| Startup time | First normal launch 18,637 ms, subsequent warm restarts 983 ms and 1,060 ms. Instrumented warm run: config 665.62 ms and optimizer cache hit. Cause of the slow-case variation is unproven. |
+| Development taskbar icon | Fresh actual taskbar capture at 06:20 shows Minecraft Core's grass-block icon during normal npm run dev (branded app identity com.minecraft-core.app.dev), not the Electron atom. |
+
+The Java Windows Security permission prompt was reconfirmed by fresh capture at 07:46 and remains untouched. It blocks further normal UI interaction; it is not a proven cause of the failed Repair. Microsoft authentication is a separate later gate for game launch/join, not for client registration, pack installation or Verify. Release acceptance is incomplete.
+
+Independent controlled checks at 07:10–07:13 passed 164 rendered regressions and the production build (412 modules, 8.15 seconds). The startup/auto-start browser regression also passed separately at 07:43. These do not establish a native Repair, client install or join.
+
+The first later full Node run failed: 3,825 tests, 3,739 passed, 81 failed and 5 platform-specific skips. Most failures stopped old fixtures at the required recovery-coordinator boundary; an exact public error-code expectation and reviewed filesystem-writer fingerprint were also stale. These were corrected without weakening production authority or scanner assertions, and independently reviewed.
+
+The fresh final run completed at 08:13 with **3,827 tests: 3,822 passed, 0 failed, 0 cancelled and 5 skips**, in 600.02 seconds (`node --test --test-concurrency=2 --test-reporter=tap`). Four skips concern unavailable Windows file-symlink privilege; one concerns a pathname-cleanup case intentionally not reached by retention-only Windows bundles. The final production build also passed (412 modules, 8.18 seconds), as did syntax checks for all 627 JS/CJS/MJS files and Git whitespace checks. The 164 rendered checks plus separate startup test are controlled evidence, not normal native acceptance.
+
+The independent broad checkpoint review and scoped follow-up reviews are approved. Their limits remain explicit: dummy-JAR fixture diagnostics and transport doubles do not prove a real JVM/client join, and report-only corrections do not repair the native failure. The current native app still runs the earlier main-process code behind its untouched Windows security prompt; it needs a normal restart with the reviewed code before retrying Repair. The next rejection has more precise bounded stage diagnostics, but the initiating native failure is not claimed fixed. No release has been approved; local checkpointing is not release acceptance.
+
+### Chronological observations
+
+The dated entries below preserve what was known at each point. A historical "pending" or pass is superseded by the current snapshot above; it is not an instruction to reuse a1 or repeat completed tasks.
+
+Development HMR at 03:34:23 reset the companion panel during archive verification. Source UI edits are now held for the retry. This interruption is recorded separately from archive validation failures. The single user-authorized usage reset was redeemed at 1% remaining; no purchase was made.
+
+The subsequent uninterrupted retry completed inspection at approximately 03:41:27 and acceptance was observed at 03:42:03. The exact client asset is `477754823`, `TerraFirmaGreg-Modern-0.13.4-modrinth.mrpack` (317,764,422 archive bytes). Source UI edits resumed only after this pairing succeeded. It did not install the referenced client files or launch Minecraft.
+
+At 03:53, normal Actions → Verify completed again (`op2-d9029789587a2ff01f7ef379358d52f3`) with the same 4,596 checked / 147 differences and bounded honest display. Repair then selected GitHub release 0.13.4 and its ServerPack through the ordinary source/asset screens; inspection began at 03:56. Source UI edits are held during this retry to avoid development HMR resetting the view.
+
+The 04:00:44 Repair attempt failed at 04:01:36 before writes. Its new diagnostic field isolates ownership reconciliation. Production-function investigation reproduced the defect: revalidation supplied the materialized pack-only payload where the ownership planner requires the full desired manifest, including healthy runtime files. The reviewed fix is not yet counted as a native Repair pass.
+
+Independent client-setup testing then reproduced “The server configuration is invalid” when saving localhost as the invite host. The partial metadata update included an undefined secret field, rejected by strict JSON validation. The focused handler correction passed 14 regression tests and independent review; native Save after main restart remains pending. No client installation or credential import was attempted. Native History still showed the completed initial install; Recovery correctly displayed no pending transaction after the safely failed Repair.
+
+At 04:17, normal `npm run dev` restarted the same b1 profile after a successful build (7.31 s Vite, 412 modules). Vite warm readiness was 994 ms, config load 604.06 ms with an optimizer cache hit. Normal Dashboard host Save then completed without the previous error; a scoped read confirmed `managementInviteHost: 127.0.0.1` in the portable server config. Invite generation, client installation and authenticated join remain separate pending steps. Native Verify was started again before the reviewed Repair retry.
+
+The scoped development log also recorded `check-disabled-mod-updates` reporting “prepared server runtime incomplete” at 03:50:12. The initiating cause is unproven and is under a separate read-only investigation; it is not equated with the malformed SophisticatedCore configuration. At 04:14, a verified ordinary Blank screensaver was dismissed after a harmless wake key failed; fresh native capture/control resumed. No security prompt was acted on.
+
+The 04:25 Repair retry selected the exact 0.13.4 ServerPack, reviewed 0 added / 147 changed / 0 removed / 9,025 preserved, and visibly enabled EULA acceptance and start-after-install. Real preparation counts and restore-point verification progressed. It passed the earlier revalidation defect, then failed in the later source-authorization callback. The terminal operation has `cleanupPending: true` / `RECOVERY_REQUIRED`; the original server's 04:32:14 log again reports the SophisticatedCore parse error. The normal UI currently omits that cleanup condition and only offers retained-download actions. Both underlying repair/recovery behavior and truthful recovery presentation remain pending. No forced cleanup, profile mutation, or manual config replacement was used to bypass the failure.
+
+At 04:38, normal “Back to Modpack overview” navigation exposed the retained recovery record and “Retry verified recovery.” It was not invoked with the old main process. At 04:49, ordinary Dashboard navigation showed the server and client-management server stopped, localhost invite host still persisted, and no Java/security prompt. The current Dashboard does not mirror the recovery banner; the native test did not press Start or infer process authority from that button's appearance.
+
+The remaining staging input correction passed 203 focused tests and independent review. The matching-client managed-JAR health correction passed 103 focused tests and independent review, including a last-asynchronous-boundary generation race found in review. Neither is counted as native acceptance until the app restarts with that main code. The next server test must use normal recovery, then Repair, not direct file replacement. Native cold/warm managed-JAR status latency, client installation/authenticated join, version transitions and actual Detach still remain open.
+
+At 05:07–05:08, ordinary sidebar Add Instance → Client Interface → Choose Folder opened the native picker. A new sibling directory `Minecraft/Codex QA Client TFG 0.13.4 2026-10-09-b1` was created and selected through that picker; neither the existing test-server folder nor any real Client/Server folder was selected. The app reached Configure Server Connection with an empty invite field. The new directory remains empty and the client connection/registration is not complete; no pack installation, credentials, game launch or join is claimed. The exact destination will be reused after normal recovery and invite setup. The chooser briefly displayed the underlying modpack notification button above its modal backdrop, a separate visual-layering issue noted for final review.
+
+At 05:09 the normal invite form rejected a plain invalid value, showed a missing-secret message, and kept Test Connection and Save & Continue disabled; clearing it showed the required-field message with both still disabled. Nothing was submitted. Normal Alt+F4 closed the test main at 05:09:39 with code 0; the dev supervisor then stopped Vite. The failed repair's durable evidence is preserved for the next reviewed recovery run.
+
+At 05:48, a scoped read-only config check still found 3,160 bytes, SHA256 `426cb589616094a32f1afcda964e072ca39ea05b168531573051b687afdebb4f`, last-write UTC `2026-10-08T17:44:04.3139122Z`. Retained logs show the file loaded at 20:43:13.960, readiness at 20:44:30.561, and all dimensions saved during the 21:06 stop. They do not establish the config writer, a forced termination, or a sync-app cause. After normal Repair, capture this same file's read-only hash/size at readiness, before Stop, after observed process closure, and before the following Start to narrow the write interval. No manual config replacement was performed.
+
+At 06:00, a normal static build (Vite 8.82 seconds, 412 modules) and `npm run start` opened only the disposable b1 profile. The static renderer deliberately avoids development hot reload during backend acceptance; it predates the in-progress recovery-presentation changes. The exact failed Repair was recovered through its visible “Retry verified recovery” button. At 06:05 a fresh screenshot showed “No recovery action is pending” and “The server has no unresolved lifecycle transaction,” with the same managed release and content revision. No manual journal/config edits, server boot, or Repair success are implied. The ordinary Blank screensaver was dismissed after a supported wake failed; no Windows security prompt was encountered or automated.
+
+At 06:07, normal read-only Verify `op2-777cbbcabc3e6cb090103c6b66323802` completed with 4,596 checked, 147 differences and the bounded 64/83 display. Normal Alt+F4 then closed the QA app, its process returned code 0, and a fresh native inventory showed no Minecraft Core window. The subsequent production build (7.74 seconds, 412 modules) contains the new recovery UI for controlled checks; a new native launch is still required to accept that UI.
+
+At 06:16, normal npm run dev opened only b1, with Vite ready in 1,057 ms and an optimizer cache hit. Dashboard showed both services stopped and both Starts enabled after the fresh recovery read; no Start was clicked. At 06:17:06 the normal Overview showed the same saved 0.13.4 matching client pairing. The cold combined page was sampled ready within 12 seconds of route navigation, which is not precise per-request timing. Refresh clicked at 06:17:21 was freshly observed completed/paired at 06:17:27; no reinspection, acceptance or registry edit was needed. A read-only audit confirmed the saved canonical fingerprint still matched. The generic stale warning's overly specific release-change wording remains a separate presentation correction.
+
+At 06:18 the real notification popover was opened, then ordinary sidebar Add Instance showed its dialog over the dimmed bell/popover. Clicking the chooser backdrop dismissed it normally. No instance was created. At 06:20, a read-only primary-taskbar capture showed the grass-block icon during this normal dev launch: `C:/Users/s3eed/AppData/Local/Temp/codex-shot-2026-10-09_06-20-10.png`. The screenshot helper required process-local DPI awareness for physical taskbar coordinates; no Windows display/security setting was changed. The initial DPI-virtualized capture missed the taskbar and was not counted as icon evidence.
+
+At 06:22 normal Verify `op2-40cbef87be1966489b002205a384fccd` again completed with the same 4,596/147 and 64/83 display. Repair then selected GitHub release 0.13.4 and the exact ServerPack asset. Inspection began at 06:25:55 and reached the review page by 06:28; no renderer source writes or reloads were allowed during this flow. Ordinary Review planned changes began preflight. The initial existing-server scan remained labelled as destination validation until extraction began around 06:30; this misleading phase is a separately recorded presentation gap, not evidence that the scan was hung.
+
+Immediately before this repair attempt, a read-only 06:26 check still found the same malformed configuration: 3,160 bytes, SHA256 `426cb589616094a32f1afcda964e072ca39ea05b168531573051b687afdebb4f`, unchanged last-write time. No manual replacement was used.
+
+The separate root-rendered progress/managed-runtime regression run passed all 73 tests in 29.5 seconds, including the latest auto-start scope correction. These controlled tests are not native Repair, boot, or client-join evidence.
+
+At 06:32:52, ordinary Start reviewed operation launched Repair `op2-bd7d420d3c75e0796daff25f5bf01fb1`, after reviewing 0 added / 147 changed / 0 removed / 9,025 preserved and visibly checking EULA acceptance plus start-after-install. By 06:35 it passed initial revalidation and began the recovery snapshot; by 06:36 it was verifying that snapshot's 1,065,735,469 bytes. No candidate publication or boot is implied by these intermediate observations.
+
+At 06:38:54 this Repair passed the formerly failing live-content check and was copying the protected candidate (451 of 8,006 files). Counters continued advancing throughout; at 06:53:32 the screen changed to verifying the copied files. The candidate copy counted 1,922,108,102 bytes. A scoped source audit found no metric double-counting: candidate preservation includes backups, while recovery archive contents exclude backups. Exact byte attribution and performance-cost attribution were not measured. The ordinary Blank screensaver recurred during this wait and was dismissed only after fresh exact process/path checks; no sign-in or security prompt was automated.
+
+At 06:56:18 the normal app showed candidate boot on loopback. Its real log reached `Done (1.288s)!` at 06:57:15.414, normal stop at 06:57:21.188 and all dimensions saved at 06:57:21.550. The candidate's SophisticatedCore config was complete after boot: 3,220 bytes, SHA256 `e6b673005fef2af678cd890ab9de0cb36b686ef891e75eef76bd826962a48bec`, last-write UTC `2026-10-09T03:56:55.5785171Z`. The original malformed canonical config was not manually changed.
+
+At 06:58 the native capture showed Windows Security asking to allow public/private network access for OpenJDK Platform binary (Eclipse Adoptium). It was left untouched; no further UI input was sent past this security prompt. Read-only diagnostics continued. The candidate's matching Java process was no longer found after its normal stop. This does not establish a permission-related cause for the later failure.
+
+The final operation at 07:01:04.926 reported `RECOVERY_REQUIRED`, failed before server publication, with cleanup complete and the download retained. The last progress message remained “Boot-testing the candidate on loopback” throughout the failed-attempt cleanup, and the log exposed only “The server publication requires recovery.” Diagnosis must distinguish the health return from the following canonical `server.properties` snapshot boundary; no specific predicate or external filesystem cause has yet been established. Candidate boot success is not Repair or final-path restart success. Native upgrade/client/join acceptance remains pending.
+
+## Overnight continuation — 2026-10-09
+
+Normal `npm run dev` relaunched with only the existing disposable b1 user-data override after reboot; Vite readiness18,637ms. Registered test server `server-e3e8d70a-7b87-4dbc-8e84-ee85baa7c4a4` persisted as GitHub0.13.4, Forge47.4.13, stopped,208 mods. No real instance/profile was used.
+
+Native Mods -> Disable on `aaa_particles-forge-1.20.1-2.2.1.jar` succeeded and showed DISABLED. This deliberately reversible test exposed an ownership gap: ordinary server mod edits do not update the advertised matching client release. Server remains stopped during the test. Native Modpack Overview also showed “The matching client pack is unavailable” despite managed server state; a production state-envelope adapter defect is being corrected with composition-facing tests. Neither finding is considered passed.
+
+Read-only native Verify job `op2-d28b8a5878cd375759adb4d2c5b74ff2` started against that disabled JAR. The completed-Verify presentation correction has independent code review,63 scoped automated tests and5 controlled rendered lifecycle tests; native result is still pending. Root production build succeeded in9.01s. Controlled fixtures are not native acceptance.
+
+That native Verify failed after63.977seconds with job INVALID_REQUEST. Diagnosis through the real read-only repository returned4596checked/148differences/16949bytes; the public job cap is16384bytes. Real lifecycle/store disposable reproduction confirmed this exact terminal failure.147 entries were config/resource differences and one was the deliberately disabled mod. The mod was then restored via normal Enable and visiblyENABLED. A byte/count-bounded public summary correction is in progress; internal full scan and exact counts remain unchanged.
+
+03:02 notification interaction: opened same GitHub repository's0.13.10 notification, reached its exact uploaded asset list and unread count became0. No asset from that release was selected/downloaded/installed.
+
+03:03 normal Start after restoring the mod reached Forge startup but stopped at03:03:47.269: `Failed loading config file sophisticatedcore-common.toml`, NightConfig `ParsingException: Not enough data available`. This is an observed failed restart, not a server pass; the historical successful first boot is separate. No repair or manual config replacement has yet occurred. Existing runtime/loader read-only probes currently pass154artifacts, so do not conflate this parse failure with earlier intermittent runtime inspection errors.
+
 ## Isolation and method
 
 Normal `npm run dev`, with only `MINECRAFT_CORE_USER_DATA_DIR` pointing to the disposable `minecraft-core-native-qa-20261008-a1/user-data` profile in Windows Temp. No test-mode IPC, seeded instance records, native dialog overrides, or synthetic client authentication. The desktop window is driven through visible Windows controls and native folder pickers.
@@ -93,3 +191,55 @@ By15:52, the ordinary-launch ownership transition fix passed91 author tests and9
 - The native QA app is still open and its old main process has not loaded the new code. The failed upgrade's candidate remains retained. No manual cleanup, synthetic success, real-profile import, authenticated client join, successful upgrade/downgrade, or completed overall acceptance is claimed.
 
 Next: close the old isolated app normally and reopen a coherent current build, verify retained recovery status, then continue only in disposable server/client instances. Do not reuse the user's existing Server or Client folders. Microsoft authentication and any Windows security prompt require user handoff.
+
+## Native continuation — 19:14 onward
+
+The user closed the prior applications. Their main processes and the previous Vite listener were verified absent. The unresolved a1 operation/candidate remain preserved; application closure is not treated as proof of historical runtime-worker shutdown.
+
+Started normal `npm run dev` using only the fresh disposable `minecraft-core-native-qa-20261008-control-b1/user-data` override. No fixture/IPC state or authentication was injected. Vite readiness was16,854ms in this run. Dismissing a visible TeamViewer informational popup restored supported native app control for this run, without proving the cause of earlier activation failures.
+
+Through the actual creation UI, selected the same GitHub repository, release0.13.4, and ServerPack. Download counters, inspection, and native destination selection were observed. Created and selected the new empty `C:\Users\s3eed\SynologyDrive\Desktop\ET\Minecraft\Codex QA TFG 0.13.4 2026-10-08-b1` folder. No existing user instance or old QA candidate was selected.
+
+Preflight completed with4125additions,0changes,0removals,0preserved; exact MC1.20.1/Forge47.4.13/Java17,6GiB,localhost25575. After the user's action-time confirmation, clicked the enabled Install button. Operation `op2-9dc6589bbde04fb5a5f989755e755298` is active; at20:09 the native UI showed1536/4125files copied. This is ongoing installation evidence, not completed runtime health or end-to-end acceptance.
+
+At20:13:43 the actual native UI showed **failed**, `REPARSE_INSPECTION_FAILED`, while Recording managed runtime file ownership. Durable terminal timestamp20:13:44.336, before publication; cleanupPending=false, retainedDownload=true. The app's ordinary cleanup removed the owned candidate and empty destination; no manual deletion was performed. This run is a failed native installation, not a pass. The original raw ServerPack remains cached.
+
+Read-only tracing identifies the failing component as the Windows reparse probe used during the post-runtime recursive manifest scan, but its current error collapses timeout, native I/O, invalid identity/path evidence and protocol faults. No exact underlying cause survived. The original pack paths were below193characters in the candidate; the newly installed runtime tree is no longer present, so it cannot be reconstructed from this evidence. Separate real Windows regular/junction/long-path inspector tests passed2/2; they do not invalidate the native failure.
+
+Closed only this disposable native app through its title-bar close, then verified its window/process and Vite listener absent. A bounded reason-only diagnostic patch is being prepared before the next normal UI retry. No validation bypass, silent retry, real instance change, successful b1 server start, client import or game join is claimed.
+
+The bounded diagnostic patch passed independent review and69scoped tests; a separate42-test candidate/runtime consumer run passed. It distinguishes reparse startup/request timeout, native open/identity/final-path/tag/path failures and protocol faults without exposing paths or weakening validation. This is instrumentation, not a demonstrated installation fix.
+
+Normal b1 restart20:22:34 loaded this patch; Vite readiness16,884ms. Through the actual UI, selected0.13.4 ServerPack again, recreated the app-cleaned empty disposable destination through the native picker, and reviewed the same4125-addition plan with6GiB/localhost25575. Started approved retry `op2-1fe480865b168f5ff460215d86c1e7c5` at20:34:06.911. At20:36 it was copying2944/4125files.
+
+This retry completed successfully20:44:49.223 (sequence62), registered `server-e3e8d70a-7b87-4dbc-8e84-ee85baa7c4a4`. Actual server log reached Done20:44:30.561; the native app navigated to Dashboard and showed Running, MC1.20.1/Forge47.4.13,6GiB/25575. This is a fresh native installation/start pass, not proof the earlier intermittent reparse failure is resolved. The pack logs also include a non-terminating ModernFix client-class audit error and invalid server-icon dimensions; actual join remains untested.
+
+Windows Security then displayed an OpenJDK network-access permission prompt over the running app. Root did not automate the security prompt; user handoff requested. Subsequent native stop/restart/Verify/version/client actions pause at that external gate. A verified ordinary Blank screensaver was dismissed earlier, separately from this security prompt.
+
+Independent native-structure audit confirmed incorrect C# marshalling of BY_HANDLE_FILE_INFORMATION (56bytes instead of52, because FILETIME fields were represented by aligned long values). A bounded layout correction with actual-production-script tests is now underway; no causal claim for the intermittent install failure is made.
+
+The ABI correction is implemented and independently approved: actual-production C# regression failed56 !=52 before the fix; scoped author70/70 and root combined inspector/candidate/diagnostics81/81 passed, zero skips/failures. No native predicates, budgets, retries or worker lifecycle were changed. Current running app still has the pre-ABI-fix cached main; a normal restart is required before further installation acceptance. Final whole suite/build and local commit remain pending.
+
+At the last fresh native screenshot, Windows Security still covered the app. The disposable test server remains Running; no stop/close/security action was attempted through the modal. Complete native version lifecycle and client install/join remain unfinished, explicitly not replaced by the81 automated checks.
+
+Separate read-only presentation audit found completed Verify operations display generic committed-state success text even when `outcome.result.healthy` is false. The full result reaches renderer state and the Repair enablement gate; no hydration fix is indicated. Native Verify reproduction and a bounded presentation correction are pending after installation.
+
+## Overnight native continuation — 2026-10-09
+
+After the user's PC restart, resumed with the existing **disposable b1 profile only** using normal `npm run dev`. No actual user server or client was selected. Vite readiness was18,637ms on the first launch and983ms on the subsequent warm restart; this variability remains under investigation rather than being declared fixed.
+
+The normal Mods page displayed208mods. Disabling the first pack JAR succeeded despite active pack management, exposing a real client-matching policy gap. The same JAR was restored through the normal Enable button and visibly returned to ENABLED. A guarded managed-mod editing workflow is now being implemented; no synthetic profile or file edits substituted for these actions.
+
+Native Verify initially failed after64seconds with INVALID_REQUEST (`op2-d28b8a5878cd375759adb4d2c5b74ff2`). Read-only tracing reproduced the cause: the complete147config/resource differences plus the deliberately disabled JAR produced a16,949-byte result, exceeding the durable public-result envelope. The bounded-result correction preserves full counts and reports a limited, explicit sample instead of increasing generic serialization limits. Independent focused verification passed73/73.
+
+After normal app restart, **native Verify passed** (`op2-6c05e7668b632a8c9a262272bdf6ae20`, observed03:12). The real UI showed “Verification complete / Differences found,”4596checked files and147mismatches, with64displayed and83explicitly omitted. No server files were changed. This verifies the real failure path and honest result presentation, not a claim that the installation has no differences.
+
+The earlier normal Start attempt failed at03:03:47 with NightConfig “Not enough data available” for `sophisticatedcore-common.toml`. The actual disposable config was truncated mid-value; its modification time dates to the earlier first boot. The cause of that truncation is unproven. No manual repair was performed; the next native test uses the application's Repair workflow. The server is stopped.
+
+The same-release client list previously appeared unavailable because production composition passed a repository envelope where the companion service expected its state. A focused adapter correction passed independent review and467scoped tests. After restart, the **normal Overview UI now lists the correct0.13.4 MRPACK**. Pairing, full client installation and authenticated joining remain pending.
+
+The0.13.10 notification opened the correct same-repository release assets, and unread0persisted across normal app restart. No update was downloaded or installed by that notification test. Security and authentication dialogs are not automated; a blocked join is never counted as passed.
+
+Normal Repair reached the exact0.13.4 ServerPack review, with0additions,147changes,0removals and9025preserved files. Preparation visibly reported actual file/byte counters. With EULA and start-after checked, operation `op2-0daf8d883f74dd8b4bbb0425cd712e1d` started03:23:35.494 and **failed before writes** at03:24:33.383: `PLAN_STALE`, step `revalidate-plan`, “The reviewed modpack mutation is stale.” The native error was expanded in Technical operation log. CleanupPending=false and the source download was retained. Repair is **not passed**; the exact failed predicate is under investigation.
+
+A separate bounded read of only the cached raw ZIP's SophisticatedCore config found a complete3103-byte file, matching ZIP CRC and closed59-string array. The malformed3160-byte live file is not simply an incomplete copy of that original entry. The later writer/cause remains unproven; no manual config replacement was made.

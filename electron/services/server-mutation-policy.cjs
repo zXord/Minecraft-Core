@@ -7,6 +7,17 @@ const CLIENT_SAFE_SETTINGS_CHANNELS = new Set([
   'minecraft-auth', 'minecraft-save-auth', 'minecraft-import-auth-from-instance', 'minecraft-check-refresh-auth',
   'minecraft-clear-auth', 'set-download-preferences', 'save-client-config'
 ]);
+// Only loose mod JAR writers: pack lifecycle, metadata and other content stay usable.
+const MOD_JAR_EDIT_CHANNELS = new Set([
+  'direct-add-mod', 'add-mod', 'install-mod', 'install-mod-with-fallback', 'download-mod-with-fallback',
+  'delete-mod', 'update-mod', 'move-mod-file', 'enable-and-update-mod', 'save-disabled-mods',
+  'auto-redownload-corrupted-file',
+  'install-client-mod', 'update-client-mod', 'disable-client-mod', 'update-client-mods', 'disable-client-mods',
+  'download-client-mod-version-updates', 'remove-manual-mods', 'toggle-manual-mod', 'update-manual-mod',
+  'toggle-client-mod', 'delete-client-mod', 'minecraft-download-mods', 'minecraft-check-mods',
+  'minecraft-remove-unmanaged-mods', 'minecraft-remove-server-managed-mods'
+]);
+const MANAGED_MOD_EDIT_MESSAGE = 'Individual mod changes are disabled while this server is managed. Use Modpack to change or repair the pack, or review Detach to keep all files and manage mods individually.';
 
 const CORE_SERVER_WRITER_POLICIES = Object.freeze({
   'write-config': policy('write-config', 'payload:serverPath'),
@@ -362,6 +373,7 @@ function createServerMutationPolicy({
   coordinator = getServerMutationCoordinator(),
   getInstances = () => [],
   getClientPackIntegration = null,
+  getModpackStateRepository = null,
   createOperationId = defaultOperationId
 } = {}) {
   if (!coordinator || typeof coordinator.runMutation !== 'function' ||
@@ -431,6 +443,22 @@ function createServerMutationPolicy({
             const integration = getClientPackIntegration();
             if (!integration?.assertServerDestination) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client ownership services are not ready');
             await integration.assertServerDestination(selector.serverPath);
+          }
+          if (getModpackStateRepository && !clients.length && MOD_JAR_EDIT_CHANNELS.has(channel)) {
+            // Read only the resolved registered server, inside its mutation reservation.
+            const server = registeredInstances(getInstances, ['server']).find(instance =>
+              normalizePathKey(instance.path) === normalizePathKey(selector.serverPath));
+            if (!server) throw invalidRequest();
+            let current;
+            try {
+              const repository = getModpackStateRepository();
+              if (typeof repository?.read !== 'function') throw new Error('State service unavailable');
+              current = await repository.read(server.path);
+              if (current !== null && typeof current?.state?.modpackManaged !== 'boolean') throw new Error('Invalid state');
+            } catch (cause) {
+              throw new ModpackError('MANAGED_MOD_EDIT_BLOCKED', MANAGED_MOD_EDIT_MESSAGE, { cause });
+            }
+            if (current?.state.modpackManaged) throw new ModpackError('MANAGED_MOD_EDIT_BLOCKED', MANAGED_MOD_EDIT_MESSAGE);
           }
           result = await perform();
         }

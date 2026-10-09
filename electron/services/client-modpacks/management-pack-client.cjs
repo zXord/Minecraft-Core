@@ -1,6 +1,6 @@
 const http = require('node:http');
 const https = require('node:https');
-const { ModpackError } = require('../modpacks/errors.cjs');
+const { ModpackError, CLIENT_PACK_SERVER_CHANGED_GUIDANCE: SERVER_CHANGED_GUIDANCE } = require('../modpacks/errors.cjs');
 const { normalizeCompanionDescriptor } = require('./companion-contracts.cjs');
 const MAX_BYTES = 256 * 1024;
 const fail = (code = 'CLIENT_PACK_UNAVAILABLE', cause) => new ModpackError(code, 'The matching client requirement could not be read', { cause });
@@ -56,11 +56,19 @@ class ManagementPackClient {
         timeoutMs: this.timeoutMs, maxBytes: MAX_BYTES, redirect: 'error' });
       signal?.throwIfAborted();
       if (!response || typeof response !== 'object' || Array.isArray(response) ||
-          Buffer.byteLength(JSON.stringify(response), 'utf8') > MAX_BYTES || !Object.hasOwn(response, 'clientModpack') ||
-          Object.hasOwn(response, 'clientModpackError')) throw fail();
+          Buffer.byteLength(JSON.stringify(response), 'utf8') > MAX_BYTES || !Object.hasOwn(response, 'clientModpack')) throw fail();
+      if (Object.hasOwn(response, 'clientModpackError')) {
+        if (response.clientModpackError?.code === 'CLIENT_PACK_SERVER_CHANGED') {
+          throw new ModpackError('CLIENT_PACK_SERVER_CHANGED', SERVER_CHANGED_GUIDANCE);
+        }
+        throw fail();
+      }
       return { descriptor: response.clientModpack === null ? null : normalizeCompanionDescriptor(response.clientModpack),
         serverIp: config.serverIp, minecraftPort: response.minecraftPort };
-    } catch (cause) { throw fail(signal?.aborted ? 'CANCELLED' : 'CLIENT_PACK_UNAVAILABLE', cause); }
+    } catch (cause) {
+      if (!signal?.aborted && cause instanceof ModpackError && cause.code === 'CLIENT_PACK_SERVER_CHANGED') throw cause;
+      throw fail(signal?.aborted ? 'CANCELLED' : 'CLIENT_PACK_UNAVAILABLE', cause);
+    }
   }
   async getRequirement(clientId, options) { return (await this._read(clientId, options)).descriptor; }
   // Main-only: the renderer cannot choose the endpoint or supply runtime authority.

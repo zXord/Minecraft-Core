@@ -32,7 +32,7 @@ function selectorKey(selector) {
 }
 
 function findRecordForBlock(scan, block) {
-  const candidates = scan.records.filter(record => record?.jobId === block.jobId);
+  const candidates = [...scan.records, ...(scan.pendingTerminalPublications || [])].filter(record => record?.jobId === block.jobId);
   if (candidates.length !== 1) return null;
   const record = candidates[0];
   const stableServerId = record.target?.stableServerId || null;

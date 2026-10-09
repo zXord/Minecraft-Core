@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { fixtureAuthority, fixtureDurableFs, fixtureRegistry, fixtureRecovery,
+  recordFixtureCandidate, fixtureRestorePreparation } = require('./runtime-authority-fixture.cjs');
 
 const {
   ProductionMutationRuntime,
@@ -87,45 +89,6 @@ function retainedHandoffDouble({ closes = true } = {}) {
   };
 }
 
-function registryDouble({
-  createErrorAfterRecord = null,
-  createErrorBeforeRecord = null,
-  includeInitialize = true,
-  initializeResult = null,
-  onCreate = () => {},
-  onTransition = () => {}
-} = {}) {
-  let record = null;
-  let finishCalls = 0;
-  const registry = {
-    get finishCalls() { return finishCalls; },
-    get record() { return record; },
-    async create(value) {
-      onCreate(value);
-      if (createErrorBeforeRecord) throw createErrorBeforeRecord;
-      record = structuredClone(value);
-      if (createErrorAfterRecord) throw createErrorAfterRecord;
-      return record;
-    },
-    async initialize() {
-      return initializeResult || {
-        records: record ? [structuredClone(record)] : [], corrupt: [], blocks: [], globalBlock: false
-      };
-    },
-    async load() { return record && structuredClone(record); },
-    async transition(jobId, request) {
-      onTransition(request);
-      assert.equal(jobId, record.jobId);
-      assert.equal(request.expectedPhase, record.phase);
-      record = { ...record, ...structuredClone(request.patch), phase: request.nextPhase, sequence: record.sequence + 1 };
-      return structuredClone(record);
-    },
-    async finish() { finishCalls += 1; return record; }
-  };
-  if (!includeInitialize) delete registry.initialize;
-  return registry;
-}
-
 function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-runtime-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -135,7 +98,7 @@ function fixture(t, options = {}) {
   fs.mkdirSync(path.join(templatePath, 'config'), { recursive: true });
   fs.writeFileSync(path.join(templatePath, 'config', 'pack.toml'), 'enabled=true\n');
   const reparseInspector = { async isReparsePoint() { return false; } };
-  const recoveryRegistry = options.recoveryRegistry || registryDouble({
+  const recoveryRegistry = options.recoveryRegistry || fixtureRegistry(root, {
     createErrorAfterRecord: options.recoveryCreateErrorAfterRecord,
     createErrorBeforeRecord: options.recoveryCreateErrorBeforeRecord,
     includeInitialize: options.recoveryIncludeInitialize !== false,
@@ -161,6 +124,8 @@ function fixture(t, options = {}) {
     writeJsonAtomic(filePath, value) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`); },
     async writeJsonAtomicAsync(filePath, value) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`); }
   };
+  const authority = fixtureAuthority({ instanceId: 'server-reserved', serverPath: targetPath,
+    jobId: 'job-one', registry: recoveryRegistry });
   const now = new Date('2026-08-02T00:00:00.000Z');
   const runtimeTuple = {
     minecraftVersion: '1.21.1', loaderFamily: 'fabric', loaderVersion: '0.16.10',
@@ -199,7 +164,33 @@ function fixture(t, options = {}) {
     appendHistory() {},
     async appendHistoryAsync() {}
   };
+  const recoveryServices = {
+    registry: recoveryRegistry,
+    runtimeWriterAuthority: options.runtimeWriterAuthority || controlledRuntimeAuthority(),
+    runtimePolicy: {
+        suspend() { return { held: true }; },
+        async ensureStopped() { return { alreadyStopped: true }; },
+        async adoptValidatedHandoff(request) {
+          adoptedHandoffIsExact = request.handoff === retainedLiveHandoff;
+          adoptedHandoffs.push(structuredClone({
+            eventId: request.eventId,
+            instanceId: request.instanceId,
+            jobId: request.jobId,
+            serverPath: request.serverPath
+          }));
+          return { adopted: true };
+        },
+        restoreAutoRestart() {
+          restoreAutoRestartCount += 1;
+          return { restored: true };
+        }
+      }
+  };
+  recoveryServices.recoveryService = fixtureRecovery({ authority, registry: recoveryRegistry,
+    durableFs: fixtureDurableFs(root), runtimePolicy: recoveryServices.runtimePolicy,
+    reparseInspector: reparseInspector, onRecoverWithLease: options.onRecoverWithLease, onFailNewWithLease: options.onFailNewWithLease });
   const runtime = new ProductionMutationRuntime({
+    coordinator: authority.coordinator,
     clock: () => new Date(now),
     candidateHashService: options.candidateHashService,
     consumeReservedTargetFn: async request => {
@@ -295,37 +286,7 @@ function fixture(t, options = {}) {
         }
       };
     },
-    recoveryServices: {
-      registry: recoveryRegistry,
-      runtimeWriterAuthority: options.runtimeWriterAuthority || controlledRuntimeAuthority(),
-      recoveryService: {
-        async recoverWithLease(record, lease) {
-          options.onRecoverWithLease?.(structuredClone(record), lease);
-        },
-        async rollbackWithLease() {},
-        async failNewWithLease(...args) {
-          options.onFailNewWithLease?.(...args);
-        }
-      },
-      runtimePolicy: {
-        suspend() { return { held: true }; },
-        async ensureStopped() { return { alreadyStopped: true }; },
-        async adoptValidatedHandoff(request) {
-          adoptedHandoffIsExact = request.handoff === retainedLiveHandoff;
-          adoptedHandoffs.push(structuredClone({
-            eventId: request.eventId,
-            instanceId: request.instanceId,
-            jobId: request.jobId,
-            serverPath: request.serverPath
-          }));
-          return { adopted: true };
-        },
-        restoreAutoRestart() {
-          restoreAutoRestartCount += 1;
-          return { restored: true };
-        }
-      }
-    },
+    recoveryServices,
     releaseTrackingStore: { async list() { return []; }, async remove() { return false; }, async upsert() {} },
     revisionPublisher: {
       async publishOnce(event) {
@@ -365,8 +326,9 @@ function fixture(t, options = {}) {
     ...(options.yieldControl ? { yieldControl: options.yieldControl } : {}),
     ...(options.durabilityHandoff ? { durabilityHandoff: options.durabilityHandoff } : {}),
     ...(options.useRealNewTransaction ? {} : { buildNewCandidateFn: async context => {
-      fs.mkdirSync(context.expectedPaths?.candidatePath || path.win32.join(path.win32.dirname(targetPath), '.unused'), { recursive: true });
       const candidatePath = context.expectedPaths?.candidatePath || context.candidatePath;
+      fs.mkdirSync(candidatePath, { recursive: true });
+      await recordFixtureCandidate(recoveryRegistry, { ...context, candidatePath, reparseInspector });
       await context.materializeCandidate({ candidatePath, jobId: context.jobId });
       if (context.persistCandidateState) {
         await context.persistCandidateState({
@@ -379,6 +341,7 @@ function fixture(t, options = {}) {
       return { candidatePath };
     } })
   });
+
 
   async function prepare({ filesOnly = false, signal } = {}) {
     const incomingManifest = (await scanManifest(templatePath, 'installation-one', { reparseInspector })).manifest;
@@ -416,17 +379,16 @@ function fixture(t, options = {}) {
       }
     };
     const resolved = { instanceId: 'server-reserved', serverPath: targetPath, priorRunning: false };
-    const lease = {
-      kind: 'mutation', instanceId: 'server-reserved', serverPath: targetPath, baseRevision: 0,
-      markDirty() {}, assertOwnedPath() {}
-    };
+    const lease = authority.lease;
     await runtime.revalidate({
       jobId: 'job-one', plan, choices: { acceptEula: true, startAfterInstall: false, restorePointId: null },
       resolved, lease, signal
     });
     return { plan, resolved, lease };
   }
-  return {
+  const context = {
+    authority,
+    withLease(work) { return authority.run(() => work(context)); },
     adoptedHandoffs,
     get adoptedHandoffIsExact() { return adoptedHandoffIsExact; },
     candidateHealthRequests,
@@ -447,10 +409,11 @@ function fixture(t, options = {}) {
     targetPath,
     templatePath
   };
+  return context;
 }
 
 test('revalidation resolves the claimed private template and consumes only the exact empty reservation', async t => {
-  const context = fixture(t);
+  await fixture(t).withLease(async context => {
   await context.prepare();
 
   assert.equal(context.requestedOwner, 'job-one');
@@ -459,6 +422,27 @@ test('revalidation resolves the claimed private template and consumes only the e
   assert.equal(context.recoveryRegistry.record.target.kind, 'new');
   assert.equal(context.recoveryRegistry.record.outcome.reservation.kind, 'empty-directory');
   assert.equal(context.recoveryRegistry.record.outcome.runtimeWriterProtocol, 1);
+  });
+});
+
+test('fixture authority rejects forged and retired leases before a second recovery publication', async t => {
+  const context = fixture(t);
+  let retired;
+  let creates = 0;
+  const create = context.recoveryRegistry.create.bind(context.recoveryRegistry);
+  context.recoveryRegistry.create = async (...args) => { creates++; return create(...args); };
+  await context.withLease(async () => {
+    retired = await context.prepare();
+    await assert.rejects(context.runtime.revalidate({ jobId: 'job-one', ...retired,
+      lease: { ...retired.lease }, choices: { acceptEula: true, startAfterInstall: false, restorePointId: null }
+    }), { code: 'INVALID_REQUEST' });
+    assert.equal(creates, 1);
+  });
+  await assert.rejects(context.runtime.revalidate({ jobId: 'job-one', ...retired,
+    choices: { acceptEula: true, startAfterInstall: false, restorePointId: null }
+  }), { code: 'INVALID_REQUEST' });
+  assert.equal(creates, 1);
+  assert.equal((await context.recoveryRegistry.load('job-one')).phase, 'preflight');
 });
 
 test('real candidate transaction preserves durable runtime settlement across stale builder outcome patches', async t => {
@@ -473,7 +457,7 @@ test('real candidate transaction preserves durable runtime settlement across sta
   } });
   const registry = new RecoveryRegistry({ userDataPath: registryRoot, durableFs }); await registry.initialize();
   const guard = new ServerRuntimeWriterAuthority({ registry, getBootSequence: async () => 10 });
-  const context = fixture(t, { recoveryRegistry: registry, runtimeWriterAuthority: guard, useRealNewTransaction: true });
+  await fixture(t, { recoveryRegistry: registry, runtimeWriterAuthority: guard, useRealNewTransaction: true }).withLease(async context => {
   const prepared = await context.prepare();
   const originalJavaFactory = context.runtime.javaManagerFactory;
   context.runtime.javaManagerFactory = (...args) => {
@@ -489,23 +473,25 @@ test('real candidate transaction preserves durable runtime settlement across sta
   assert.equal(record.outcome.runtimeWriterAuthority.state, 'settled');
   assert.equal(record.outcome.runtimeWriterProtocol, 1);
   assert.deepEqual(record.outcome.runtimeWriterAuthority.candidateIdentity, record.directoryIdentities.candidate);
+  });
 });
 
 test('candidate Java and loader preparation cannot run before durable runtime writer admission', async t => {
   let admitted = false;
-  const context = fixture(t, { runtimeWriterAuthority: {
+  await fixture(t, { runtimeWriterAuthority: {
     async run(jobId, work, { lease }) {
       assert.equal(jobId, 'job-one'); assert.equal(lease.kind, 'mutation'); admitted = true;
       throw Object.assign(new Error('refused before worker'), { code: 'RECOVERY_REQUIRED', runtimeWritersUnproven: true });
     },
     async assertRecoveryAllowed(record) { return record; }
-  } });
+  } }).withLease(async context => {
   const prepared = await context.prepare();
   await assert.rejects(context.runtime.buildCandidate({ jobId: 'job-one', operationKind: 'install-new', ...prepared,
     choices: { acceptEula: true, startAfterInstall: false, restorePointId: null }, restorePoint: null }), { code: 'RECOVERY_REQUIRED' });
   assert.equal(admitted, true);
   assert.equal(context.javaEnsureOptions, null);
   assert.equal(context.preparedRuntimeOptions, null);
+  });
 });
 
 test('candidate cleanup waits for the cancelled runtime worker to close before releasing its destination', async t => {
@@ -517,7 +503,7 @@ test('candidate cleanup waits for the cancelled runtime worker to close before r
   child.kill = () => { throw new Error('an accepted descendant-capable worker must not be killed'); };
   const runWorker = createManagedRuntimeWorkerClient({ forkImpl: () => child });
   let recoveries = 0;
-  const context = fixture(t, { onRecoverWithLease() { recoveries += 1; } });
+  await fixture(t, { onRecoverWithLease() { recoveries += 1; } }).withLease(async context => {
   const prepared = await context.prepare();
   const controller = new AbortController();
   const keepAlive = setInterval(() => {}, 1000);
@@ -541,11 +527,13 @@ test('candidate cleanup waits for the cancelled runtime worker to close before r
   await cleanup;
   assert.equal(recoveries, 1);
   assert.equal(context.reservationReleaseCount, 1);
+  });
 });
 
 test('unproven runtime termination cannot authorize candidate cleanup', async t => {
   let recoveries = 0;
   const context = fixture(t, { onRecoverWithLease() { recoveries += 1; } });
+  await context.withLease(async () => {
   const prepared = await context.prepare();
   const error = Object.assign(new Error('worker termination was not proven'), { preserveWorkspace: true });
   await assert.rejects(
@@ -554,18 +542,25 @@ test('unproven runtime termination cannot authorize candidate cleanup', async t 
   );
   assert.equal(recoveries, 0);
   assert.equal(context.reservationReleaseCount, 0);
+  });
+  await assert.rejects(context.authority.coordinator.acquireStart(context.authority.selector,
+    { operation: 'ordinary-start', operationId: 'probe-start' }), { code: 'RECOVERY_REQUIRED' });
+  await assert.rejects(context.authority.coordinator.runMutation(context.authority.selector,
+    { operation: 'ordinary-write', operationId: 'probe-write', revisionMode: 'none' },
+    async () => assert.fail('unresolved source must remain quarantined')), { code: 'RECOVERY_REQUIRED' });
 });
 
 test('revalidation forwards the lifecycle AbortSignal into the fresh server snapshot', async t => {
   const controller = new AbortController();
   let receivedSignal = null;
-  const context = fixture(t, {
+  await fixture(t, {
     onSnapshotRequest(request) { receivedSignal = request.signal; }
-  });
+  }).withLease(async context => {
 
   await context.prepare({ signal: controller.signal });
 
   assert.equal(receivedSignal, controller.signal);
+  });
 });
 
 test('revalidation rejects a durable filesystem that cannot yield mutation durability', async t => {
@@ -582,14 +577,15 @@ test('revalidation rejects a durable filesystem that cannot yield mutation durab
       fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
     }
   };
-  const context = fixture(t, { durableFs });
+  await fixture(t, { durableFs }).withLease(async context => {
 
   await assert.rejects(context.prepare(), error => error?.code === 'INVALID_REQUEST');
+  });
 });
 
 test('new-server revalidation yields between durable recovery and destination-consumption boundaries', async t => {
   const events = [];
-  const context = fixture(t, {
+  await fixture(t, {
     onRecoveryCreate() { events.push('recovery-create'); },
     onRecoveryTransition(request) {
       if (request.expectedPhase === 'queued' && request.nextPhase === 'preflight') {
@@ -604,7 +600,7 @@ test('new-server revalidation yields between durable recovery and destination-co
     async yieldControl() {
       events.push('cheap-yield');
     }
-  });
+  }).withLease(async context => {
 
   await context.prepare();
 
@@ -613,15 +609,16 @@ test('new-server revalidation yields between durable recovery and destination-co
     'recovery-preflight', 'durability-handoff',
     'destination-consume', 'durability-handoff'
   ]);
+  });
 });
 
 test('revalidation cancellation immediately after recovery creation closes the queued record and reservation', async t => {
   const controller = new AbortController();
   let recoveryCalls = 0;
-  const context = fixture(t, {
+  await fixture(t, {
     onRecoveryCreate() { controller.abort(); },
     onRecoverWithLease() { recoveryCalls += 1; }
-  });
+  }).withLease(async context => {
 
   await assert.rejects(
     context.prepare({ signal: controller.signal }),
@@ -633,11 +630,12 @@ test('revalidation cancellation immediately after recovery creation closes the q
   assert.equal(context.reservationReleaseCount, 1);
   assert.equal(fs.existsSync(context.targetPath), false);
   assert.equal(context.runtime.contexts.has('job-one'), false);
+  });
 });
 
 test('revalidation reconciles a queued record retained by a rejected recovery create', async t => {
   const creationError = new ModpackError('COMMIT_FAILED', 'injected uncertain recovery publication');
-  const context = fixture(t, { recoveryCreateErrorAfterRecord: creationError });
+  await fixture(t, { recoveryCreateErrorAfterRecord: creationError }).withLease(async context => {
 
   await assert.rejects(context.prepare(), error => error === creationError);
 
@@ -645,10 +643,11 @@ test('revalidation reconciles a queued record retained by a rejected recovery cr
   assert.equal(context.reservationReleaseCount, 1);
   assert.equal(fs.existsSync(context.targetPath), false);
   assert.equal(context.runtime.contexts.has('job-one'), false);
+  });
 });
 
 test('revalidation reports recovery required when rejected create leaves corrupt durable evidence', async t => {
-  const context = fixture(t, {
+  await fixture(t, {
     recoveryCreateErrorBeforeRecord: new ModpackError('COMMIT_FAILED', 'injected recovery publication failure'),
     recoveryInitializeResult: {
       records: [],
@@ -656,18 +655,19 @@ test('revalidation reports recovery required when rejected create leaves corrupt
       blocks: [{ jobId: 'job-one', stableServerId: 'server-reserved' }],
       globalBlock: false
     }
-  });
+  }).withLease(async context => {
 
   await assert.rejects(context.prepare(), error => error?.code === 'RECOVERY_REQUIRED');
 
   assert.equal(context.recoveryRegistry.finishCalls, 0);
   assert.equal(context.reservationReleaseCount, 0);
   assert.equal(fs.existsSync(context.targetPath), true);
+  });
 });
 
 test('rejected recovery create with proven clean absence releases its exact target for reuse', async t => {
   const creationError = new ModpackError('COMMIT_FAILED', 'injected pre-publication create failure');
-  const context = fixture(t, { recoveryCreateErrorBeforeRecord: creationError });
+  await fixture(t, { recoveryCreateErrorBeforeRecord: creationError }).withLease(async context => {
 
   await assert.rejects(context.prepare(), error => error === creationError);
 
@@ -677,23 +677,25 @@ test('rejected recovery create with proven clean absence releases its exact targ
   fs.mkdirSync(context.targetPath);
   assert.equal(fs.existsSync(context.targetPath), true);
   assert.equal(context.runtime.contexts.has('job-one'), false);
+  });
 });
 
 test('rejected recovery create without an integrity scan remains recovery required', async t => {
-  const context = fixture(t, {
+  await fixture(t, {
     recoveryCreateErrorBeforeRecord: new ModpackError('COMMIT_FAILED', 'injected pre-publication create failure'),
     recoveryIncludeInitialize: false
-  });
+  }).withLease(async context => {
 
   await assert.rejects(context.prepare(), error => error?.code === 'RECOVERY_REQUIRED');
 
   assert.equal(context.recoveryRegistry.finishCalls, 0);
   assert.equal(context.reservationReleaseCount, 0);
   assert.equal(fs.existsSync(context.targetPath), true);
+  });
 });
 
 test('auto-restart restoration is idempotent even when the suspension token is immutable', async t => {
-  const context = fixture(t);
+  await fixture(t).withLease(async context => {
   const resolved = { instanceId: 'server-reserved', serverPath: context.targetPath, priorRunning: false };
   const token = await context.runtime.suspendAutoRestart({
     jobId: 'job-one',
@@ -706,22 +708,32 @@ test('auto-restart restoration is idempotent even when the suspension token is i
 
   assert.deepEqual(second, first);
   assert.equal(context.restoreAutoRestartCount, 1);
+  });
 });
 
 test('failed new-server cleanup releases its private destination reservation only after recovery returns', async t => {
   const context = fixture(t);
+  await context.withLease(async () => {
   const { plan, resolved, lease } = await context.prepare();
 
   await context.runtime.abandonCandidate({ jobId: 'job-one', plan, resolved, lease });
 
   assert.equal(context.reservationReleaseCount, 1);
+  assert.equal(await context.recoveryRegistry.load('job-one'), null);
+  assert.equal((await context.recoveryRegistry.loadHistory('job-one')).outcome.recovery.action, 'pre-publication-cleanup');
+  });
+  const start = await context.authority.coordinator.acquireStart(context.authority.selector,
+    { operation: 'ordinary-start', operationId: 'probe-start' });
+  start.release();
+  await context.authority.coordinator.runMutation(context.authority.selector,
+    { operation: 'ordinary-write', operationId: 'probe-write', revisionMode: 'none' }, async () => {});
 });
 
 test('candidate boot diagnostic is durable before recovery removes the failed candidate', async t => {
   let recoveryRecord = null;
-  const context = fixture(t, {
+  await fixture(t, {
     onRecoverWithLease(record) { recoveryRecord = record; }
-  });
+  }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   const error = new ModpackError(
     'HEALTH_CHECK_FAILED',
@@ -741,13 +753,14 @@ test('candidate boot diagnostic is durable before recovery removes the failed ca
     stage: 'candidate-boot', boundary: 'readiness', category: 'mod-loading-failure'
   });
   assert.doesNotMatch(JSON.stringify(recoveryRecord), /private|secret|modloadingexception/i);
+  });
 });
 
 test('candidate cleanup stays blocked when its closed boot diagnostic cannot be persisted', async t => {
   let recoveryCalled = false;
-  const context = fixture(t, {
+  await fixture(t, {
     onRecoverWithLease() { recoveryCalled = true; }
-  });
+  }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   const originalTransition = context.recoveryRegistry.transition.bind(context.recoveryRegistry);
   context.recoveryRegistry.transition = async (jobId, request) => {
@@ -771,10 +784,11 @@ test('candidate cleanup stays blocked when its closed boot diagnostic cannot be 
 
   assert.equal(recoveryCalled, false);
   assert.equal(context.reservationReleaseCount, 0);
+  });
 });
 
 test('new candidate materialization copies only the reviewed template and adds trusted runtime plus explicit EULA state', async t => {
-  const context = fixture(t);
+  await fixture(t).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   const candidate = await context.runtime.buildCandidate({
     jobId: 'job-one', operationKind: 'install-new', plan,
@@ -793,10 +807,11 @@ test('new candidate materialization copies only the reviewed template and adds t
   assert.equal(context.writtenState.manifest.entries.find(entry => entry.pathKey === 'trusted-runtime.marker').origin, 'runtime');
   assert.equal(context.writtenState.manifest.entries.find(entry => entry.pathKey === 'config/pack.toml').origin, 'pack');
   assert.equal(context.preparedRuntimeOptions.skipMutationMark, true);
+  });
 });
 
 test('new candidate copy remains bound to the reviewed manifest if the private template changes after revalidation', async t => {
-  const context = fixture(t);
+  await fixture(t).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   fs.writeFileSync(path.join(context.templatePath, 'config', 'pack.toml'), 'enabled=nope\n');
 
@@ -805,10 +820,11 @@ test('new candidate copy remains bound to the reviewed manifest if the private t
     choices: { acceptEula: true, startAfterInstall: false, restorePointId: null },
     restorePoint: null, resolved, lease
   }), error => error?.code === 'PLAN_STALE');
+  });
 });
 
 test('new candidate rejects an unreviewed template file before creating its destination file', async t => {
-  const context = fixture(t);
+  await fixture(t).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   fs.writeFileSync(path.join(context.templatePath, 'unexpected-large.bin'), Buffer.alloc(1024 * 1024));
 
@@ -821,10 +837,11 @@ test('new candidate rejects an unreviewed template file before creating its dest
   const candidatePath = context.recoveryRegistry.record?.candidatePath;
   assert.equal(typeof candidatePath, 'string');
   assert.equal(fs.existsSync(path.join(candidatePath, 'unexpected-large.bin')), false);
+  });
 });
 
 test('new candidate rejects an enlarged reviewed file before creating its destination file', async t => {
-  const context = fixture(t);
+  await fixture(t).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   fs.appendFileSync(path.join(context.templatePath, 'config', 'pack.toml'), Buffer.alloc(1024 * 1024));
 
@@ -837,6 +854,7 @@ test('new candidate rejects an enlarged reviewed file before creating its destin
   const candidatePath = context.recoveryRegistry.record?.candidatePath;
   assert.equal(typeof candidatePath, 'string');
   assert.equal(fs.existsSync(path.join(candidatePath, 'config', 'pack.toml')), false);
+  });
 });
 
 test('new candidate EULA publication awaits asynchronous durability without using the blocking API', async t => {
@@ -874,7 +892,7 @@ test('new candidate EULA publication awaits asynchronous durability without usin
       fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
     }
   };
-  const context = fixture(t, { durableFs });
+  await fixture(t, { durableFs }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   const buildOutcome = context.runtime.buildCandidate({
     jobId: 'job-one', operationKind: 'install-new', plan,
@@ -896,6 +914,7 @@ test('new candidate EULA publication awaits asynchronous durability without usin
   const outcome = await buildOutcome;
   assert.equal(outcome.status, 'resolved', outcome.error?.stack);
   assert.equal(fs.readFileSync(path.join(outcome.value.candidatePath, 'eula.txt'), 'utf8'), 'eula=true\n');
+  });
 });
 
 test('unmanaged existing revalidation pins the reviewed directory and creates a verified restore with exact available source runtime', async t => {
@@ -923,7 +942,7 @@ test('unmanaged existing revalidation pins the reviewed directory and creates a 
     listHistory() { return { items: [], nextCursor: null }; }
   };
   const snapshotServer = createProductionServerSnapshot({ fsApi: fs, reparseInspector, stateRepository });
-  const recoveryRegistry = registryDouble();
+  const recoveryRegistry = fixtureRegistry(root);
   const restoreRequests = [];
   const restoreOptions = [];
   const runtimeTuple = {
@@ -979,7 +998,20 @@ test('unmanaged existing revalidation pins the reviewed directory and creates a 
     writeJsonAtomic(filePath, value) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); fs.writeFileSync(filePath, `${JSON.stringify(value)}\n`); },
     async writeJsonAtomicAsync(filePath, value) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); fs.writeFileSync(filePath, `${JSON.stringify(value)}\n`); }
   };
+  const authority = fixtureAuthority({ instanceId: 'server-existing', serverPath: targetPath, jobId: 'job-adoption', baseRevision: 0, registry: recoveryRegistry });
+  const recoveryServices = {
+    registry: recoveryRegistry,
+    runtimeWriterAuthority: controlledRuntimeAuthority(),
+    runtimePolicy: {
+        async suspend() { return { held: true }; }, async ensureStopped() { return { stopped: true }; },
+        async adoptValidatedHandoff() { return { adopted: true }; }, async restoreAutoRestart() { return { restored: true }; }
+      }
+  };
+  recoveryServices.recoveryService = fixtureRecovery({ authority, registry: recoveryRegistry,
+    durableFs: fixtureDurableFs(root), runtimePolicy: recoveryServices.runtimePolicy,
+    reparseInspector: reparseInspector });
   const runtime = new ProductionMutationRuntime({
+    coordinator: authority.coordinator,
     availableBytes: async () => '999999999999',
     candidateHashService,
     destinationReservations: { resolve() { return null; }, consume() { return true; }, release() { return true; } },
@@ -992,22 +1024,14 @@ test('unmanaged existing revalidation pins the reviewed directory and creates a 
     planningAdapter: { getExecutionRecord(received) { assert.equal(received, plan); return executionRecord; } },
     planValidator() {},
     prepareRuntime: async () => ({ prepared: true }),
-    recoveryServices: {
-      registry: recoveryRegistry,
-      recoveryService: { async recoverWithLease() {}, async rollbackWithLease() {}, async failNewWithLease() {} },
-      runtimeWriterAuthority: controlledRuntimeAuthority(),
-      runtimePolicy: {
-        async suspend() { return { held: true }; }, async ensureStopped() { return { stopped: true }; },
-        async adoptValidatedHandoff() { return { adopted: true }; }, async restoreAutoRestart() { return { restored: true }; }
-      }
-    },
+    recoveryServices,
     releaseTrackingStore: { async list() { return []; }, async remove() { return false; }, async upsert() {} },
     reparseInspector,
     restorePointServiceFactory: () => ({
       async prepareVerifiedRestorePointCreation(request, options) {
         restoreRequests.push(structuredClone(request));
         restoreOptions.push({ stage: 'prepare', options });
-        return { state: 'prepared' };
+        return fixtureRestorePreparation(root, request, options);
       },
       async createVerifiedRestorePoint(request, options) {
         restoreOptions.push({ stage: 'create', options });
@@ -1032,10 +1056,7 @@ test('unmanaged existing revalidation pins the reviewed directory and creates a 
     }
   });
   const resolved = { instanceId: 'server-existing', serverPath: targetPath, priorRunning: false };
-  const lease = {
-    kind: 'mutation', instanceId: 'server-existing', serverPath: targetPath, baseRevision: 0,
-    markDirty() {}, assertOwnedPath() {}
-  };
+  await authority.run(async lease => {
 
   await runtime.revalidate({
     jobId: 'job-adoption', plan,
@@ -1060,6 +1081,7 @@ test('unmanaged existing revalidation pins the reviewed directory and creates a 
   assert.equal(restoreOptions[0].options.onProgress, onProgress);
   assert.equal(restoreOptions[1].options.signal, controller.signal);
   assert.equal(restoreOptions[1].options.onProgress, onProgress);
+  });
 
   currentState = {
     state: {
@@ -1070,6 +1092,7 @@ test('unmanaged existing revalidation pins the reviewed directory and creates a 
     },
     manifest: { schemaVersion: 1, installationId: 'detached-old-pack', entries: [] }
   };
+  await authority.run(async lease => {
   await runtime.revalidate({
     jobId: 'job-adoption-inactive', plan,
     choices: { acceptEula: false, startAfterInstall: false, restorePointId: null },
@@ -1084,6 +1107,7 @@ test('unmanaged existing revalidation pins the reviewed directory and creates a 
   assert.equal(restoreRequests.length, 2);
   assert.deepEqual(restoreRequests[1].sourceRuntime, runtimeTuple);
   assert.deepEqual(inactiveRestore.sourceRuntime, runtimeTuple);
+  }, { operationId: 'job-adoption-inactive' });
 });
 
 test('existing update revalidation accepts post-review saves for a world recorded by an earlier lifecycle', async t => {
@@ -1164,7 +1188,7 @@ test('existing update revalidation accepts post-review saves for a world recorde
   fs.writeFileSync(path.join(serverPath, 'world', 'level.dat'), 'saved-during-stop');
   fs.writeFileSync(path.join(serverPath, 'world', 'session.lock'), 'new-during-stop');
 
-  const recoveryRegistry = registryDouble();
+  const recoveryRegistry = fixtureRegistry(root);
   const durableFs = {
     flushDirectory() {},
     async flushDirectoryAsync() {},
@@ -1198,7 +1222,20 @@ test('existing update revalidation accepts post-review saves for a world recorde
   };
   let validatedSnapshot = null;
   let authorizeSourceSnapshot = null;
+  const authority = fixtureAuthority({ instanceId: 'server-one', serverPath: serverPath, jobId: 'job-update', baseRevision: 3, registry: recoveryRegistry });
+  const recoveryServices = {
+    registry: recoveryRegistry,
+    runtimeWriterAuthority: controlledRuntimeAuthority(),
+    runtimePolicy: {
+        async suspend() { return { held: true }; }, async ensureStopped() { return { stopped: true }; },
+        async adoptValidatedHandoff() { return { adopted: true }; }, async restoreAutoRestart() { return { restored: true }; }
+      }
+  };
+  recoveryServices.recoveryService = fixtureRecovery({ authority, registry: recoveryRegistry,
+    durableFs: fixtureDurableFs(root), runtimePolicy: recoveryServices.runtimePolicy,
+    reparseInspector: reparseInspector });
   const runtime = new ProductionMutationRuntime({
+    coordinator: authority.coordinator,
     availableBytes: async () => '999999999999',
     buildExistingCandidateFn: async context => {
       authorizeSourceSnapshot = context.authorizeSourceSnapshot;
@@ -1212,15 +1249,7 @@ test('existing update revalidation accepts post-review saves for a world recorde
     planningAdapter: { getExecutionRecord() { return executionRecord; } },
     planValidator(_plan, snapshot) { validatedSnapshot = structuredClone(snapshot); },
     prepareRuntime: async () => ({ prepared: true }),
-    recoveryServices: {
-      registry: recoveryRegistry,
-      recoveryService: { async recoverWithLease() {}, async rollbackWithLease() {}, async failNewWithLease() {} },
-      runtimeWriterAuthority: controlledRuntimeAuthority(),
-      runtimePolicy: {
-        async suspend() { return { held: true }; }, async ensureStopped() { return { stopped: true }; },
-        async adoptValidatedHandoff() { return { adopted: true }; }, async restoreAutoRestart() { return { restored: true }; }
-      }
-    },
+    recoveryServices,
     releaseTrackingStore: { async list() { return []; }, async remove() { return false; }, async upsert() {} },
     reparseInspector,
     snapshotServer,
@@ -1254,10 +1283,7 @@ test('existing update revalidation accepts post-review saves for a world recorde
     }
   };
   const resolved = { instanceId: 'server-one', serverPath, priorRunning: true };
-  const lease = {
-    kind: 'mutation', instanceId: 'server-one', serverPath, baseRevision: 3,
-    markDirty() {}, assertOwnedPath() {}
-  };
+  await authority.run(async lease => {
 
   await runtime.revalidate({
     jobId: 'job-update',
@@ -1318,11 +1344,12 @@ test('existing update revalidation accepts post-review saves for a world recorde
     error => error?.code === 'PLAN_STALE'
   );
   assert.equal(fs.readFileSync(path.join(serverPath, 'mods', 'pack.jar'), 'utf8'), 'managed-hack');
+  });
 });
 
 test('outcome persistence yields between independent durable metadata publications', async t => {
   const events = [];
-  const context = fixture(t, { async yieldControl() { events.push('yield'); } });
+  await fixture(t, { async yieldControl() { events.push('yield'); } }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   await context.runtime.buildCandidate({
     jobId: 'job-one', operationKind: 'install-new', plan,
@@ -1346,6 +1373,7 @@ test('outcome persistence yields between independent durable metadata publicatio
     'tracking-intent', 'yield',
     'tracking-reconcile', 'yield'
   ]);
+  });
 });
 
 test('outcome persistence awaits asynchronous history publication without using the blocking repository API', async t => {
@@ -1354,7 +1382,7 @@ test('outcome persistence awaits asynchronous history publication without using 
   const historyGate = new Promise(resolve => { releaseHistory = resolve; });
   const historyStarted = new Promise(resolve => { signalHistoryStarted = resolve; });
   t.after(() => releaseHistory());
-  const context = fixture(t);
+  await fixture(t).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   await context.runtime.buildCandidate({
     jobId: 'job-one', operationKind: 'install-new', plan,
@@ -1385,18 +1413,30 @@ test('outcome persistence awaits asynchronous history publication without using 
   releaseHistory();
   const outcome = await persistOutcome;
   assert.equal(outcome.status, 'resolved', outcome.error?.stack);
+  });
 });
 
 test('cleanup yields around tracking, transaction, and terminal recovery durability boundaries', async t => {
   const events = [];
-  const context = fixture(t, { async yieldControl() { events.push('yield'); } });
+  await fixture(t, { useRealNewTransaction: true, async yieldControl() { events.push('yield'); } }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
+  await context.runtime.buildCandidate({ jobId: 'job-one', operationKind: 'install-new', plan,
+    choices: { acceptEula: true, startAfterInstall: false, restorePointId: null },
+    restorePoint: null, resolved, lease });
+  await context.runtime.publishCandidate({ jobId: 'job-one', plan, resolved, lease });
+  await context.runtime.registerPublishedInstance({ jobId: 'job-one', plan, resolved, lease });
+  await context.runtime.validateLive({ jobId: 'job-one', operationKind: 'install-new', plan,
+    resolved, running: false, lease });
+  await context.runtime.persistOutcome({ jobId: 'job-one', operationKind: 'install-new', plan,
+    resolved, restorePoint: null });
+  const reconcile = context.runtime.releaseTrackingReconciler.reconcile.bind(context.runtime.releaseTrackingReconciler);
   context.runtime.releaseTrackingReconciler = {
-    async reconcile() { events.push('tracking-reconcile'); }
+    async reconcile(...args) { events.push('tracking-reconcile'); return reconcile(...args); }
   };
-  context.runtime.recoveryRegistry.finish = async () => {
+  const finish = context.runtime.recoveryRegistry.finish.bind(context.runtime.recoveryRegistry);
+  context.runtime.recoveryRegistry.finish = async (...args) => {
     events.push('recovery-finish');
-    return { phase: 'completed' };
+    return finish(...args);
   };
   events.length = 0;
 
@@ -1408,13 +1448,16 @@ test('cleanup yields around tracking, transaction, and terminal recovery durabil
     'tracking-reconcile', 'yield',
     'recovery-finish', 'yield'
   ]);
+  assert.equal(await context.recoveryRegistry.load('job-one'), null);
+  assert.equal((await context.recoveryRegistry.loadHistory('job-one')).phase, 'completed');
+  });
 });
 
 test('new-server revalidation defers template hashing to the manifest-bound candidate copy', async t => {
   const serviceA = recordingHashService();
   const serviceB = recordingHashService();
-  const contextA = fixture(t, { candidateHashService: serviceA });
-  const contextB = fixture(t, { candidateHashService: serviceB });
+  await fixture(t, { candidateHashService: serviceA }).withLease(async contextA => {
+  await fixture(t, { candidateHashService: serviceB }).withLease(async contextB => {
 
   await contextA.prepare();
   assert.equal(serviceA.hashedPaths.length, 0);
@@ -1425,11 +1468,13 @@ test('new-server revalidation defers template hashing to the manifest-bound cand
   assert.equal(serviceB.hashedPaths.every(filePath => filePath.startsWith(contextB.templatePath)), true);
   assert.equal(serviceA.hashedPaths.some(filePath => filePath.startsWith(contextB.templatePath)), false);
   assert.equal(serviceB.hashedPaths.some(filePath => filePath.startsWith(contextA.templatePath)), false);
+  });
+  });
 });
 
 test('new candidate uses manifest-bound copying and one post-runtime scan instead of repeated full scans', async t => {
   const hashService = recordingHashService();
-  const context = fixture(t, { candidateHashService: hashService });
+  await fixture(t, { candidateHashService: hashService }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   hashService.hashedPaths.length = 0;
 
@@ -1454,10 +1499,11 @@ test('new candidate uses manifest-bound copying and one post-runtime scan instea
     context.writtenState.manifest.entries.find(entry => entry.pathKey === 'trusted-runtime.marker').installedHash,
     crypto.createHash('sha256').update('generated-by-runtime-preparation').digest('hex')
   );
+  });
 });
 
 test('new candidate Java acquisition receives the exact lifecycle cancellation signal', async t => {
-  const context = fixture(t);
+  await fixture(t).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   const controller = new AbortController();
 
@@ -1468,10 +1514,11 @@ test('new candidate Java acquisition receives the exact lifecycle cancellation s
   });
 
   assert.equal(context.javaEnsureOptions?.signal, controller.signal);
+  });
 });
 
 test('new candidate maps Java acquisition and runtime preparation into path-free monotonic lifecycle progress', async t => {
-  const context = fixture(t, {
+  await fixture(t, {
     javaProgressEvents: [
       { type: 'Preparing', task: 'private metadata', progress: 0 },
       { type: 'Downloading', task: 'private archive name', progress: 10 },
@@ -1482,7 +1529,7 @@ test('new candidate maps Java acquisition and runtime preparation into path-free
       { type: 'Verifying', task: 'private executable path', progress: 90 },
       { type: 'Complete', task: 'private Java path', progress: 100 }
     ]
-  });
+  }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   const progress = [];
 
@@ -1509,10 +1556,11 @@ test('new candidate maps Java acquisition and runtime preparation into path-free
   ]);
   assert.equal(progress.every((event, index) => index === 0 || event.percent >= progress[index - 1].percent), true);
   assert.equal(JSON.stringify(progress).includes('private'), false);
+  });
 });
 
 test('large packs refresh copied-file counts even while byte-weighted percent stays unchanged', async t => {
-  const context = fixture(t);
+  await fixture(t).withLease(async context => {
   for (let index = 0; index < 128; index += 1) {
     fs.writeFileSync(
       path.join(context.templatePath, 'config', `a-${String(index).padStart(3, '0')}.toml`),
@@ -1535,10 +1583,11 @@ test('large packs refresh copied-file counts even while byte-weighted percent st
   );
   assert.ok(samePercentRefresh, JSON.stringify(progress.map(event => [event.percent, event.message])));
   assert.equal(progress.every((event, index) => index === 0 || event.percent >= progress[index - 1].percent), true);
+  });
 });
 
 test('files-only publication reaches a durable healthy boundary without runtime health or process adoption', async t => {
-  const context = fixture(t);
+  await fixture(t).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare({ filesOnly: true });
   await context.runtime.buildCandidate({
     jobId: 'job-one', operationKind: 'import-files-only-new', plan,
@@ -1571,10 +1620,11 @@ test('files-only publication reaches a durable healthy boundary without runtime 
   assert.doesNotMatch(JSON.stringify(context.recoveryRegistry.record.outcome.releaseTracking), /(?:path|url|uri|cache|workspace)/i);
   assert.deepEqual(context.revisionEvents.map(event => event.operationKind), ['import']);
   assert.equal(context.writtenState.filesOnly, true);
+  });
 });
 
 test('files-only new-server publication and registration retain import recovery lineage', async t => {
-  const context = fixture(t, { useRealNewTransaction: true });
+  await fixture(t, { useRealNewTransaction: true }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare({ filesOnly: true });
   await context.runtime.buildCandidate({
     jobId: 'job-one', operationKind: 'import-files-only-new', plan,
@@ -1588,16 +1638,17 @@ test('files-only new-server publication and registration retain import recovery 
   })).phase, 'published');
   await context.runtime.registerPublishedInstance({ jobId: 'job-one', plan, resolved, lease });
   assert.equal(context.recoveryRegistry.record.phase, 'registering');
+  });
 });
 
 test('inactive new-server revision publication commits only after one canonical health boot', async t => {
   const observed = [];
-  const context = fixture(t, {
+  await fixture(t, {
     revisionPublisher(_event, record) {
       observed.push(structuredClone(record));
       throw new Error('transient revision publication failure');
     }
-  });
+  }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   await context.runtime.buildCandidate({
     jobId: 'job-one', operationKind: 'install-new', plan,
@@ -1632,6 +1683,7 @@ test('inactive new-server revision publication commits only after one canonical 
   assert.equal(observed[0].outcome.revisionEvent.published, false);
   assert.equal(observed[0].outcome.releaseTracking.status, 'pending');
   assert.equal(await context.runtime.isDurablyCommitted({ jobId: 'job-one', plan, resolved }), true);
+  });
 });
 
 test('cross-loader launcher metadata and dynamic Forge shims remain managed runtime files', async t => {
@@ -1666,7 +1718,7 @@ async function targetedRepairFixture(t, {
   expectBuildFailure = false,
   stagedRuntimeMismatch = false,
   runtimePreparationError = null
-} = {}) {
+} = {}, work = async () => {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-runtime-targeted-repair-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const serverPath = path.join(root, 'server');
@@ -1740,11 +1792,10 @@ async function targetedRepairFixture(t, {
   let ensuredJavaCalls = 0;
   let javaEnsureOptions = null;
   let preparedTargetPath = null;
-  let dirtyCalls = 0;
   let flushDirectoryCalls = 0;
   const restoreRequests = [];
   let writtenState = null;
-  const recoveryRegistry = registryDouble();
+  const recoveryRegistry = fixtureRegistry(root);
   const durableFs = {
     flushDirectory() { flushDirectoryCalls += 1; },
     async flushDirectoryAsync() { flushDirectoryCalls += 1; },
@@ -1815,10 +1866,35 @@ async function targetedRepairFixture(t, {
       acceptedMappingFingerprint: '4'.repeat(64), operationFingerprint: '5'.repeat(64), minimumAvailableBytes: '1'
     }
   };
+  const authority = fixtureAuthority({ instanceId: 'server-one', serverPath, jobId: 'job-repair',
+    baseRevision, registry: recoveryRegistry, observeDirtyCalls: true });
+  const recoveryServices = {
+    registry: recoveryRegistry,
+    runtimeWriterAuthority: controlledRuntimeAuthority(),
+    releaseTrackingReconciler: {
+        async reconcile() { return { reconciled: true }; },
+        createIntent() { return null; },
+        async persistIntent() { return { persisted: true }; }
+      },
+    runtimePolicy: {
+        suspend() { return { held: true }; }, async ensureStopped() { return { alreadyStopped: true }; },
+        async adoptValidatedHandoff() { return { adopted: true }; }, restoreAutoRestart() { return { restored: true }; }
+      }
+  };
+  recoveryServices.recoveryService = fixtureRecovery({ authority, registry: recoveryRegistry,
+    durableFs: fixtureDurableFs(root), runtimePolicy: recoveryServices.runtimePolicy,
+    reparseInspector: reparseInspector });
   const runtime = new ProductionMutationRuntime({
+    coordinator: authority.coordinator,
     availableBytes: async () => '999999999999',
-    cleanupCommittedTransactionFn: async () => structuredClone(cleanupResult),
+    cleanupCommittedTransactionFn: async () => {
+      assert.equal(cleanupResult.phase, 'cleanup-pending', 'this partial fixture cannot authorize successful cleanup');
+      assert.equal(cleanupResult.rollbackRemoved, false);
+      return structuredClone(cleanupResult);
+    },
     buildExistingCandidateFn: async context => {
+      fs.mkdirSync(context.candidatePath);
+      await recordFixtureCandidate(recoveryRegistry, context);
       fs.cpSync(serverPath, context.candidatePath, { recursive: true, force: false, errorOnExist: true });
       fs.mkdirSync(
         path.join(context.candidatePath, '.minecraft-core-state', 'operations', 'job-repair'),
@@ -1874,26 +1950,13 @@ async function targetedRepairFixture(t, {
       fs.writeFileSync(path.join(targetPath, 'libraries', 'healthy.bin'), runtimeWriterLibraryBytes);
       if (runtimePreparationError) throw runtimePreparationError;
     },
-    recoveryServices: {
-      registry: recoveryRegistry,
-      recoveryService: { async recoverWithLease() {}, async rollbackWithLease() {}, async failNewWithLease() {} },
-      runtimeWriterAuthority: controlledRuntimeAuthority(),
-      releaseTrackingReconciler: {
-        async reconcile() { return { reconciled: true }; },
-        createIntent() { return null; },
-        async persistIntent() { return { persisted: true }; }
-      },
-      runtimePolicy: {
-        suspend() { return { held: true }; }, async ensureStopped() { return { alreadyStopped: true }; },
-        async adoptValidatedHandoff() { return { adopted: true }; }, restoreAutoRestart() { return { restored: true }; }
-      }
-    },
+    recoveryServices,
     releaseTrackingStore: { async list() { return []; }, async remove() { return false; }, async upsert() {} },
     reparseInspector,
     restorePointServiceFactory: () => ({
       async prepareVerifiedRestorePointCreation(request) {
         restoreRequests.push(structuredClone(request));
-        return { state: 'prepared' };
+        return fixtureRestorePreparation(root, request);
       },
       async createVerifiedRestorePoint(request) {
         return {
@@ -1943,10 +2006,7 @@ async function targetedRepairFixture(t, {
     }
   });
   const resolved = { instanceId: 'server-one', serverPath, priorRunning: false };
-  const lease = {
-    kind: 'mutation', instanceId: 'server-one', serverPath, baseRevision,
-    markDirty() { dirtyCalls += 1; }, assertOwnedPath() {}
-  };
+  return authority.run(async lease => {
   const choices = { acceptEula: false, startAfterInstall: false, restorePointId: null };
 
   await runtime.revalidate({ jobId: 'job-repair', plan, choices, resolved, lease });
@@ -1968,10 +2028,11 @@ async function targetedRepairFixture(t, {
     }
   }
 
-  return {
+  return work({
+    authority,
     buildError,
     built,
-    dirtyCalls,
+    dirtyCalls: authority.dirtyCalls,
     ensuredJavaCalls,
     flushDirectoryCalls,
     javaEnsureOptions,
@@ -1991,16 +2052,17 @@ async function targetedRepairFixture(t, {
     trustedRuntimeBytes,
     writtenState,
     lease
-  };
+  });
+  });
 }
 
 test('inactive new server persists and boots with its reviewed resources and loopback network', async t => {
-  const context = fixture(t, {
+  await fixture(t, {
     maxRam: 6,
     serverPort: 25571,
     networkAccess: 'loopback',
     useRealNewTransaction: true
-  });
+  }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   await context.runtime.buildCandidate({
     jobId: 'job-one', operationKind: 'install-new', plan,
@@ -2044,10 +2106,11 @@ test('inactive new server persists and boots with its reviewed resources and loo
   assert.deepEqual(context.adoptedHandoffs, []);
   assert.equal(context.recoveryRegistry.record.outcome.runtime.maxRam, 6);
   assert.equal(context.recoveryRegistry.record.outcome.runtime.networkAccess, 'loopback');
+  });
 });
 
 test('new server requested to remain running still performs one final live boot and adopts it', async t => {
-  const context = fixture(t, { useRealNewTransaction: true });
+  await fixture(t, { useRealNewTransaction: true }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   await context.runtime.buildCandidate({
     jobId: 'job-one', operationKind: 'install-new', plan,
@@ -2090,10 +2153,11 @@ test('new server requested to remain running still performs one final live boot 
   }]);
   assert.equal(context.adoptedHandoffIsExact, true);
   assert.equal(context.recoveryRegistry.record.outcome.runtimePolicy.runningRestored, true);
+  });
 });
 
 test('new running server stops the exact retained handoff when canonical completion verification fails', async t => {
-  const context = fixture(t, { useRealNewTransaction: true });
+  await fixture(t, { useRealNewTransaction: true }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   await context.runtime.buildCandidate({
     jobId: 'job-one', operationKind: 'install-new', plan,
@@ -2128,10 +2192,11 @@ test('new running server stops the exact retained handoff when canonical complet
   assert.equal(retained.stopCalls(), 1);
   assert.equal(retained.isLive(), false);
   assert.deepEqual(context.adoptedHandoffs, []);
+  });
 });
 
 test('new running server stops the exact retained handoff when process adoption rejects', async t => {
-  const context = fixture(t, { useRealNewTransaction: true });
+  await fixture(t, { useRealNewTransaction: true }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   await context.runtime.buildCandidate({
     jobId: 'job-one', operationKind: 'install-new', plan,
@@ -2165,14 +2230,15 @@ test('new running server stops the exact retained handoff when process adoption 
 
   assert.equal(retained.stopCalls(), 1);
   assert.equal(retained.isLive(), false);
+  });
 });
 
 test('an unproven retained process blocks new-server quarantine instead of renaming a live canonical', async t => {
   let failNewCalls = 0;
-  const context = fixture(t, {
+  await fixture(t, {
     useRealNewTransaction: true,
     onFailNewWithLease() { failNewCalls += 1; }
-  });
+  }).withLease(async context => {
   const { plan, resolved, lease } = await context.prepare();
   await context.runtime.buildCandidate({
     jobId: 'job-one', operationKind: 'install-new', plan,
@@ -2215,11 +2281,12 @@ test('an unproven retained process blocks new-server quarantine instead of renam
   assert.equal(retained.isLive(), true);
   assert.equal(failNewCalls, 0);
   assert.equal((await context.recoveryRegistry.load('job-one')).phase, 'validating-live');
+  });
 });
 
 test('existing candidate batches durability at the transaction boundary while applying many removals', async t => {
   const removeActionCount = 64;
-  const result = await targetedRepairFixture(t, { operationKind: 'upgrade', removeActionCount });
+  await targetedRepairFixture(t, { operationKind: 'upgrade', removeActionCount }, async result => {
 
   assert.equal(result.plan.ownership.actions.filter(action => action.action === 'remove').length, removeActionCount / 2);
   assert.equal(
@@ -2231,10 +2298,11 @@ test('existing candidate batches durability at the transaction boundary while ap
   }
   assert.equal(result.dirtyCalls, removeActionCount + 3);
   assert.equal(result.flushDirectoryCalls, 0);
+  });
 });
 
 test('repair restores one missing mod without invoking healthy runtime writers or downloads', async t => {
-  const result = await targetedRepairFixture(t);
+  await targetedRepairFixture(t, {}, async result => {
 
   assert.equal(
     fs.readFileSync(path.join(result.built.candidatePath, 'server.jar'), 'utf8'),
@@ -2252,12 +2320,15 @@ test('repair restores one missing mod without invoking healthy runtime writers o
     result.writtenState.manifest.entries.find(entry => entry.pathKey === 'mods/missing.jar').installedHash,
     result.hash(result.modBytes)
   );
+  });
 });
 
 test('cleanup-pending is never finalized as a successful production mutation', async t => {
-  const result = await targetedRepairFixture(t, {
+  let authority;
+  await targetedRepairFixture(t, {
     cleanupResult: { phase: 'cleanup-pending', rollbackRemoved: false }
-  });
+  }, async result => {
+  authority = result.authority;
 
   await assert.rejects(
     result.runtime.cleanup({
@@ -2267,26 +2338,34 @@ test('cleanup-pending is never finalized as a successful production mutation', a
     error => error?.code === 'RECOVERY_REQUIRED'
   );
   assert.equal(result.recoveryRegistry.finishCalls, 0);
+  });
+  await assert.rejects(authority.coordinator.acquireStart(authority.selector,
+    { operation: 'ordinary-start', operationId: 'probe-start' }), { code: 'RECOVERY_REQUIRED' });
+  await assert.rejects(authority.coordinator.runMutation(authority.selector,
+    { operation: 'ordinary-write', operationId: 'probe-write', revisionMode: 'none' },
+    async () => assert.fail('cleanup-pending must retain ordinary access quarantine')), { code: 'RECOVERY_REQUIRED' });
 });
 
 test('existing candidate revision advances from the coordinator when ordinary writes are newer than managed state', async t => {
-  const result = await targetedRepairFixture(t, { baseRevision: 8 });
+  await targetedRepairFixture(t, { baseRevision: 8 }, async result => {
 
   assert.equal(result.writtenState.contentRevision, 9);
+  });
 });
 
 test('existing update and downgrade safety restores use the reviewed coordinator revision ahead of managed state', async t => {
   for (const operationKind of ['upgrade', 'downgrade']) {
-    const result = await targetedRepairFixture(t, {
+    await targetedRepairFixture(t, {
       baseRevision: 8,
       createSafetyRestore: true,
       expectedContentRevision: 8,
       operationKind
-    });
+    }, async result => {
 
     assert.equal(result.restoreRequests.length, 1, operationKind);
     assert.equal(result.restoreRequests[0].sourceRevision, 8, operationKind);
     assert.equal(result.safetyRestore.sourceRevision, 8, operationKind);
+    });
   }
 });
 
@@ -2302,7 +2381,7 @@ test('revalidation exposes the leased coordinator revision instead of echoing a 
 });
 
 test('repair stages a corrupt runtime and copies back only reviewed mismatched runtime paths', async t => {
-  const result = await targetedRepairFixture(t, { corruptRuntime: true });
+  await targetedRepairFixture(t, { corruptRuntime: true }, async result => {
 
   assert.equal(
     fs.readFileSync(path.join(result.built.candidatePath, 'server.jar'), 'utf8'),
@@ -2327,21 +2406,23 @@ test('repair stages a corrupt runtime and copies back only reviewed mismatched r
     result.writtenState.manifest.entries.find(entry => entry.pathKey === 'libraries/healthy.bin').installedHash,
     result.hash(result.healthyLibraryBytes)
   );
+  });
 });
 
 test('repair Java acquisition receives the exact lifecycle cancellation signal', async t => {
   const controller = new AbortController();
-  const result = await targetedRepairFixture(t, {
+  await targetedRepairFixture(t, {
     corruptJava: true,
     lifecycleSignal: controller.signal
-  });
+  }, async result => {
 
   assert.equal(result.ensuredJavaCalls, 1);
   assert.equal(result.javaEnsureOptions?.signal, controller.signal);
+  });
 });
 
 test('repair restores a corrupt managed Java executable without rewriting healthy runtime siblings', async t => {
-  const result = await targetedRepairFixture(t, { corruptJava: true });
+  await targetedRepairFixture(t, { corruptJava: true }, async result => {
 
   assert.equal(
     fs.readFileSync(path.join(result.built.candidatePath, 'java', 'java-21', 'bin', 'java.exe'), 'utf8'),
@@ -2361,28 +2442,31 @@ test('repair restores a corrupt managed Java executable without rewriting health
     result.writtenState.manifest.entries.find(entry => entry.pathKey === 'java/java-21/bin/java.exe').installedHash,
     result.hash(result.healthyJavaBytes)
   );
+  });
 });
 
 test('repair rejects a staged runtime path that does not match the trusted installed baseline', async t => {
-  const result = await targetedRepairFixture(t, {
+  await targetedRepairFixture(t, {
     corruptRuntime: true,
     expectBuildFailure: true,
     stagedRuntimeMismatch: true
-  });
+  }, async result => {
 
   assert.equal(result.built, null);
   assert.equal(result.buildError?.code, 'RUNTIME_INCOMPLETE');
   assert.equal(result.preparedRuntimeCalls, 1);
   assert.equal(fs.existsSync(result.preparedTargetPath), false);
+  });
 });
 
 test('repair retains its nested staging directory when runtime shutdown is unproven', async t => {
   const runtimePreparationError = Object.assign(new Error('runtime child still owns staging'), { preserveWorkspace: true });
-  const result = await targetedRepairFixture(t, {
+  await targetedRepairFixture(t, {
     corruptRuntime: true,
     expectBuildFailure: true,
     runtimePreparationError
-  });
+  }, async result => {
   assert.equal(result.buildError, runtimePreparationError);
   assert.equal(fs.existsSync(result.preparedTargetPath), true);
+  });
 });

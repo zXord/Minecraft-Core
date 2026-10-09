@@ -42,6 +42,7 @@
   import ModFilters from "./ModFilters.svelte";
   // Props
   export let serverPath = "";
+  export let modEditsBlocked = false;
 
   /** @type {Set<string> | undefined} */
   export let serverManagedSet = undefined;
@@ -599,6 +600,7 @@
   }
   // Handle install
   function handleInstall(event) {
+    if (modEditsBlocked) return;
     const { mod, versionId } = event.detail;
     dispatch("install", { mod, versionId });
   }
@@ -783,6 +785,7 @@
             )
           )}
           <ModCard
+            {modEditsBlocked}
             {mod}
             expanded={$expandedModId === mod.id}
             versions={versionsCache[getSearchVersionCacheKey(mod.id, buildVersionLookupContext())] || []}

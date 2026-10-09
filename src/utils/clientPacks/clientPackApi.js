@@ -1,6 +1,9 @@
 export class ClientPackApiError extends Error {
   constructor(error = {}) {
-    super(error.message || 'Matching client pack is unavailable. Refresh and try again.');
+    const message = error.code === 'CLIENT_PACK_SERVER_CHANGED'
+      ? "The server's managed mod files differ from the installed pack. Use Modpack Verify and Repair before installing or launching its matching client pack."
+      : error.message || 'Matching client pack is unavailable. Refresh and try again.';
+    super(message);
     this.name = 'ClientPackApiError';
     this.code = error.code || 'CLIENT_PACK_UNAVAILABLE';
     this.retryable = error.retryable === true;

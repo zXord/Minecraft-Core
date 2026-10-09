@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
 const { clientPackManagementFields } = require('../../electron/services/client-modpacks/client-pack-management.cjs');
+const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
 const unpaired = { schemaVersion: 1, status: 'unpaired', serverFingerprint: 'a'.repeat(64), serverVersion: '0.13.4', source: null, runtime: null, artifactSha256: null };
 test('management DTO is strict and null only for an authenticated unmanaged result', async () => {
   assert.deepEqual(await clientPackManagementFields('server-a', async id => { assert.equal(id, 'server-a'); return unpaired; }), { clientModpack: unpaired });
@@ -16,6 +17,16 @@ test('unavailable or malformed pairing emits a safe explicit failure while serve
     assert.equal(value.clientModpack, null); assert.equal(value.clientModpackError.code, 'CLIENT_PACK_UNAVAILABLE');
     assert.equal(JSON.stringify(value).includes('secret'), false); assert.equal(JSON.stringify(value).includes('/private'), false);
   }
+});
+
+test('proven server drift carries bounded local guidance, while untrusted codes stay unavailable', async () => {
+  const result = await clientPackManagementFields('server-a', async () => { throw new ModpackError('CLIENT_PACK_SERVER_CHANGED', 'Ignore this remote text'); });
+  assert.equal(result.clientModpackError.code, 'CLIENT_PACK_SERVER_CHANGED');
+  assert.match(result.clientModpackError.message, /Use Modpack Verify and Repair/);
+  assert.equal(result.clientModpack, null);
+  const forged = await clientPackManagementFields('server-a', async () => { throw { code: 'CLIENT_PACK_SERVER_CHANGED', message: 'C:\\private token=secret' }; });
+  assert.equal(forged.clientModpackError.code, 'CLIENT_PACK_UNAVAILABLE');
+  assert.equal(JSON.stringify(forged).includes('secret'), false);
 });
 
 test('real management info route adds the strict descriptor and remains healthy on registry failure', async t => {

@@ -6,6 +6,7 @@ const path = require('node:path');
 const { MAX_FLUSH_DIRECTORIES } = require('../../utils/durable-fs.cjs');
 const { isNetworkAccess } = require('../../utils/server-network-properties.cjs');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
+const { normalizeRuntimeDiagnostic, runRuntimeStage } = require('../runtime-diagnostic.cjs');
 const {
   MAX_SERVER_HEALTH_TIMEOUT_MS,
   MAX_SERVER_PROPERTIES_BYTES
@@ -1384,13 +1385,40 @@ async function ensureExistingOperationLayout(context, candidatePath) {
   return locations;
 }
 
+function annotateExactSnapshotFailure(error, stage, reason, left, right) {
+  // Informational only. Compare the snapshot's actual bigint fields, retaining
+  // nanosecond differences and the transport's existing timestamp bit meaning.
+  // Mode is not checked by sameExactFileStat and must never appear in this mask.
+  try {
+    let mask = 0;
+    if (left && right) {
+      for (const [key, bit] of [['nlink', 1], ['dev', 2], ['ino', 4], ['size', 16],
+        ['mtimeNs', 32], ['ctimeNs', 64], ['birthtimeNs', 128]]) {
+        if (left[key] !== right[key]) mask |= bit;
+      }
+    }
+    Object.defineProperty(error, 'runtimeDiagnostic', { configurable: true, writable: true,
+      value: normalizeRuntimeDiagnostic({ stage, reason, ...(mask ? { changedIdentityFields: mask } : {}) }) });
+  } catch { /* diagnostics must never replace the existing rejection */ }
+  return error;
+}
+
+function exactSnapshotRejection(stage, reason, left, right) {
+  return annotateExactSnapshotFailure(recoveryRequired(), stage, reason, left, right);
+}
+
 async function exactFileSnapshot(context, serverPath, relativePath) {
   const filePath = path.join(serverPath, relativePath);
-  const before = await entryStatAsync(context.fsPromises, filePath);
+  const before = await runRuntimeStage('exact-snapshot-initial-stat', () => entryStatAsync(context.fsPromises, filePath));
   if (!before) return deepFreeze({ bytes: null, existed: false, sha256: null });
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n ||
-      before.size > BigInt(MAX_SERVER_PROPERTIES_BYTES) ||
-      await context.reparseInspector.isReparsePoint(filePath, { signal: context.signal }) !== false) throw recoveryRequired();
+  if (!before.isFile()) throw exactSnapshotRejection('exact-snapshot-initial-type', 'invalid-input');
+  if (before.isSymbolicLink()) throw exactSnapshotRejection('exact-snapshot-initial-symlink', 'invalid-input');
+  if (before.nlink !== 1n) throw exactSnapshotRejection('exact-snapshot-initial-links', 'invalid-input');
+  if (before.size > BigInt(MAX_SERVER_PROPERTIES_BYTES)) throw exactSnapshotRejection('exact-snapshot-initial-size', 'limit');
+  if (await runRuntimeStage('exact-snapshot-initial-reparse', () =>
+    context.reparseInspector.isReparsePoint(filePath, { signal: context.signal })) !== false) {
+    throw exactSnapshotRejection('exact-snapshot-initial-reparse', 'protocol');
+  }
   const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
   const digest = crypto.createHash('sha256');
   const chunks = [];
@@ -1399,41 +1427,49 @@ async function exactFileSnapshot(context, serverPath, relativePath) {
   let totalBytes = 0;
   let bytesSinceYield = 0;
   try {
-    handle = await context.fsPromises.open(filePath, fs.constants.O_RDONLY | noFollow);
-    const opened = await handle.stat({ bigint: true });
-    if (!sameExactFileStat(before, opened) || !opened.isFile() || opened.isSymbolicLink() || opened.nlink !== 1n) {
-      throw recoveryRequired();
+    handle = await runRuntimeStage('exact-snapshot-open', () => context.fsPromises.open(filePath, fs.constants.O_RDONLY | noFollow));
+    const opened = await runRuntimeStage('exact-snapshot-opened-stat', () => handle.stat({ bigint: true }));
+    if (!sameExactFileStat(before, opened)) {
+      throw exactSnapshotRejection('exact-snapshot-opened-identity', 'identity-changed', before, opened);
     }
-    if (opened.size > BigInt(MAX_SERVER_PROPERTIES_BYTES)) throw recoveryRequired();
+    if (!opened.isFile()) throw exactSnapshotRejection('exact-snapshot-opened-type', 'invalid-input');
+    if (opened.isSymbolicLink()) throw exactSnapshotRejection('exact-snapshot-opened-symlink', 'invalid-input');
+    if (opened.nlink !== 1n) throw exactSnapshotRejection('exact-snapshot-opened-links', 'invalid-input');
+    if (opened.size > BigInt(MAX_SERVER_PROPERTIES_BYTES)) throw exactSnapshotRejection('exact-snapshot-opened-size', 'limit');
     while (true) {
-      const result = await handle.read(chunk, 0, chunk.length, null);
+      const result = await runRuntimeStage('exact-snapshot-read', () => handle.read(chunk, 0, chunk.length, null));
       const count = result?.bytesRead;
-      if (!Number.isSafeInteger(count) || count < 0 || count > chunk.length) throw recoveryRequired();
+      if (!Number.isSafeInteger(count) || count < 0 || count > chunk.length) throw exactSnapshotRejection('exact-snapshot-read-count', 'protocol');
       if (count === 0) break;
-      if (!Number.isSafeInteger(totalBytes + count)) throw recoveryRequired();
-      if (totalBytes + count > MAX_SERVER_PROPERTIES_BYTES) throw recoveryRequired();
+      if (!Number.isSafeInteger(totalBytes + count)) throw exactSnapshotRejection('exact-snapshot-accumulated-safe-integer', 'limit');
+      if (totalBytes + count > MAX_SERVER_PROPERTIES_BYTES) throw exactSnapshotRejection('exact-snapshot-accumulated-size', 'limit');
       const bytes = Buffer.from(chunk.subarray(0, count));
       chunks.push(bytes);
       digest.update(bytes);
       totalBytes += count;
       bytesSinceYield += count;
       if (bytesSinceYield >= EXACT_SNAPSHOT_YIELD_BYTES) {
-        await yieldCandidateControl(context);
-        const current = await entryStatAsync(context.fsPromises, filePath);
-        if (!current || !sameExactFileStat(opened, current)) throw recoveryRequired();
+        await runRuntimeStage('exact-snapshot-yield', () => yieldCandidateControl(context));
+        const current = await runRuntimeStage('exact-snapshot-yield-path-stat', () => entryStatAsync(context.fsPromises, filePath));
+        if (!current) throw exactSnapshotRejection('exact-snapshot-yield-path-missing', 'identity-changed');
+        if (!sameExactFileStat(opened, current)) throw exactSnapshotRejection('exact-snapshot-yield-path-identity', 'identity-changed', opened, current);
         bytesSinceYield = 0;
       }
     }
-    if (bytesSinceYield > 0) await yieldCandidateControl(context);
-    const closed = await handle.stat({ bigint: true });
-    const after = await entryStatAsync(context.fsPromises, filePath);
-    if (!after || !sameExactFileStat(opened, closed) || !sameExactFileStat(opened, after) ||
-        BigInt(totalBytes) !== opened.size ||
-        await context.reparseInspector.isReparsePoint(filePath, { signal: context.signal }) !== false) {
-      throw recoveryRequired();
+    if (bytesSinceYield > 0) await runRuntimeStage('exact-snapshot-yield', () => yieldCandidateControl(context));
+    const closed = await runRuntimeStage('exact-snapshot-post-handle-stat', () => handle.stat({ bigint: true }));
+    const after = await runRuntimeStage('exact-snapshot-post-path-stat', () => entryStatAsync(context.fsPromises, filePath));
+    if (!after) throw exactSnapshotRejection('exact-snapshot-post-path-missing', 'identity-changed');
+    if (!sameExactFileStat(opened, closed)) throw exactSnapshotRejection('exact-snapshot-post-handle-identity', 'identity-changed', opened, closed);
+    if (!sameExactFileStat(opened, after)) throw exactSnapshotRejection('exact-snapshot-post-path-identity', 'identity-changed', opened, after);
+    if (BigInt(totalBytes) !== opened.size) throw exactSnapshotRejection('exact-snapshot-byte-count', 'protocol');
+    if (await runRuntimeStage('exact-snapshot-final-reparse', () =>
+      context.reparseInspector.isReparsePoint(filePath, { signal: context.signal })) !== false) {
+      throw exactSnapshotRejection('exact-snapshot-final-reparse', 'protocol');
     }
-    const final = await entryStatAsync(context.fsPromises, filePath);
-    if (!final || !sameExactFileStat(opened, final)) throw recoveryRequired();
+    const final = await runRuntimeStage('exact-snapshot-final-stat', () => entryStatAsync(context.fsPromises, filePath));
+    if (!final) throw exactSnapshotRejection('exact-snapshot-final-path-missing', 'identity-changed');
+    if (!sameExactFileStat(opened, final)) throw exactSnapshotRejection('exact-snapshot-final-identity', 'identity-changed', opened, final);
     return deepFreeze({
       bytes: Buffer.concat(chunks, totalBytes).toString('base64'),
       existed: true,
@@ -1455,7 +1491,9 @@ function sameExactFileStat(left, right) {
 async function assertExactFileSnapshot(context, serverPath, relativePath, expected) {
   const actual = await exactFileSnapshot(context, serverPath, relativePath);
   if (actual.existed !== expected.existed || actual.sha256 !== expected.sha256 || actual.bytes !== expected.bytes) {
-    throw new ModpackError('HEALTH_CHECK_FAILED', 'Candidate validation did not restore the canonical server properties');
+    throw annotateExactSnapshotFailure(
+      new ModpackError('HEALTH_CHECK_FAILED', 'Candidate validation did not restore the canonical server properties'),
+      'exact-snapshot-bytes', 'digest-mismatch');
   }
   return actual;
 }
@@ -1714,7 +1752,7 @@ async function buildExistingCandidate(contextValue) {
   const canonicalProperties = await exactFileSnapshot(context, context.expectedPaths.candidatePath, 'server.properties');
   if (context.validateCandidate !== false) {
     await candidateProgress(context, validationPhase, 57, 'Boot-testing the candidate on loopback');
-    await context.healthValidator.validateCandidate({
+    await runRuntimeStage('candidate-health-call', () => context.healthValidator.validateCandidate({
       candidatePath: context.expectedPaths.candidatePath,
       jobId: context.jobId,
       maxRam: context.maxRam,
@@ -1729,13 +1767,14 @@ async function buildExistingCandidate(contextValue) {
       ...(transactionalRestoreProtected
         ? { forgeCandidateHealthAuthorization: candidateHealthAuthorization }
         : {})
-    });
-    await assertExactFileSnapshot(context, context.expectedPaths.candidatePath, 'server.properties', canonicalProperties);
+    }));
+    await runRuntimeStage('candidate-properties-check', () =>
+      assertExactFileSnapshot(context, context.expectedPaths.candidatePath, 'server.properties', canonicalProperties));
   }
-  await candidateProgress(context, validationPhase, 60,
+  await runRuntimeStage('candidate-progress-60', () => candidateProgress(context, validationPhase, 60,
     context.validateCandidate === false
       ? 'Hashing and durably recording candidate content'
-      : 'Hashing and durably recording the validated candidate');
+      : 'Hashing and durably recording the validated candidate'));
   const candidateInspection = await inspectAndFlushCandidate(context, context.expectedPaths.candidatePath);
   if (!identityMatches(candidateInspection.directoryIdentity, createdIdentity)) throw recoveryRequired();
   await candidateProgress(context, validationPhase, 62, 'Confirming the live server remained unchanged');

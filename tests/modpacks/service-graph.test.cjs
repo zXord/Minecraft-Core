@@ -738,7 +738,10 @@ test('service graph gives the production coordinator exact-root revision durabil
       recoveryService: { async recoverAll() { return { recovered: [], unresolved: [] }; } },
       runtimeVerifier: { async verifyBeforeRecovery() { return { quiescent: true }; } }
     }; },
-    async modpackFactory() { return fakeModpackComposition({ clientPackIntegration: { async assertServerDestination() {} } }); },
+    async modpackFactory() { return fakeModpackComposition({
+      stateRepository: { read: () => null },
+      clientPackIntegration: { async assertServerDestination() {} }
+    }); },
     durableFsFactory(allowedRoots) {
       requestedRoots.push([...allowedRoots]);
       return createDurableFs({

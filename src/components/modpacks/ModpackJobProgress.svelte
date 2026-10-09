@@ -114,20 +114,31 @@
   let actionResultJobId = null;
 
   $: phase = job?.phase || 'queued';
-  $: stage = stageLabels[phase] || phase;
+  $: cleanupPending = terminal.has(phase) && job?.outcome?.cleanupPending === true;
+  $: primaryErrorCode = typeof job?.outcome?.errorCode === 'string' && safeErrorCodePattern.test(job.outcome.errorCode) ? job.outcome.errorCode : null;
+  $: cleanupErrorCode = typeof job?.outcome?.cleanupErrorCode === 'string' && safeErrorCodePattern.test(job.outcome.cleanupErrorCode) ? job.outcome.cleanupErrorCode : null;
+  $: completedVerify = phase === 'completed' && job?.operationKind === 'verify';
+  $: verificationResult = job?.outcome?.result;
+  $: verificationAvailable = typeof verificationResult?.healthy === 'boolean' &&
+    validVerificationCount(verificationResult?.checkedFiles) && validVerificationCount(verificationResult?.mismatchCount);
+  $: verificationTitle = !verificationAvailable ? 'Verification result unavailable'
+    : verificationResult.healthy ? 'Verified healthy' : 'Differences found';
+  $: verificationMismatches = Array.isArray(verificationResult?.mismatches) ? verificationResult.mismatches : [];
+  $: stage = cleanupPending ? 'Recovery needs review' : completedVerify ? 'Verification complete' : stageLabels[phase] || phase;
+  $: badgeLabel = cleanupPending ? 'Recovery needs review' : completedVerify ? verificationTitle : phase;
   $: activityText = `${stage}: ${job?.progress?.message || 'Minecraft Core is preserving the reviewed operation state.'}`;
   $: canCancel = cancellable.has(phase) && !job?.cancellationRequested;
-  $: outcomeKind = job?.outcome?.kind || job?.outcome?.resultKind || (phase === 'rolled-back' ? 'restored' : phase === 'recovery-required' ? (job?.outcome?.automatic ? 'automatic-recovery' : 'manual-recovery') : job?.outcome?.retainedDownload ? 'retained-download' : phase === 'cancelled' || phase === 'failed' ? 'nothing-changed' : 'completed');
-  $: outcomeBadgeClass = phase === 'failed' || phase === 'recovery-required'
+  $: outcomeKind = cleanupPending ? 'cleanup-pending' : job?.outcome?.kind || job?.outcome?.resultKind || (phase === 'rolled-back' ? 'restored' : phase === 'recovery-required' ? (job?.outcome?.automatic ? 'automatic-recovery' : 'manual-recovery') : job?.outcome?.retainedDownload ? 'retained-download' : phase === 'cancelled' || phase === 'failed' ? 'nothing-changed' : 'completed');
+  $: outcomeBadgeClass = cleanupPending || phase === 'failed' || phase === 'recovery-required'
     ? 'danger'
     : phase === 'cancelled' || phase === 'rolled-back'
       ? 'warn'
       : phase === 'completed'
-        ? 'good'
+        ? (completedVerify && (!verificationAvailable || verificationResult.healthy !== true) ? 'warn' : 'good')
         : '';
-  $: filesystemFailure = safeFilesystemFailure(job?.outcome?.failure);
-  $: candidateBootFailure = safeCandidateBootFailure(job?.outcome?.failure);
-  $: destinationRecoveryBlocked = phase === 'failed' &&
+  $: filesystemFailure = cleanupPending ? null : safeFilesystemFailure(job?.outcome?.failure);
+  $: candidateBootFailure = cleanupPending ? null : safeCandidateBootFailure(job?.outcome?.failure);
+  $: destinationRecoveryBlocked = !cleanupPending && phase === 'failed' &&
     isNewServerDestinationRecoveryOutcome(job?.outcome);
   $: displayLogs = mergeLogs(job?.events, logs);
   $: if ((job?.jobId || null) !== actionResultJobId) {
@@ -136,6 +147,11 @@
     logs = [];
   }
   $: if (terminal.has(phase)) focusResult();
+
+  function validVerificationCount(value) {
+    return (typeof value === 'string' && /^(0|[1-9][0-9]*)$/u.test(value)) ||
+      (Number.isSafeInteger(value) && value >= 0);
+  }
 
   function strictFailureDescriptors(value, expectedNames) {
     try {
@@ -360,7 +376,7 @@
 
 <div class="modpack-surface mp-stack">
   <section class="mp-panel mp-stack" aria-label="Modpack operation progress">
-    <div class="mp-toolbar"><div class="grow"><p class="mp-kicker">Durable job {job?.jobId || 'starting'}</p><h2 class="mp-title">{stage}</h2><p class="mp-subtitle" aria-live="polite">{job?.progress?.message || 'Minecraft Core is preserving the reviewed operation state.'}</p></div><span class="mp-badge {outcomeBadgeClass}">{phase}</span></div>
+    <div class="mp-toolbar"><div class="grow"><p class="mp-kicker">Durable job {job?.jobId || 'starting'}</p><h2 class="mp-title">{stage}</h2><p class="mp-subtitle" aria-live="polite">{job?.progress?.message || 'Minecraft Core is preserving the reviewed operation state.'}</p></div><span class="mp-badge {outcomeBadgeClass}">{badgeLabel}</span></div>
     {#if !terminal.has(phase)}
       <div class="mp-progress-track" role="progressbar" aria-label={stage} aria-valuetext={activityText}><span class="mp-progress-activity"></span></div>
       <p class="progress-note">This stage stays active until the current operation finishes.</p>
@@ -377,7 +393,42 @@
       {#if destinationRecoveryBlocked}<div class="mp-state error"><strong>Destination has unfinished recovery</strong><p>This folder belongs to an earlier unfinished server operation. The existing server files were not touched.</p><p>Choose a different empty folder for this new server, or finish the earlier server recovery before reusing this destination.</p></div>{/if}
       {#if filesystemFailure}<div class="mp-state error"><strong>Filesystem check</strong><p>{filesystemFailure.message}</p><p>{filesystemFailure.nextStep}</p></div>{/if}
       {#if candidateBootFailure}<div class="mp-state error"><strong>Candidate boot check</strong><p>Failed while {candidateBootFailure.boundary}.</p><p>{candidateBootFailure.message}</p><p>{candidateBootFailure.nextStep}</p></div>{/if}
-      {#if outcomeKind === 'retained-download'}
+      {#if cleanupPending}
+        <div><p class="mp-kicker">Unfinished operation cleanup</p><h3>Recovery needs review</h3><p>This operation stopped before cleanup could finish. Open the Modpack page to check its current recovery status before retrying.</p></div>
+        {#if primaryErrorCode}<p class="mp-muted">Operation error: {primaryErrorCode}</p>{/if}
+        {#if cleanupErrorCode}<p class="mp-muted">Cleanup error: {cleanupErrorCode}</p>{/if}
+        {#if job?.outcome?.retainedDownload}<p class="mp-muted">The verified download remains available in the controlled cache.</p>{/if}
+        <div class="mp-actions"><button class="mp-button primary" on:click={() => dispatch('return', { job })}>Review recovery status</button>{#if job?.outcome?.retainedDownload && hasAction('open-retained-download-folder')}<button class="mp-button" on:click={() => performAction('open-retained-download-folder')} disabled={actionBusy}>Open folder</button>{/if}</div>
+      {:else if completedVerify}
+        <div>
+          <p class="mp-kicker">Read-only verification</p>
+          <h3>{verificationTitle}</h3>
+          <p class="mp-muted">No server files were changed.</p>
+        </div>
+        {#if verificationAvailable}
+          <p>Checked files: {verificationResult.checkedFiles} · Mismatches: {verificationResult.mismatchCount}</p>
+          {#if verificationResult.mismatchesTruncated === true}
+            <p class="mp-muted">Showing {verificationMismatches.length} of {verificationResult.mismatchCount} differences; {verificationResult.omittedMismatchCount} additional differences are not listed. The full verification counts include all checked files.</p>
+          {/if}
+          {#if verificationMismatches.length > 0}
+            <ul class="verification-mismatches" aria-label="Managed file differences">
+              {#each verificationMismatches as mismatch}
+                <li><span>{mismatch?.entryName || 'Filename unavailable'}</span> — {mismatch?.status || 'Status unavailable'}</li>
+              {/each}
+            </ul>
+          {/if}
+        {:else}
+          <p class="mp-muted">This job does not include a complete verification result. Return to the Modpack page and run Verify again.</p>
+        {/if}
+        <p class="mp-muted">{verificationResult?.repairAvailable === true
+          ? 'Repair is available separately from Actions on the Modpack page. Verify did not repair any files.'
+          : verificationAvailable && verificationResult.healthy
+            ? 'Repair is not needed for the checked content.'
+            : verificationResult?.repairAvailable === false
+              ? 'Repair is not available for this result.'
+              : 'Repair availability is unknown. Run Verify again before reviewing Repair.'}</p>
+        <div class="mp-actions"><button class="mp-button primary" on:click={() => dispatch('return', { job })}>Return to server</button>{#if hasAction('open-details')}<button class="mp-button" on:click={() => performAction('open-details')} disabled={actionBusy}>Open details</button>{/if}</div>
+      {:else if outcomeKind === 'retained-download'}
         {#if retainedDownloadRemoved}
           <div><p class="mp-kicker">Manual outcome</p><h3>Downloaded file removed</h3><p class="mp-muted">No server files were changed. The retained download was removed from the controlled cache.</p></div>
         {:else}
@@ -414,6 +465,7 @@
   .outcome.warn { border-color: rgba(244, 189, 98, 0.42); }
   .outcome.danger { border-color: rgba(255, 123, 123, 0.46); }
   .outcome h3 { margin: 0; font-size: 1.3rem; }
+  .verification-mismatches { margin: 0; padding-left: 1.25rem; overflow-wrap: anywhere; }
   summary { cursor: pointer; color: #c4c7ff; }
   .raw-log { margin-top: 0.8rem; max-height: 240px; overflow: auto; font: 0.78rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--mp-muted); }
   .raw-log p { margin: 0.2rem 0; }

@@ -2543,6 +2543,17 @@ function createServerModHandlers(win) {
         
         const disabledModsSet = new Set(disabledMods);
         const disabledModsInfo = installed.filter(mod => disabledModsSet.has(mod.fileName));
+
+        if (disabledModsInfo.length === 0) {
+          logger.debug('Skipping disabled mod update check with no installed disabled mods', {
+            category: 'mods',
+            data: {
+              handler: 'check-disabled-mod-updates',
+              totalDisabledMods: disabledMods.length
+            }
+          });
+          return [];
+        }
         
         const { loader: detectedLoader } = resolveServerLoader(serverPath);
         const loaderForApi = detectedLoader && detectedLoader !== 'vanilla' ? detectedLoader : null;

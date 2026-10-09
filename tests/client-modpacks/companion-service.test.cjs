@@ -8,6 +8,7 @@ const crypto = require('node:crypto');
 const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
 const { CompanionStore } = require('../../electron/services/client-modpacks/companion-store.cjs');
 const { CompanionService } = require('../../electron/services/client-modpacks/companion-service.cjs');
+const { ManagedServerModHealth } = require('../../electron/services/client-modpacks/managed-server-mod-health.cjs');
 const { serverPackFingerprint } = require('../../electron/services/client-modpacks/companion-contracts.cjs');
 const { ArtifactCache } = require('../../electron/services/modpacks/artifacts/artifact-cache.cjs');
 const { ArtifactWorkspaceRegistry } = require('../../electron/services/modpacks/artifacts/artifact-workspace-registry.cjs');
@@ -26,7 +27,7 @@ const runtime = { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersi
 const safeReparse = { async isReparsePoint() { return false; } };
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 
-async function fixture(t, { provider = 'github', clientLoader = '47.3.12', blockedWorker } = {}) {
+async function fixture(t, { provider = 'github', clientLoader = '47.3.12', blockedWorker, managedHealth = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-companion-service-'));
   const filePath = path.join(root, 'companions.json');
   const durableFs = createDurableFs({ allowedRoots: [root], durableClient: { moveWriteThrough: fs.renameSync, replaceFileWriteThrough: fs.renameSync, flushDirectory() {} } });
@@ -72,11 +73,53 @@ async function fixture(t, { provider = 'github', clientLoader = '47.3.12', block
   const context = createServerMutationContext(); let bumps = 0;
   const coordinator = new ServerMutationCoordinator({ context, readContentRevision() { return 7; }, bumpContentRevision() { bumps++; return 8; } }); coordinator.completeStartupRecovery([]);
   const selector = { instanceId: 'server-one', serverPath };
-  const service = new CompanionService({ store, readServerState: async id => { assert.equal(id, 'server-one'); return state; }, resolveServer: async id => { assert.equal(id, 'server-one'); if (context.getCurrentLease()) resolveInside?.(); return selector; }, coordinator, providers, sourceResolver, artifactAcquisition: { async downloadSet(actualPlan) { assert.equal(actualPlan, plan); return verified; } }, archiveInspector, clientCandidatePreparer: preparer, clock: () => now });
+  const jarPath = path.join(serverPath, 'expected.jar'); fs.writeFileSync(jarPath, 'pack');
+  const manifest = { schemaVersion: 1, installationId: 'server-install', entries: [{ path: 'expected.jar', pathKey: 'expected.jar',
+    origin: 'pack', managementPolicy: 'replaceable-managed', role: 'mod', installedHash: hash('sha256', 'pack'), size: '4', priorBaseline: null }] };
+  let byteReads = 0;
+  const fsPromises = { async open(...args) { const handle = await fsp.open(...args); return {
+    stat: (...values) => handle.stat(...values), close: () => handle.close(), async read(...values) { byteReads++; return handle.read(...values); }
+  }; } };
+  const health = new ManagedServerModHealth({ readRecord: async () => ({ state, manifest }), fsPromises, reparseInspector: safeReparse });
+  const service = new CompanionService({ store, readServerState: async (id, options) => {
+    assert.equal(id, 'server-one');
+    if (managedHealth) {
+      if (options?.force) assert.ok(context.getCurrentLease(), 'Fresh bytes must be checked inside the mutation reservation');
+      await health.assertHealthy({ serverId: id, serverPath, record: { state, manifest }, ...options });
+    }
+    return state;
+  }, resolveServer: async id => { assert.equal(id, 'server-one'); if (context.getCurrentLease()) resolveInside?.(); return selector; }, coordinator, providers, sourceResolver, artifactAcquisition: { async downloadSet(actualPlan) { assert.equal(actualPlan, plan); return verified; } }, archiveInspector, clientCandidatePreparer: preparer, clock: () => now });
+  t.after(() => health.dispose());
   t.after(async () => { await service.dispose(); await preparer.dispose(); await registry.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
-  return { root, filePath, store, service, registry, preparer, selector, coordinator, archiveSha256, fingerprint: serverPackFingerprint(state), getState: () => state, setState: value => { state = value; }, setNow: value => { now = value; }, setRepositoryId: id => { repositoryId = id; }, setResolveInside: callback => { resolveInside = callback; }, bumps: () => bumps };
+  return { root, filePath, store, service, registry, preparer, selector, coordinator, archiveSha256, jarPath, byteReads: () => byteReads, fingerprint: serverPackFingerprint(state), getState: () => state, setState: value => { state = value; }, setNow: value => { now = value; }, setRepositoryId: id => { repositoryId = id; }, setResolveInside: callback => { resolveInside = callback; }, bumps: () => bumps };
 }
 const inspect = f => f.service.inspect({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint, assetId: '20' });
+
+test('accept forces fresh managed JAR bytes under reservation and historical ready descriptor recovers after repair', async t => {
+  const f = await fixture(t, { managedHealth: true }); const preview = await inspect(f); const reads = f.byteReads();
+  const descriptor = await f.service.accept({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint, inspectionId: preview.inspectionId });
+  assert.ok(f.byteReads() > reads, 'Accept must not use the status byte cache');
+  fs.writeFileSync(f.jarPath, 'evil');
+  await assert.rejects(f.service.getStatus({ serverId: 'server-one' }), { code: 'CLIENT_PACK_SERVER_CHANGED' });
+  fs.writeFileSync(f.jarPath, 'pack'); assert.deepEqual(await f.service.getStatus({ serverId: 'server-one' }), descriptor);
+});
+
+test('accept refuses managed JAR drift inside reservation without publishing a pairing', async t => {
+  const f = await fixture(t, { managedHealth: true }); const preview = await inspect(f);
+  f.setResolveInside(() => fs.writeFileSync(f.jarPath, 'evil'));
+  await assert.rejects(f.service.accept({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint, inspectionId: preview.inspectionId }), { code: 'CLIENT_PACK_SERVER_CHANGED' });
+  assert.equal(f.store.sequence, 0);
+});
+
+test('managed JAR drift refuses status, asset listing and inspection before pairing', async t => {
+  const f = await fixture(t, { managedHealth: true });
+  assert.equal((await f.service.getStatus({ serverId: 'server-one' })).status, 'unpaired');
+  fs.writeFileSync(f.jarPath, 'evil');
+  await assert.rejects(f.service.getStatus({ serverId: 'server-one' }), { code: 'CLIENT_PACK_SERVER_CHANGED' });
+  await assert.rejects(f.service.listAssets({ serverId: 'server-one' }), { code: 'CLIENT_PACK_SERVER_CHANGED' });
+  await assert.rejects(inspect(f), { code: 'CLIENT_PACK_SERVER_CHANGED' });
+  assert.equal(f.store.sequence, 0);
+});
 
 test('pairing inspects only the exact official release archive and binds measured digest', async t => {
   const f = await fixture(t);

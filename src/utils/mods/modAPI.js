@@ -72,7 +72,7 @@ const MIN_SEARCH_INTERVAL = 500; // Minimum time between searches in ms
 let lastVersionFetchTime = 0;
 const MIN_VERSION_FETCH_INTERVAL = 500; // Minimum time between version fetches in ms
 const normalizePathForUpdates = (p) => (typeof p === 'string' ? p.trim().toLowerCase() : '');
-let activeContentLoads = 0;
+const activeContentLoads = new Set();
 let activeModServerPath = '';
 let activeUpdateServerPath = '';
 const latestLoadRequestByType = new Map();
@@ -327,19 +327,20 @@ function isCurrentModServerPath(serverPath) {
   return normalized === activeModServerPath;
 }
 
-function beginTrackedContentLoad(contentType) {
+function beginTrackedContentLoad(contentType, serverPath, isCurrent) {
   const currentLoadId = (latestLoadRequestByType.get(contentType) || 0) + 1;
   latestLoadRequestByType.set(contentType, currentLoadId);
-  activeContentLoads += 1;
+  const request = { isCurrent: () => isCurrent() && isLatestContentLoad(contentType, currentLoadId, serverPath) };
+  activeContentLoads.add(request);
   isLoading.set(true);
-  return currentLoadId;
+  return request;
 }
 
-function finishTrackedContentLoad() {
-  activeContentLoads = Math.max(0, activeContentLoads - 1);
-  if (activeContentLoads === 0) {
-    isLoading.set(false);
-  }
+function finishTrackedContentLoad(request) {
+  activeContentLoads.delete(request);
+  // Loading belongs to pending current requests, not obsolete work. A stale
+  // completion may retire its token, but cannot clear a current pending load.
+  isLoading.set([...activeContentLoads].some(pending => pending.isCurrent()));
 }
 
 function isLatestContentLoad(contentType, currentLoadId, serverPath) {
@@ -506,8 +507,11 @@ export function isGameVersionCompatible(targetVersion, candidateVersion) {
  * @param {string} contentType - Content type ('mods', 'shaders', 'resourcepacks')
  * @returns {Promise<boolean>} - True if successful
  */
-export async function loadContent(serverPath, contentType = 'mods') {
-  const currentLoadId = beginTrackedContentLoad(contentType);
+export async function loadContent(serverPath, contentType = 'mods', options = {}) {
+  const isCurrent = options.isCurrent || (() => true);
+  if (!isCurrent()) return false;
+  const currentLoad = beginTrackedContentLoad(contentType, serverPath, isCurrent);
+  const currentRequest = currentLoad.isCurrent;
   
   try {
     if (!serverPath) {
@@ -532,7 +536,7 @@ export async function loadContent(serverPath, contentType = 'mods') {
     const result = await safeInvoke(ipcMethod, serverPath);
     
     // Check if this is still the latest request
-    if (!isLatestContentLoad(contentType, currentLoadId, serverPath)) {
+    if (!currentRequest()) {
       return false;
     }
     
@@ -634,19 +638,22 @@ export async function loadContent(serverPath, contentType = 'mods') {
     if (contentType === 'mods') {
       const strictUpdateContext = createUpdateContext(
         serverPath,
-        await loadServerConfig(serverPath, { syncStores: false })
+        await loadServerConfig(serverPath, { ...options, syncStores: false })
       );
-      if (!isLatestContentLoad(contentType, currentLoadId, serverPath)) {
+      if (!currentRequest()) {
         return false;
       }
 
       // Load existing saved categories first - with multiple attempts if needed
       
       // Try loading categories multiple times to ensure they're properly loaded
-      let categoriesLoaded = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
+      // Scoped edit completions reuse the current category snapshot. Legacy category
+      // hydration/persistence helpers cannot guard their internal shared-store writes.
+      let categoriesLoaded = Boolean(options.isCurrent);
+      for (let attempt = 0; !options.isCurrent && attempt < 3; attempt++) {
         try {
           await loadModCategories();
+          if (!currentRequest()) return false;
           const currentCategories = get(modCategories);
           if (currentCategories.size > 0 || contentList.length === 0) {
             categoriesLoaded = true;
@@ -654,6 +661,7 @@ export async function loadContent(serverPath, contentType = 'mods') {
           }
           // Small delay before retry
           await new Promise(resolve => setTimeout(resolve, 100));
+          if (!currentRequest()) return false;
         } catch {
           // TODO: Add proper logging - Category loading attempt failed
         }
@@ -712,7 +720,8 @@ export async function loadContent(serverPath, contentType = 'mods') {
       
       // Save updated categories to persistent storage
       try {
-        await saveModCategories();
+        if (!options.isCurrent) await saveModCategories();
+        if (!currentRequest()) return false;
       } catch {
         // TODO: Add proper logging - Failed to save updated mod categories
       }
@@ -725,7 +734,7 @@ export async function loadContent(serverPath, contentType = 'mods') {
         }
         
         // Check again if this is still the latest request
-        if (!isLatestContentLoad(contentType, currentLoadId, serverPath)) {
+        if (!currentRequest()) {
           return false;
         }
           // Process installed mod info to ensure we have version IDs and proper data
@@ -743,7 +752,9 @@ export async function loadContent(serverPath, contentType = 'mods') {
           try {
             // Trigger a lightweight list-mods first so manifests and jar paths are fully discovered
             await safeInvoke('list-mods', serverPath);
+            if (!currentRequest()) return false;
             const retryInfo = await safeInvoke('get-installed-mod-info', serverPath);
+            if (!currentRequest()) return false;
             if (Array.isArray(retryInfo)) {
               modInfo = retryInfo;
               updatedModInfo = normalizeInstalledInfoList(
@@ -758,12 +769,13 @@ export async function loadContent(serverPath, contentType = 'mods') {
           }
         }
         
+        if (!currentRequest()) return false;
         // Update stores with clean, properly structured data
         const validProjectIds = new SvelteSet(updatedModInfo.map(info => info.projectId).filter(Boolean));
   installedModIds.set(validProjectIds);
   installedModInfo.set(updatedModInfo);
   // Prime disabled mod updates automatically only when background checks are enabled.
-  if (autoUpdateChecksEnabled.getForPath(serverPath)) {
+  if (!options.isCurrent && autoUpdateChecksEnabled.getForPath(serverPath)) {
     try { await checkDisabledModUpdates(serverPath, strictUpdateContext); } catch { /* ignore */ }
   }
         
@@ -779,10 +791,10 @@ export async function loadContent(serverPath, contentType = 'mods') {
     return true;
   } catch (err) {
     // TODO: Add proper logging - Fatal error in loadContent
-    errorMessage.set(`Failed to load ${contentType}: ${err.message || 'Unknown error'}`);
+    if (currentRequest()) errorMessage.set(`Failed to load ${contentType}: ${err.message || 'Unknown error'}`);
     return false;
   } finally {
-    finishTrackedContentLoad();
+    finishTrackedContentLoad(currentLoad);
   }
 }
 
@@ -791,9 +803,9 @@ export async function loadContent(serverPath, contentType = 'mods') {
  * @param {string} serverPath - Path to the server
  * @returns {Promise<boolean>} - True if successful
  */
-export async function loadMods(serverPath) {
+export async function loadMods(serverPath, options = {}) {
   // Use the new loadContent function with 'mods' as the content type
-  return await loadContent(serverPath, 'mods');
+  return await loadContent(serverPath, 'mods', options);
 }
 
 /**
@@ -810,7 +822,7 @@ export async function loadServerConfig(serverPath, options = {}) {
     
     const config = await safeInvoke('read-config', serverPath);
     
-    if (syncStores && isCurrentModServerPath(serverPath)) {
+    if (syncStores && (!options.isCurrent || options.isCurrent()) && isCurrentModServerPath(serverPath)) {
       serverConfig.set(config);
     
       if (config) {
@@ -829,7 +841,7 @@ export async function loadServerConfig(serverPath, options = {}) {
     
     return config;
   } catch (err) {
-    errorMessage.set(`Failed to load server config: ${err.message || 'Unknown error'}`);
+    if (!options.isCurrent || options.isCurrent()) errorMessage.set(`Failed to load server config: ${err.message || 'Unknown error'}`);
     return null;
   }
 }
@@ -1250,6 +1262,8 @@ async function refreshSearchResults(contentType) {
 }
 
 export async function installMod(mod, serverPath, options = {}) {
+  const isCurrent = options.isCurrent || (() => true);
+  if (!isCurrent()) return false;
   let trackedDownloadId = null;
   try {
     if (!mod || !mod.id) {
@@ -1345,6 +1359,7 @@ export async function installMod(mod, serverPath, options = {}) {
     }
     
     const result = await safeInvoke(ipcMethod, serverPath, contentData);
+    if (!isCurrent()) return false;
     
     // Handle result
     if (result && result.success) {
@@ -1356,20 +1371,18 @@ export async function installMod(mod, serverPath, options = {}) {
 
       
       // Reload the appropriate content list based on content type
-      if (contentType === 'shaders') {
-        await loadContent(serverPath, 'shaders');
-      } else if (contentType === 'resourcepacks') {
-        await loadContent(serverPath, 'resourcepacks');
-      } else {
-        await loadMods(serverPath);
+      if (!options.skipReload) {
+        await loadContent(serverPath, contentType, options);
+        if (!isCurrent()) return false;
       }
       
       // Refresh search results to update installed status
-      await refreshSearchResults(contentType);
+      if (isCurrent()) await refreshSearchResults(contentType);
+      if (!isCurrent()) return false;
       
       // Clear the success message after a delay
       setTimeout(() => {
-        successMessage.set('');
+        if (isCurrent()) successMessage.set('');
       }, 3000);
       
       return true;
@@ -1389,6 +1402,7 @@ export async function installMod(mod, serverPath, options = {}) {
       throw new Error(errorMsg);
     }
   } catch (err) {
+    if (!isCurrent()) return false;
     // Enhanced error logging with fallback information
     if (trackedDownloadId) {
       completeDownload(trackedDownloadId, true, err.message || 'Installation failed');
@@ -1397,8 +1411,8 @@ export async function installMod(mod, serverPath, options = {}) {
     return false;
   } finally {
     // Always update the installing state
-    installingModIds.update(ids => {
-      ids.delete(mod.id);
+    if (isCurrent()) installingModIds.update(ids => {
+      ids.delete(mod?.id);
       return ids;
     });
   }
@@ -1412,7 +1426,9 @@ export async function installMod(mod, serverPath, options = {}) {
  * @param {boolean} shouldReload - Whether to reload the content list after deletion
  * @returns {Promise<boolean>} - True if successful
  */
-export async function deleteContent(itemName, serverPath, contentType = 'mods', shouldReload = true) {
+export async function deleteContent(itemName, serverPath, contentType = 'mods', shouldReload = true, options = {}) {
+  const isCurrent = options.isCurrent || (() => true);
+  if (!isCurrent()) return false;
   try {
     if (!itemName || !serverPath) {
       errorMessage.set(`Invalid ${contentType === 'mods' ? 'mod' : contentType === 'shaders' ? 'shader' : 'resource pack'} name or server path for deletion`);
@@ -1435,6 +1451,7 @@ export async function deleteContent(itemName, serverPath, contentType = 'mods', 
     }
     
     const result = await safeInvoke(ipcMethod, serverPath, itemName);
+    if (!isCurrent()) return false;
     
     // Handle new response format with enhanced feedback
     if (result === true || (result && result.success)) {
@@ -1449,10 +1466,11 @@ export async function deleteContent(itemName, serverPath, contentType = 'mods', 
       }
       
       successMessage.set(message);
-      setTimeout(() => successMessage.set(''), 3000);
+      setTimeout(() => { if (isCurrent()) successMessage.set(''); }, 3000);
       
       if (shouldReload) {
-        await loadContent(serverPath, contentType);
+        await loadContent(serverPath, contentType, options);
+        if (!isCurrent()) return false;
       }
       
       return true;
@@ -1462,6 +1480,7 @@ export async function deleteContent(itemName, serverPath, contentType = 'mods', 
       return false;
     }
   } catch (error) {
+    if (!isCurrent()) return false;
     const itemType = contentType === 'mods' ? 'mod' : contentType === 'shaders' ? 'shader' : 'resource pack';
     errorMessage.set(`Error deleting ${itemType}: ${error.message || 'Unknown error'}`);
     return false;
@@ -1469,7 +1488,9 @@ export async function deleteContent(itemName, serverPath, contentType = 'mods', 
 }
 
 // Keep the original deleteMod function for backward compatibility
-export async function deleteMod(modName, serverPath, shouldReload = true) {
+export async function deleteMod(modName, serverPath, shouldReload = true, options = {}) {
+  const isCurrent = options.isCurrent || (() => true);
+  if (!isCurrent()) return false;
   try {
     if (!modName || !serverPath) {
       errorMessage.set('Invalid mod name or server path for deletion');
@@ -1477,6 +1498,7 @@ export async function deleteMod(modName, serverPath, shouldReload = true) {
     }
     
     const result = await safeInvoke('delete-mod', serverPath, modName);
+    if (!isCurrent()) return false;
     
     // Handle new response format with enhanced feedback
     if (result === true || (result && result.success)) {
@@ -1517,12 +1539,13 @@ export async function deleteMod(modName, serverPath, shouldReload = true) {
       successMessage.set(message);
       
       if (shouldReload) {
-        await loadMods(serverPath);
+        await loadMods(serverPath, options);
+        if (!isCurrent()) return false;
       }
       
       // Clear success message after a delay
       setTimeout(() => {
-        successMessage.set('');
+        if (isCurrent()) successMessage.set('');
       }, 3000);
       
       return true;
@@ -1531,7 +1554,7 @@ export async function deleteMod(modName, serverPath, shouldReload = true) {
       return false;
     }
   } catch (error) {
-    errorMessage.set(`Failed to delete ${modName}: ${error.message || 'Unknown error'}`);
+    if (isCurrent()) errorMessage.set(`Failed to delete ${modName}: ${error.message || 'Unknown error'}`);
     return false;
   }
 }
@@ -1898,7 +1921,9 @@ export async function checkDisabledModUpdates(serverPath, updateContext = null) 
  * @param {boolean} skipReload - Skip reloading mod list (useful for batch updates)
  * @returns {Promise<boolean>} - Success status
  */
-export async function enableAndUpdateMod(serverPath, modFileName, projectId, targetVersion, targetVersionId, skipReload = false) {
+export async function enableAndUpdateMod(serverPath, modFileName, projectId, targetVersion, targetVersionId, skipReload = false, options = {}) {
+  const isCurrent = options.isCurrent || (() => true);
+  if (!isCurrent()) return false;
   try {
     const result = await safeInvoke('enable-and-update-mod', {
       serverPath,
@@ -1908,6 +1933,7 @@ export async function enableAndUpdateMod(serverPath, modFileName, projectId, tar
       targetVersionId
     });
 
+    if (!isCurrent()) return false;
     if (result.success) {
       // Remove from disabled mod updates since it's now enabled and updated
       disabledModUpdates.update(updates => {
@@ -1918,32 +1944,34 @@ export async function enableAndUpdateMod(serverPath, modFileName, projectId, tar
 
       // Remove from disabled mods store
       disabledMods.update(mods => {
-        mods.delete(modFileName);
-        return mods;
+        const next = new SvelteSet(mods);
+        next.delete(modFileName);
+        return next;
       });
 
       // Only reload if not in batch mode
       if (!skipReload) {
         // Force reload the mod list to get the latest information
-        await loadMods(serverPath);
+        await loadMods(serverPath, options);
+        if (!isCurrent()) return false;
 
         successMessage.set(`${modFileName} successfully enabled and updated to ${targetVersion}`);
-        setTimeout(() => successMessage.set(''), 3000);
+        setTimeout(() => { if (isCurrent()) successMessage.set(''); }, 3000);
       }
 
       return true;
     } else {
       if (!skipReload) {
         errorMessage.set(`Failed to enable and update mod: ${result.error}`);
-        setTimeout(() => errorMessage.set(''), 5000);
+        setTimeout(() => { if (isCurrent()) errorMessage.set(''); }, 5000);
       }
       return false;
     }
 
   } catch (err) {
-    if (!skipReload) {
+    if (isCurrent() && !skipReload) {
       errorMessage.set(`Error enabling and updating mod: ${err.message}`);
-      setTimeout(() => errorMessage.set(''), 5000);
+      setTimeout(() => { if (isCurrent()) errorMessage.set(''); }, 5000);
     }
     return false;
   }

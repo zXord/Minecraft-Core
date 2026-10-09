@@ -1436,7 +1436,7 @@ function createComposition({ input, scenarioFile }) {
       assertNotBlocked();
       record('lifecycleCalls', { method: 'verify', instanceId });
       update(value => appendHistory(value, { operationKind: 'verify' }));
-      return {
+      const job = {
         jobId: `verify-${++jobSequence}`,
         operationKind: 'verify',
         phase: 'completed',
@@ -1445,9 +1445,17 @@ function createComposition({ input, scenarioFile }) {
         outcome: {
           status: 'completed',
           kind: 'completed',
-          result: { repairAvailable: true, mismatches: [{ role: 'managed', status: 'modified' }] }
+          result: {
+            type: 'modpack-verification-result', contentRevision: scenario().state.contentRevision,
+            checkedFiles: '2', mismatchCount: '1', healthy: false, repairAvailable: true,
+            repair: { operationKind: 'repair', mismatchCount: '1' },
+            mismatches: [{ entryName: 'mods/managed.jar', origin: 'pack', role: 'mod', status: 'modified' }],
+            verifiedAt: FIXED_TIME
+          }
         }
       };
+      jobs.set(job.jobId, { job, reads: 0 });
+      return clone(job);
     }
   };
 
@@ -1628,9 +1636,11 @@ function createComposition({ input, scenarioFile }) {
         const record = matching.length === 1 ? matching[0] : null;
         const actionIssued = record?.actions?.some(action =>
           action?.actionId === actionId && typeof action.label === 'string');
-        if (value.profile !== 'empty' ||
+        const registeredFixture = value.profile === 'managed' && value.recoveryListFixture?.allowRegisteredResolution === true &&
+          record?.serverId === value.serverId;
+        if ((!registeredFixture && value.profile !== 'empty') ||
             !/^recovery-[a-f0-9]{32}$/u.test(recoveryId || '') ||
-            record?.visibilityScope !== 'pending-new-server' || !actionIssued) {
+            (!registeredFixture && record?.visibilityScope !== 'pending-new-server') || !actionIssued) {
           throw new ModpackError('INVALID_REQUEST', 'The recovery action is not available.');
         }
         value.recoveryCalls.push({ recoveryId, actionId });

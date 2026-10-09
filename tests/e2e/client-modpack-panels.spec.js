@@ -49,7 +49,7 @@ async function start(page, status = 'install-required', kind = 'client') {
           case 'client-packs:preview': value = {...window.preview,optionalFileIds:input.optionalFileIds ?? ['optional']}; break;
           case 'client-packs:install': window.currentStatus='ready'; value = {clientId:input.clientId,status:'ready',verified:true,...(window.installCleanup?{cleanup:window.installCleanup}:{})}; break;
           case 'client-packs:recover': window.currentStatus='install-required'; value = {phase:'abandoned',operationId:'private-id'}; break;
-          case 'client-packs:get-companion': value = {...window.descriptor,status:'unpaired',source:null,runtime:null,artifactSha256:null}; break;
+          case 'client-packs:get-companion': value = window.companionDescriptor ?? {...window.descriptor,status:'unpaired',source:null,runtime:null,artifactSha256:null}; break;
           case 'client-packs:list-companion-assets': value = {serverFingerprint:'f'.repeat(64),serverVersion:'0.13.4',assets:[{assetId:'3',fileName:'pack-0.13.4.mrpack',size:'2048'}]}; break;
           case 'client-packs:inspect-companion': value = {inspectionId:'inspection-1',...window.descriptor,name:'Pack',version:'0.13.4',optionalFiles:[],downloadBytes:'2048'}; break;
           case 'client-packs:accept-companion': value = window.descriptor; break;
@@ -73,6 +73,23 @@ test('pairing requires explicit same-release asset inspection and runtime review
   await expect(page.getByText(/Minecraft 1.20.1.*forge.*47.3.12/)).toBeVisible();
   await page.getByRole('button',{name:'Accept matching client pack'}).click();
   await expect(page.getByText('Paired for this server release')).toBeVisible();
+});
+test('PLAN_STALE freshness warning clears after refreshing the unchanged companion descriptor', async ({page}) => {
+  await start(page);
+  await page.evaluate(() => {
+    window.companionDescriptor = window.descriptor;
+    window.fail = {'client-packs:get-companion':{code:'PLAN_STALE',message:'Freshness proof changed'}};
+    window.show('companion','a');
+  });
+  await expect(page.getByRole('alert')).toHaveText('The server or verification evidence changed during this request. Refresh the companion list and try again.');
+
+  await page.evaluate(() => {window.fail={};});
+  await page.getByRole('button',{name:'Refresh companion list'}).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByText('Paired for this server release')).toBeVisible();
+  const calls = await page.evaluate(() => window.calls.map(call=>call.channel));
+  expect(calls.filter(channel=>channel==='client-packs:inspect-companion')).toHaveLength(0);
+  expect(calls.filter(channel=>channel==='client-packs:accept-companion')).toHaveLength(0);
 });
 test('preview preserves settings and requires every conflict choice before installation', async ({page}) => {
   await start(page);

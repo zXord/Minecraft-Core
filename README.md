@@ -50,6 +50,8 @@ Server packs and client packs are different:
 
 A matching client uses the normal client folder/invite setup, then previews and installs the advertised pack. It installs pack configuration and resources as well as mods, and uses the declared Minecraft/loader versions. Microsoft sign-in remains a normal user action. Existing saves, account data and user settings are preserved; changed pack files can require explicit conflict choices. Tracked running clients or interrupted runtime installation can block mutation until recovery proves it is safe. Process tracking covers launches made by this build; close games launched elsewhere or before upgrading before importing into their directory. A retained-cleanup notice does not mean a successfully verified client is unusable.
 
+While a server is managed as a modpack, ordinary individual mod additions, removals, toggles and version changes are disabled, including edits to user-added mod JARs. Use the Modpack page to change or repair the pack, or review **Detach** to keep the server files and leave pack management before customizing individual mods. Searching, metadata matching, ignored-update preferences and non-mod resource/shader controls remain available.
+
 Archive scripts are not executed automatically. ZIP/RAR support does not promise that every arbitrary archive can be launched without recognized runtime metadata. Download-cache cleanup and retained recovery directories are separate: unresolved recovery data is not deleted merely because it is old.
 
 Native end-to-end verification of this development work is still in progress; see the [verification ledger](docs/testing/2026-10-08-native-modpack-verification.md) for observed passes and outstanding cases.
