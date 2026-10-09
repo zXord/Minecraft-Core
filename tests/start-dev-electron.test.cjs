@@ -1,8 +1,114 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const Module = require('node:module');
+const path = require('node:path');
 
 const { startDevElectron } = require('../scripts/start-dev-electron.cjs');
+
+// Keep the real launcher and trace factory; only replace process-local diagnostics.
+async function withLauncherTrace(importEnv, events, run, { brokenSink = false } = {}) {
+  const modulePath = path.resolve(__dirname, '../scripts/start-dev-electron.cjs');
+  const originalLoad = Module._load;
+  let time = 100;
+  Module._load = function(request, parent, isMain) {
+    if (request === '../electron/utils/startup-trace.cjs') {
+      const { createStartupTrace } = originalLoad(request, parent, isMain);
+      const options = {
+        now: () => time++, utcNow: () => '2026-10-09T00:00:00.000Z', pid: 123,
+        sink(line) {
+          if (brokenSink) throw new Error('private sink failure');
+          events.push(JSON.parse(line.slice('[Minecraft Core startup trace] '.length)).marker);
+        }
+      };
+      return {
+        markStartupTrace: createStartupTrace({ ...options, env: importEnv }),
+        createStartupTrace: ({ env }) => createStartupTrace({ ...options, env })
+      };
+    }
+    return originalLoad(request, parent, isMain);
+  };
+  delete require.cache[modulePath];
+  try { return await run(require(modulePath).startDevElectron); }
+  finally { delete require.cache[modulePath]; Module._load = originalLoad; }
+}
+
+test('startup trace brackets held runtime preparation and lease before spawn without changing cleanup', async () => {
+  const events = [];
+  await withLauncherTrace({}, events, async launch => {
+    let finishPrepare, finishLease;
+    const prepared = new Promise(resolve => { finishPrepare = resolve; });
+    const leased = new Promise(resolve => { finishLease = resolve; });
+    const processLike = new EventEmitter();
+    const child = new EventEmitter();
+    child.kill = signal => { events.push(signal); };
+    const result = launch({
+      env: { MINECRAFT_CORE_STARTUP_TRACE: '1', LOCALAPPDATA: 'C:\\fixture\\local' },
+      platform: 'win32', processLike,
+      prepareDevRuntime() { events.push('prepare'); return prepared; },
+      createDevRuntimeLease() { events.push('lease'); return leased; },
+      spawnProcess() { events.push('spawn'); return child; }
+    });
+    assert.deepEqual(events, ['launcher:runtime-prepare:start', 'prepare']);
+    finishPrepare({ cacheDirectory: 'C:\\fixture\\cache', executablePath: 'C:\\fixture\\electron.exe' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(events, ['launcher:runtime-prepare:start', 'prepare', 'launcher:runtime-prepare:complete', 'launcher:runtime-lease:start', 'lease']);
+    finishLease({ dispose() { events.push('dispose'); } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(events.slice(-3), ['launcher:runtime-lease:complete', 'spawn', 'launcher:spawn-returned']);
+    processLike.emit('SIGTERM');
+    child.emit('exit', 7, null);
+    assert.equal(await result, 7);
+    assert.deepEqual(events.slice(-2), ['SIGTERM', 'dispose']);
+    assert.equal(processLike.listenerCount('SIGTERM'), 0);
+    assert.equal(processLike.listenerCount('SIGINT'), 0);
+    assert.equal(events.includes('launcher:entry'), false, 'import-only launcher has no entry marker');
+  });
+});
+
+test('startup trace supplied disabled env overrides enabled import and broken diagnostics preserve launcher error', async () => {
+  const error = new Error('original preparation failure');
+  for (const brokenSink of [false, true]) {
+    const events = [];
+    await withLauncherTrace({ MINECRAFT_CORE_STARTUP_TRACE: '1' }, events, async launch => {
+      const processLike = new EventEmitter();
+      await assert.rejects(launch({
+        platform: 'win32', processLike,
+        env: { LOCALAPPDATA: 'C:\\fixture\\local', ...(brokenSink ? { MINECRAFT_CORE_STARTUP_TRACE: '1' } : {}) },
+        prepareDevRuntime() { throw error; },
+        spawnProcess() { assert.fail('failed preparation must not spawn'); }
+      }), actual => actual === error);
+      assert.deepEqual(events, []);
+      assert.equal(processLike.listenerCount('SIGTERM'), 0);
+      assert.equal(processLike.listenerCount('SIGINT'), 0);
+    }, { brokenSink });
+  }
+});
+
+test('startup trace termination during held lease keeps disposal and omits spawn-returned', async () => {
+  const events = [];
+  await withLauncherTrace({}, events, async launch => {
+    const processLike = new EventEmitter();
+    let finishLease;
+    const lease = new Promise(resolve => { finishLease = resolve; });
+    const result = launch({
+      env: { MINECRAFT_CORE_STARTUP_TRACE: '1', LOCALAPPDATA: 'C:\\fixture\\local' },
+      platform: 'win32', processLike,
+      prepareDevRuntime: async () => ({ cacheDirectory: 'C:\\fixture\\cache', executablePath: 'C:\\fixture\\electron.exe' }),
+      createDevRuntimeLease() { return lease; },
+      spawnProcess() { assert.fail('termination during lease must not spawn'); }
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(events.at(-1), 'launcher:runtime-lease:start');
+    processLike.emit('SIGINT');
+    finishLease({ dispose() { events.push('dispose'); } });
+    assert.equal(await result, 0);
+    assert.deepEqual(events.slice(-2), ['launcher:runtime-lease:complete', 'dispose']);
+    assert.equal(events.includes('launcher:spawn-returned'), false);
+    assert.equal(processLike.listenerCount('SIGINT'), 0);
+    assert.equal(processLike.listenerCount('SIGTERM'), 0);
+  });
+});
 
 test('Windows development launches the icon-embedded cached Electron executable directly', async () => {
   const events = [];

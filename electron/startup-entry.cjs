@@ -1,3 +1,5 @@
+const { markStartupTrace, createStartupTrace } = require('./utils/startup-trace.cjs');
+markStartupTrace('early:entry');
 const path = require('path');
 const { app, BrowserWindow, shell } = require('electron');
 const {
@@ -6,6 +8,7 @@ const {
 } = require('./utils/asset-resolver.cjs');
 const { resolveWindowsAppUserModelId } = require('./utils/app-identity.cjs');
 const { createStartupWindow, waitForStartupWindowDocument } = require('./utils/startup-window.cjs');
+markStartupTrace('early:imports:complete');
 
 const STARTUP_WINDOW_HANDOFF = Symbol.for('minecraft-core.startup-window-handoff');
 const USER_DATA_OVERRIDE_ENV = 'MINECRAFT_CORE_USER_DATA_DIR';
@@ -241,6 +244,7 @@ async function startEarlyStartup({
   shouldCreateStartupWindow = shouldCreateEarlyStartupWindow,
   loadMain = () => require('./main.cjs')
 } = {}) {
+  const markTrace = env === process.env ? markStartupTrace : createStartupTrace({ env });
   if (!electronApp || typeof electronApp.whenReady !== 'function') {
     throw new TypeError('Electron app must expose whenReady');
   }
@@ -249,19 +253,26 @@ async function startEarlyStartup({
   try {
     applyEarlyUserDataOverride({ app: electronApp, env });
     applyEarlyAppIdentity({ app: electronApp, platform });
+    markTrace('early:when-ready:start');
     await electronApp.whenReady();
+    markTrace('early:when-ready:complete');
     if (!shouldCreateStartupWindow({ app: electronApp, env })) {
+      markTrace('early:main-load:start');
       await loadMain();
+      markTrace('early:main-load:complete');
       return null;
     }
+    markTrace('early:icon:start');
     const sourceIconPath = resolveIconPath({ app: electronApp, platform }) || undefined;
     const iconPath = prepareIconPath({
       app: electronApp,
       platform,
       sourceIconPath
     }) || sourceIconPath;
+    markTrace('early:icon:complete');
     const applicationPath = resolveElectronApplicationPath(electronApp);
     const appId = resolveWindowsAppUserModelId({ isPackaged: Boolean(electronApp.isPackaged) });
+    markTrace('early:shortcut-attempt:start');
     writeDevelopmentStartMenuShortcut({
       app: electronApp,
       shellApi,
@@ -270,8 +281,10 @@ async function startEarlyStartup({
       iconPath,
       logger
     });
+    markTrace('early:shortcut-attempt:complete');
     startupWindow = globalThis[STARTUP_WINDOW_HANDOFF];
     if (!startupWindow || startupWindow.isDestroyed?.()) {
+      markTrace('early:window:create:start');
       startupWindow = publishEarlyStartupWindow(createWindow({
         BrowserWindow: ElectronBrowserWindow,
         iconPath,
@@ -280,11 +293,17 @@ async function startEarlyStartup({
         applicationPath,
         appId
       }));
+      markTrace('early:window:create:complete');
     }
+    markTrace('early:document:start');
     await waitForWindowDocument(startupWindow);
+    markTrace('early:document:complete');
+    markTrace('early:main-load:start');
     await loadMain();
+    markTrace('early:main-load:complete');
     return startupWindow;
   } catch (error) {
+    markTrace('early:failed');
     await terminateFailedEarlyStartup({ app: electronApp, startupWindow });
     throw error;
   }

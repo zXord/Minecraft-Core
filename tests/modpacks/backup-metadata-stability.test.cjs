@@ -263,11 +263,12 @@ test('final pinned ZIP hash remains cancellable and reports actual bounded bytes
     onChunk() { entriesVerified = true; },
     onProgress(value) {
       progress.push(value);
-      if (entriesVerified && value.phase === 'archive-hash') controller.abort();
+      if (entriesVerified && value.phase === 'archive-hash' && value.kind === 'progress') controller.abort();
     }
   }), { code: 'CANCELLED' });
   const last = progress.at(-1);
   assert.equal(last.phase, 'archive-hash');
+  assert.equal(last.hashPass, 'final');
   assert.equal(last.processedBytes, fs.statSync(archive).size);
   assert.equal(last.totalBytes, fs.statSync(archive).size);
 });

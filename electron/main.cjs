@@ -1,4 +1,6 @@
 // Main electron entry point
+const { markStartupTrace } = require('./utils/startup-trace.cjs');
+markStartupTrace('main:entry');
 const path = require('path');
 const { app, BrowserWindow, Menu, Tray, Notification, dialog, ipcMain, shell, session } = require('electron');
 const fs = require('fs');
@@ -40,6 +42,7 @@ const { claimEarlyStartupWindow } = require('./startup-entry.cjs');
 const { getUpdateService } = require('./services/update-service.cjs');
 const { installServerMutationCoordinator } = require('./services/server-mutation-context.cjs');
 const devConfig = require('../config/dev-config.cjs');
+markStartupTrace('main:imports:complete');
 const startupStartedAt = Date.now();
 const mainWindowReadyTrackers = new WeakMap();
 
@@ -128,6 +131,7 @@ function describeRendererTarget(targetUrl) {
 }
 
 function markStartupTiming(marker, details = {}) {
+  markStartupTrace(marker);
   if (!logger) return;
   logger.info('Startup timing marker', {
     category: 'performance',
@@ -1072,9 +1076,11 @@ function createWindow() {
       });
     }
     
+    markStartupTrace('main:ipc:start');
     initializePostRecoveryListeners();
     const { setupIpcHandlers } = require('./ipc-handlers.cjs');
     setupIpcHandlers(win, serviceGraph);
+    markStartupTrace('main:ipc:complete');
     handlersInitialized = true;
     
     if (logger) {
@@ -1422,6 +1428,7 @@ const modpackFactory = loadTestModpackFactory({ isPackaged: Boolean(app.isPackag
 const recoveryFactory = loadTestRecoveryFactory({ isPackaged: Boolean(app.isPackaged) });
 const testIpcOverrides = loadTestIpcOverrides({ isPackaged: Boolean(app.isPackaged) });
 
+markStartupTrace('main:graph:start');
 serviceGraph = createModpackServiceGraph({
   app,
   store: appStore,
@@ -1463,6 +1470,7 @@ serviceGraph = createModpackServiceGraph({
     dispose: disposeApplicationStartup
   }
 });
+markStartupTrace('main:graph:complete');
 installServerMutationCoordinator(serviceGraph.coordinator);
 
 mainBootstrap = createMainBootstrap({
@@ -1475,7 +1483,9 @@ orderlyQuitBarrier = createOrderlyQuitBarrier({
   quit: () => app.quit(),
   onDisposeError: error => logStartupError('Application shutdown cleanup failed', error)
 });
+markStartupTrace('main:before-ready:start');
 mainBootstrap.initializeBeforeReady();
+markStartupTrace('main:before-ready:complete');
 
 app.whenReady().then(() => {
   markStartupTiming('app:when-ready');

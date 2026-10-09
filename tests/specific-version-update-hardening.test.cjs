@@ -93,8 +93,23 @@ async function withUpdateHandlers(updateService, shell, fn, options = {}) {
   const originalLoad = Module._load;
 
   Module._load = function mockLoad(request, parent, isMain) {
+    if (request === '../utils/startup-trace.cjs') {
+      const { createStartupTrace } = originalLoad(request, parent, isMain);
+      return { markStartupTrace: createStartupTrace({
+        env: options.traceEnabled ? { MINECRAFT_CORE_STARTUP_TRACE: '1' } : {},
+        now: () => 100, utcNow: () => '2026-10-09T00:00:00.000Z', pid: 123,
+        sink(line) {
+          if (options.brokenTraceSink) throw new Error('PRIVATE_SINK');
+          options.traceEvents?.push(JSON.parse(line.slice('[Minecraft Core startup trace] '.length)).marker);
+        }
+      }) };
+    }
     if (request === '../services/update-service.cjs' || request.endsWith('services/update-service.cjs')) {
-      return { getUpdateService: () => updateService };
+      return { getUpdateService() {
+        options.traceEvents?.push('getter');
+        if (options.getterError) throw options.getterError;
+        return updateService;
+      } };
     }
 
     if (request === 'electron') {
@@ -139,6 +154,28 @@ function makeReleaseInfo(asset) {
     assets: [asset]
   };
 }
+
+test('startup trace actual update handlers bracket only the service getter before event setup', async () => {
+  const events = [];
+  const updateService = new EventEmitter();
+  updateService.on('newListener', () => { events.push('event:setup'); });
+  await withUpdateHandlers(updateService, {}, async handlers => {
+    assert.equal(typeof handlers['install-update'], 'function');
+    assert.deepEqual(events.slice(0, 4), ['update-service:get:start', 'getter', 'update-service:get:complete', 'event:setup']);
+    assert.equal(events.filter(value => value === 'update-service:get:complete').length, 1);
+  }, { traceEnabled: true, traceEvents: events });
+});
+
+test('startup trace getter failure preserves original error without completing even when diagnostics fail', async () => {
+  for (const brokenTraceSink of [false, true]) {
+    const error = new Error('PRIVATE_ORIGINAL_GETTER');
+    const events = [];
+    await assert.rejects(withUpdateHandlers(new EventEmitter(), {}, async () => {
+      assert.fail('getter failure must prevent handler publication');
+    }, { traceEnabled: true, brokenTraceSink, getterError: error, traceEvents: events }), actual => actual === error);
+    assert.deepEqual(events, brokenTraceSink ? ['getter'] : ['update-service:get:start', 'getter']);
+  }
+});
 
 test('quitAndInstall uses visible updater progress and relaunches after install', async () => {
   await withUpdateService(async ({ service, autoUpdater }) => {

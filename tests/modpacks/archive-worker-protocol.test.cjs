@@ -220,6 +220,295 @@ function request(overrides = {}) {
   };
 }
 
+// Exercise the real invocation/decoder while holding the external close authority.
+async function terminalControlFixture(t, { synchronous, send = () => true, killResult = true,
+  deadlineOverrideMs = 60_000 } = {}) {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const intervalCallbacks = [];
+  const setTestInterval = global.setInterval;
+  t.mock.method(global, 'setInterval', (...args) => {
+    intervalCallbacks.push(args[0]);
+    return setTestInterval(...args);
+  });
+  const sends = [];
+  const frames = [];
+  let controlError;
+  let channelCloses = 0;
+  let nativeRequest;
+  let announceRequest;
+  const received = new Promise(resolve => { announceRequest = resolve; });
+  const f = fixture(t, (bytes, child) => {
+    nativeRequest = parseSingleRequest(bytes);
+    synchronous?.(child);
+    announceRequest(child);
+  }, {
+    deadlineOverrideMs, cleanupGraceMs: 10, forceCloseWaitMs: 20,
+    controlChannelFactory: async () => ({
+      pipeName: '\\\\.\\pipe\\MinecraftCore.ArchiveWorker.test.0123456789abcdef',
+      onError(handler) { controlError = handler; },
+      send(control) { sends.push(control); return send(control); },
+      close() { channelCloses += 1; }
+    })
+  });
+  const controller = new AbortController();
+  let settled = false;
+  let closed = false;
+  const outcome = f.client.run(request(), { signal: controller.signal, onFrame: frame => frames.push(frame) })
+    .then(value => { settled = true; return { kind: 'resolved', value }; },
+      error => { settled = true; return { kind: 'rejected', error }; });
+  const child = await received;
+  child.kill = () => { child.killCount += 1; child.killed = true; return killResult; };
+  const close = (code = 0, signal = null) => {
+    if (closed) return;
+    closed = true;
+    child.stdout.end();
+    child.stderr.end();
+    child.emit('close', code, signal);
+  };
+  t.after(async () => { close(); await outcome; });
+  await new Promise(resolve => setImmediate(resolve)); // stdin.end and interval setup returned.
+  return {
+    ...f, child, controller, sends, frames, outcome, intervalCallbacks, close,
+    emit: frame => child.stdout.write(Buffer.isBuffer(frame) ? frame : encodeFrame(frame)),
+    controlError: () => controlError(new Error('synthetic control transport failure')),
+    settled: () => settled,
+    channelCloses: () => channelCloses,
+    assertAuthenticatedCancel() {
+      const cancels = sends.filter(control => control.type === 'cancel');
+      assert.ok(cancels.length > 0, 'termination requests authenticated cancellation');
+      assert.ok(cancels.every(control => control.token === nativeRequest.controlToken));
+      assert.match(nativeRequest.controlToken, /^[a-f0-9]{64}$/u);
+    }
+  };
+}
+
+async function assertTerminalPending(h) {
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.settled(), false, 'only explicit child close proves quiescence');
+  assert.equal(h.channelCloses(), 0, 'terminal must not close the control channel early');
+}
+
+async function assertTerminalRejected(h, code = 'EXTRACTOR_UNAVAILABLE') {
+  await assertTerminalPending(h);
+  h.close();
+  const outcome = await h.outcome;
+  assert.equal(outcome.kind, 'rejected');
+  assert.equal(outcome.error.code, code);
+  assert.equal(h.channelCloses(), 1);
+  return outcome.error;
+}
+
+test('terminal control: accepted success stops heartbeats before a false send and still waits for close', async t => {
+  const h = await terminalControlFixture(t, { send: () => false });
+  assert.equal(h.intervalCallbacks.length, 1, 'status follows interval installation');
+  h.emit(goodStatus());
+  t.mock.timers.tick(5000);
+  await assertTerminalPending(h);
+  h.close();
+  const outcome = await h.outcome;
+  assert.equal(outcome.kind, 'resolved', outcome.error?.stack);
+  assert.deepEqual(h.sends, [], 'no post-status heartbeat or cancellation');
+  assert.equal(h.child.killCount, 0);
+  assert.equal(h.channelCloses(), 1);
+});
+
+test('terminal control: synchronous success never installs a heartbeat and still waits for close', async t => {
+  const h = await terminalControlFixture(t, {
+    synchronous: child => child.stdout.write(encodeFrame(goodStatus())), send: () => false
+  });
+  t.mock.timers.tick(5000);
+  await assertTerminalPending(h);
+  h.close();
+  const outcome = await h.outcome;
+  assert.equal(outcome.kind, 'resolved', outcome.error?.stack);
+  assert.equal(h.intervalCallbacks.length, 0);
+  assert.deepEqual(h.sends, []);
+  assert.equal(h.child.killCount, 0);
+});
+
+for (const [name, status, expected] of [
+  ['success', goodStatus(), 'resolved'],
+  ['reviewed failure', goodStatus({ ok: false, exitCode: 2, errorCode: 'ENCRYPTED_ARCHIVE' }), 'rejected']
+]) {
+  test(`terminal control: late control error preserves ${name} until clean close`, async t => {
+    const h = await terminalControlFixture(t);
+    h.emit(status);
+    h.controlError();
+    t.mock.timers.tick(5000);
+    await assertTerminalPending(h);
+    h.close();
+    const outcome = await h.outcome;
+    assert.equal(outcome.kind, expected, outcome.error?.stack);
+    if (expected === 'rejected') assert.equal(outcome.error.code, 'ENCRYPTED_ARCHIVE');
+    assert.deepEqual(h.sends, []);
+    assert.equal(h.child.killCount, 0);
+    assert.equal(h.channelCloses(), 1);
+  });
+}
+
+test('terminal control: stale heartbeat callbacks cannot send after terminal or close', async t => {
+  const h = await terminalControlFixture(t, { send: () => false });
+  const staleHeartbeat = h.intervalCallbacks[0];
+  h.emit(goodStatus());
+  staleHeartbeat();
+  await assertTerminalPending(h);
+  h.close();
+  const outcome = await h.outcome;
+  assert.equal(outcome.kind, 'resolved', outcome.error?.stack);
+  staleHeartbeat();
+  assert.deepEqual(h.sends, []);
+  assert.equal(h.child.killCount, 0);
+});
+
+for (const failure of ['send false', 'send throw', 'control error']) {
+  test(`terminal control: pre-terminal ${failure} remains fatal after success status`, async t => {
+    const h = await terminalControlFixture(t, {
+      send: control => {
+        if (control.type === 'cancel' || failure === 'send false') return false;
+        if (failure === 'send throw') throw new Error('synthetic send failure');
+        return true;
+      }
+    });
+    if (failure === 'control error') h.controlError();
+    else t.mock.timers.tick(5000);
+    h.assertAuthenticatedCancel();
+    const sendsBeforeStaleCallback = h.sends.length;
+    h.intervalCallbacks[0]();
+    assert.equal(h.sends.length, sendsBeforeStaleCallback, 'terminated invocations cannot send stale heartbeats');
+    h.emit(goodStatus());
+    const error = await assertTerminalRejected(h);
+    if (failure === 'control error') assert.equal(error.cause.message, 'synthetic control transport failure');
+    assert.equal(h.child.killCount, 0);
+  });
+}
+
+test('terminal control: synchronous termination does not install a heartbeat', async t => {
+  const h = await terminalControlFixture(t, {
+    synchronous: child => child.emit('error', new Error('synchronous child failure'))
+  });
+  assert.equal(h.intervalCallbacks.length, 0);
+  h.assertAuthenticatedCancel();
+  await assertTerminalRejected(h);
+});
+
+for (const reason of ['abort', 'deadline']) {
+  for (const killResult of [true, false]) {
+    test(`terminal control: ${reason} after terminal retains close authority when kill returns ${killResult}`, async t => {
+      const h = await terminalControlFixture(t, {
+        killResult, deadlineOverrideMs: 10_000,
+        send: control => { if (control.type === 'cancel') throw new Error('cancel transport gone'); return true; }
+      });
+      h.emit(goodStatus());
+      if (reason === 'abort') h.controller.abort();
+      else t.mock.timers.tick(10_000);
+      h.assertAuthenticatedCancel();
+      assert.deepEqual(h.sends.map(control => control.type), ['cancel']);
+      await assertTerminalPending(h);
+      t.mock.timers.tick(10);
+      assert.equal(h.child.killCount, 1, 'cleanup grace requests first kill');
+      await assertTerminalPending(h);
+      t.mock.timers.tick(20);
+      assert.equal(h.child.killCount, 2, 'force-close wait requests second kill');
+      t.mock.timers.tick(1000);
+      await assertTerminalPending(h);
+      await assertTerminalRejected(h, reason === 'abort' ? 'CANCELLED' : 'EXTRACTOR_UNAVAILABLE');
+    });
+  }
+}
+
+for (const [name, trailing] of [
+  ['duplicate status', goodStatus()],
+  ['stdout', { type: 'stdout', text: 'late' }],
+  ['stderr', { type: 'stderr', text: 'late' }],
+  ['data', { type: 'data', data: 'eA==' }],
+  ['malformed JSON', rawFrame('{')],
+  ['truncated frame', encodeFrame(goodStatus()).subarray(0, 9)]
+]) {
+  test(`terminal control: separately delivered trailing ${name} still rejects`, async t => {
+    const h = await terminalControlFixture(t);
+    h.emit(goodStatus());
+    await assertTerminalPending(h);
+    h.emit(trailing);
+    assert.deepEqual(h.frames, [], 'no trailing output reaches the consumer');
+    await assertTerminalRejected(h);
+    if (name !== 'truncated frame') h.assertAuthenticatedCancel();
+  });
+}
+
+test('terminal control: same-chunk duplicate status still rejects', async t => {
+  const h = await terminalControlFixture(t);
+  h.emit(Buffer.concat([encodeFrame(goodStatus()), encodeFrame(goodStatus())]));
+  h.assertAuthenticatedCancel();
+  await assertTerminalRejected(h);
+});
+
+for (const metric of ['stdoutBytes', 'stderrBytes', 'dataBytes']) {
+  test(`terminal control: mismatched ${metric} still rejects only at close`, async t => {
+    const h = await terminalControlFixture(t);
+    h.emit(goodStatus({ metrics: { ...goodStatus().metrics, [metric]: '1' } }));
+    t.mock.timers.tick(5000);
+    assert.deepEqual(h.sends, []);
+    await assertTerminalRejected(h);
+  });
+}
+
+for (const [name, code, signal] of [
+  ['nonzero exit', 9, null], ['signal', 0, 'SIGTERM'], ['null exit', null, null]
+]) {
+  test(`terminal control: ${name} still rejects only at close`, async t => {
+    const h = await terminalControlFixture(t);
+    h.emit(goodStatus());
+    await assertTerminalPending(h);
+    h.close(code, signal);
+    const outcome = await h.outcome;
+    assert.equal(outcome.kind, 'rejected');
+    assert.equal(outcome.error.code, 'EXTRACTOR_UNAVAILABLE');
+    assert.deepEqual(h.sends, []);
+    assert.equal(h.child.killCount, 0);
+  });
+}
+
+test('terminal control: one raw broker-stderr byte still rejects only at close', async t => {
+  const h = await terminalControlFixture(t);
+  h.emit(goodStatus());
+  h.child.stderr.write(Buffer.from('x'));
+  assert.deepEqual(h.sends, []);
+  await assertTerminalRejected(h);
+});
+
+for (const source of ['child', 'stdin', 'stdout', 'stderr']) {
+  test(`terminal control: post-terminal ${source} error remains fatal`, async t => {
+    const h = await terminalControlFixture(t);
+    h.emit(goodStatus());
+    (source === 'child' ? h.child : h.child[source]).emit('error', new Error(`synthetic ${source} failure`));
+    h.assertAuthenticatedCancel();
+    const error = await assertTerminalRejected(h);
+    assert.equal(error.cause.message, `synthetic ${source} failure`);
+    assert.equal(h.child.killCount, 0);
+  });
+}
+
+test('terminal control: malformed terminal shape never ends control error authority', async t => {
+  const h = await terminalControlFixture(t);
+  h.emit(goodStatus({ extra: true }));
+  const cancelsBeforeError = h.sends.length;
+  h.controlError();
+  assert.equal(h.sends.length, cancelsBeforeError + 1, 'invalid terminal cannot suppress control failure');
+  h.assertAuthenticatedCancel();
+  await assertTerminalRejected(h);
+});
+
+test('terminal control: partial terminal frame keeps heartbeats and control errors authoritative', async t => {
+  const h = await terminalControlFixture(t);
+  h.emit(encodeFrame(goodStatus()).subarray(0, 9));
+  t.mock.timers.tick(5000);
+  assert.deepEqual(h.sends.map(control => control.type), ['keepalive']);
+  h.controlError();
+  h.assertAuthenticatedCancel();
+  const error = await assertTerminalRejected(h);
+  assert.equal(error.cause.message, 'synthetic control transport failure');
+});
+
 async function assertFileHandleCloses(handle) {
   const deadline = Date.now() + 1_000;
   while (Date.now() < deadline) {

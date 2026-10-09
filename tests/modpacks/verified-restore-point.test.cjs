@@ -129,6 +129,193 @@ function topLevelServerItems(serverPath) {
     .map(name => path.join(serverPath, name));
 }
 
+test('creation awaits preparation and publication starts before the corresponding reads and moves', async t => {
+  // Catches fire-and-forget boundaries that allow scope reads/publication before the label settles.
+  const environment = fixture(t);
+  const events = [];
+  let release;
+  const barrier = new Promise(resolve => { release = resolve; });
+  let preparationFinished = false;
+  const preparing = environment.service.prepareVerifiedRestorePointCreation(request(environment.serverPath), {
+    onProgress(event) { events.push(event); return barrier; }
+  }).then(intent => { preparationFinished = true; return intent; });
+  await new Promise(resolve => setImmediate(resolve));
+  const crossedBoundary = preparationFinished;
+  release();
+  const intent = await preparing;
+  assert.equal(crossedBoundary, false);
+  assert.deepEqual(events.map(event => [event.activity, event.kind]), [['prepare-scope', 'start']]);
+  const states = [];
+  let metadataWasStagedAtPublication;
+  await environment.service.createVerifiedRestorePoint(request(environment.serverPath), {
+    creationIntent: intent, onCreationState: async state => { states.push(state.state); },
+    async onProgress(event) {
+      events.push(event);
+      if (event.activity === 'publication') metadataWasStagedAtPublication = states.includes('metadata-writing');
+    }
+  });
+  assert.equal(metadataWasStagedAtPublication, false);
+  assert.deepEqual(events.filter(event => event.kind === 'start').map(event => event.activity), [
+    'prepare-scope', 'creation-scope', 'archive-source-check', 'archive-write', 'part-initial-hash',
+    'part-entry-verify', 'part-final-hash', 'source-recheck', 'publication',
+    'published-initial-hash', 'published-entry-verify', 'published-final-hash'
+  ]);
+});
+
+test('empty snapshot streams retain every measured start in supplied-intent creation without replaying preparation', async t => {
+  // Catches missing starts when expanded streams never emit a chunk, or synthesized preparation work.
+  const environment = fixture(t);
+  for (const relative of ['world/level.dat', 'config/pack.toml', 'server.jar']) fs.writeFileSync(path.join(environment.serverPath, relative), '');
+  const intent = await environment.service.prepareVerifiedRestorePointCreation(request(environment.serverPath));
+  const events = [];
+  const reference = await environment.service.createVerifiedRestorePoint(request(environment.serverPath), {
+    creationIntent: intent, async onCreationState() {}, onProgress(event) { events.push(event); }
+  });
+  assert.equal(reference.totalBytes, '0');
+  assert.deepEqual(events.filter(event => event.kind === 'start').map(event => event.activity), [
+    'creation-scope', 'archive-source-check', 'archive-write', 'part-initial-hash', 'part-entry-verify',
+    'part-final-hash', 'source-recheck', 'publication', 'published-initial-hash', 'published-entry-verify', 'published-final-hash'
+  ]);
+  const entries = events.filter(event => event.phase === 'entry-verify');
+  assert.deepEqual(entries.map(event => [event.kind, event.processedBytes, event.totalBytes]), [['start', 0, 0], ['start', 0, 0]]);
+  const hashes = events.filter(event => event.phase === 'archive-hash' && event.kind === 'start');
+  assert.deepEqual(hashes.map(event => [event.hashPass, event.processedBytes]), [['initial', 0], ['final', 0], ['initial', 0], ['final', 0]]);
+  assert.equal(hashes.every(event => event.totalBytes === hashes[0].totalBytes && event.totalBytes > 0), true);
+});
+
+test('source-recheck start precedes the real unchanged-scope comparison and observer rejection stays observational', async t => {
+  // Catches a fabricated label after comparison, a skipped reread, or observer errors replacing integrity results.
+  const environment = fixture(t);
+  const intent = await environment.service.prepareVerifiedRestorePointCreation(request(environment.serverPath));
+  const starts = [];
+  await assert.rejects(environment.service.createVerifiedRestorePoint(request(environment.serverPath), {
+    creationIntent: intent, async onCreationState() {},
+    async onProgress(event) {
+      if (event.kind !== 'start') return;
+      starts.push(event.activity);
+      if (event.activity === 'source-recheck') {
+        fs.writeFileSync(path.join(environment.serverPath, 'server.jar'), 'mutated source');
+      }
+      throw new Error('observer rejected');
+    }
+  }), { code: 'BACKUP_FAILED' });
+  assert.equal(starts.at(-1), 'source-recheck');
+  assert.equal(starts.includes('publication'), false);
+  assert.equal(visibleZipFiles(environment.backupDir).some(name => name.startsWith('restore-point-')), false);
+});
+
+test('entry start is awaited before opening the streaming ZIP and shared phases retain explicit passes', async t => {
+  // Catches yielding after ZIP open but before listeners, and loss of actual initial/final hash identity.
+  const environment = fixture(t);
+  const archivePath = path.join(environment.backupDir, 'awaited-entry.zip');
+  const scope = enumerateArchiveScope(topLevelServerItems(environment.serverPath));
+  const zip = new AdmZip();
+  for (const entry of scope.entries) zip.addFile(entry.path, entry.type === 'directory' ? Buffer.alloc(0) : fs.readFileSync(path.join(environment.serverPath, entry.path)));
+  zip.writeZip(archivePath);
+  const yauzl = require('yauzl');
+  let opened = false;
+  let release;
+  let observed;
+  const boundary = new Promise(resolve => { release = resolve; });
+  const entered = new Promise(resolve => { observed = resolve; });
+  const events = [];
+  const verifying = verifyZipScopeStreaming(archivePath, scope, {
+    yauzlApi: { fromFd(...args) { opened = true; return yauzl.fromFd(...args); } },
+    onProgress(event) {
+      events.push(event);
+      if (event.phase === 'entry-verify' && event.kind === 'start') { observed(); return boundary; }
+    }
+  });
+  await entered;
+  const openedBeforeBoundary = opened;
+  release();
+  await verifying;
+  assert.equal(openedBeforeBoundary, false);
+  assert.deepEqual(events.filter(event => event.kind === 'start').map(event => [event.phase, event.hashPass]), [
+    ['archive-hash', 'initial'], ['entry-verify', undefined], ['archive-hash', 'final']
+  ]);
+});
+
+test('no-intent creation keeps its options contract and executes four existing source scans exactly once', async t => {
+  // Catches an accidental onProgress-only API expansion or progress-triggered preparation replay.
+  const environment = fixture(t);
+  let sourceReads = 0;
+  const originalOpen = fs.openSync;
+  const fsApi = Object.create(fs);
+  fsApi.openSync = (file, ...args) => {
+    if (file === path.join(environment.serverPath, 'server.jar')) sourceReads++;
+    return originalOpen(file, ...args);
+  };
+  const service = new RestorePointService({
+    fsApi, durableFs: environment.durableFs, clock: () => new Date('2026-08-01T01:02:03.004Z'),
+    randomUUID: () => 'no-intent', extractVerifiedArchiveFn: testOnlySecureExtractor
+  });
+  await assert.rejects(service.createVerifiedRestorePoint(request(environment.serverPath), { onProgress() {} }), { code: 'BACKUP_FAILED' });
+  assert.equal(sourceReads, 0);
+  const reference = await service.createVerifiedRestorePoint(request(environment.serverPath), null);
+  assert.equal(sourceReads, 4);
+  assert.equal((await service.verifyRestorePoint(reference)).ok, true);
+});
+
+test('creation forwarding rejects accessor samples without reading their kind', async t => {
+  // Catches a shared forwarding adapter evaluating a getter before strict creation validation.
+  let getterCalls = 0;
+  const environment = fixture(t, {
+    createVerifiedZipFn: options => createVerifiedZip({ ...options,
+      async zipStreamVerifier(archivePath, scope, verificationOptions) {
+        verificationOptions.onProgress(Object.defineProperty({ phase: 'archive-hash', processedBytes: 0, totalBytes: 1 },
+          'kind', { enumerable: true, get() { getterCalls++; return 'progress'; } }));
+        return verifyZipScopeStreaming(archivePath, scope, verificationOptions);
+      }
+    })
+  });
+  const intent = await environment.service.prepareVerifiedRestorePointCreation(request(environment.serverPath));
+  await environment.service.createVerifiedRestorePoint(request(environment.serverPath), {
+    creationIntent: intent, async onCreationState() {}, onProgress() {}
+  });
+  assert.equal(getterCalls, 0);
+});
+
+test('existing publication uncertainty reports reconciliation before its unchanged recovery checks', async t => {
+  // Catches hidden catch-branch checks and fabricated missing published verifier passes.
+  for (const scenario of ['metadata-uncertain', 'published-open-fails-once', 'published-open-always-fails']) {
+    await t.test(scenario, async subtest => {
+      let verifierCalls = 0;
+      let reconciled = false;
+      const checkedUnderReconciliation = [];
+      const environment = fixture(subtest, {
+        uncertainRenameNumber: scenario === 'metadata-uncertain' ? 2 : null,
+        zipStreamVerifier(archivePath, scope, options) {
+          verifierCalls++;
+          checkedUnderReconciliation.push(reconciled);
+          const failOpen = scenario === 'published-open-always-fails' || (scenario === 'published-open-fails-once' && verifierCalls === 1);
+          return verifyZipScopeStreaming(archivePath, scope, failOpen ? {
+            ...options, yauzlApi: { fromFd(_fd, _options, callback) { callback(new Error('synthetic open failure')); } }
+          } : options);
+        }
+      });
+      const intent = await environment.service.prepareVerifiedRestorePointCreation(request(environment.serverPath));
+      const starts = [];
+      const creating = environment.service.createVerifiedRestorePoint(request(environment.serverPath), {
+        creationIntent: intent, async onCreationState() {},
+        async onProgress(event) {
+          if (event.kind !== 'start') return;
+          starts.push(event);
+          if (event.activity === 'publication-reconciliation') reconciled = true;
+        }
+      });
+      if (scenario === 'published-open-always-fails') await assert.rejects(creating, { code: 'BACKUP_FAILED' });
+      else assert.equal((await creating).id, 'restore-00000000-0000-4000-8000-000000000017');
+      assert.deepEqual(starts.at(-1), {
+        activity: 'publication-reconciliation', phase: 'publication', kind: 'start', processedBytes: 0, totalBytes: null
+      });
+      assert.deepEqual(checkedUnderReconciliation, scenario === 'metadata-uncertain' ? [true, true] :
+        scenario === 'published-open-fails-once' ? [false, true, true] : [false, true]);
+      assert.equal(starts.some(event => event.activity === 'published-final-hash'), false);
+    });
+  }
+});
+
 function visibleZipFiles(backupDir) {
   return fs.readdirSync(backupDir).filter(name => name.endsWith('.zip')).sort();
 }

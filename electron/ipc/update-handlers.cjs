@@ -1,3 +1,4 @@
+const { markStartupTrace } = require('../utils/startup-trace.cjs');
 const { getUpdateService } = require('../services/update-service.cjs');
 
 function getRunningServersForUpdateInstall() {
@@ -35,7 +36,9 @@ function canInstallUpdateNow() {
 
 function createUpdateHandlers(win, { updaterEnabled = true } = {}) {
   if (typeof updaterEnabled !== 'boolean') throw new TypeError('Updater IPC policy is invalid');
+  markStartupTrace('update-service:get:start');
   const updateService = getUpdateService();
+  markStartupTrace('update-service:get:complete');
   
   // Forward update events to renderer
   updateService.on('checking-for-update', () => {

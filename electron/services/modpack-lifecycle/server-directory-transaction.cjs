@@ -1,4 +1,5 @@
 const crypto = require('node:crypto');
+const { formatProgressBytes } = require('../../utils/progress-bytes.cjs');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
@@ -1673,8 +1674,9 @@ async function buildExistingCandidate(contextValue) {
       if (lastCopyProgressAt !== null && now - lastCopyProgressAt < COPY_PROGRESS_CHECKPOINT_INTERVAL_MS &&
           event.completedItems !== event.totalItems) return;
       lastCopyProgressAt = now;
+      const byteDetail = formatProgressBytes(event.completedBytes, event.totalBytes);
       await candidateProgress(context, 'staging', 38,
-        `Copying server files (${event.completedItems} of ${event.totalItems} files, ${event.completedBytes} of ${event.totalBytes} bytes)`);
+        `Copying server files (${event.completedItems} of ${event.totalItems} files${byteDetail === null ? '' : `, ${byteDetail}`})`);
     } else if (event.activity === 'flushing-candidate-directories') {
       await candidateProgress(context, 'staging', 38, 'Flushing copied server directories');
     } else if (event.activity === 'verifying-candidate-copy') {

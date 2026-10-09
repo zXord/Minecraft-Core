@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
+const { EventEmitter } = require('node:events');
 
 const { createMainBootstrap } = require('../electron/bootstrap/create-main-bootstrap.cjs');
 const { PACKAGED_SMOKE_ARGUMENT, createRuntimeFlags } = require('../electron/bootstrap/runtime-flags.cjs');
@@ -443,10 +444,29 @@ test('startup rejects a factory that neither returns nor publishes a window', as
   assert.equal(afterWindowCalls, 0);
 });
 
-test('production main entry delegates lifecycle ownership and holds quit until bootstrap disposal settles', async () => {
+async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false, brokenSink = false, ipcError = null, loggerNull = false } = {}) {
   const mainPath = path.resolve(__dirname, '../electron/main.cjs');
   const originalLoad = Module._load;
   const calls = [];
+  const boundaries = [];
+  const traceLines = [];
+  let capturedGraphDependencies;
+  let publishedWindow;
+  let finishNavigation;
+  const navigation = new Promise(resolve => { finishNavigation = resolve; });
+  class FakeBrowserWindow extends EventEmitter {
+    constructor() {
+      super();
+      this.id = 101;
+      this.webContents = new EventEmitter();
+      publishedWindow = this;
+      boundaries.push('browser-window:work');
+    }
+    isDestroyed() { return false; }
+    show() { boundaries.push('window:show'); }
+    static fromWebContents() { return null; }
+    static getAllWindows() { return []; }
+  }
   const appHandlers = new Map();
   const pendingReady = new Promise(() => {});
   let finishDisposal;
@@ -464,7 +484,7 @@ test('production main entry delegates lifecycle ownership and holds quit until b
   };
   const electron = {
     app,
-    BrowserWindow: { fromWebContents: () => null, getAllWindows: () => [] },
+    BrowserWindow: FakeBrowserWindow,
     Menu: { setApplicationMenu: () => {} },
     Tray: function FakeTray() {},
     ipcMain: { handle: () => {}, removeHandler: () => {} },
@@ -477,6 +497,7 @@ test('production main entry delegates lifecycle ownership and holds quit until b
   const bootstrap = {
     initializeBeforeReady() {
       calls.push('bootstrap:initialize');
+      boundaries.push('before-ready:work');
       graph.installSecurity();
     },
     onReady() { calls.push('bootstrap:ready'); },
@@ -484,11 +505,36 @@ test('production main entry delegates lifecycle ownership and holds quit until b
   };
 
   Module._load = function loadMainFixture(request, parent, isMain) {
+    if (request === './utils/startup-trace.cjs' && parent.filename === mainPath) {
+      const { createStartupTrace } = originalLoad(request, parent, isMain);
+      return { markStartupTrace: createStartupTrace({
+        env: traceEnabled ? { MINECRAFT_CORE_STARTUP_TRACE: '1' } : {},
+        now: () => 100, utcNow: () => '2026-10-09T00:00:00.000Z', pid: 123,
+        sink(line) {
+          if (brokenSink) throw new Error('PRIVATE_SINK_FAILURE');
+          traceLines.push(line);
+          boundaries.push(JSON.parse(line.slice('[Minecraft Core startup trace] '.length)).marker);
+        }
+      }) };
+    }
     if (request === 'electron') return electron;
     if (request === './ipc-handlers.cjs') {
       calls.push('ipc-module:load');
-      return { setupIpcHandlers: () => {} };
+      boundaries.push('ipc-module:load');
+      return { setupIpcHandlers(window, suppliedGraph) {
+        assert.equal(window, publishedWindow);
+        assert.equal(suppliedGraph, graph);
+        boundaries.push('ipc:setup');
+        if (ipcError) throw ipcError;
+      } };
     }
+    if (request === './services/auto-restart.cjs') return { initializeAutoRestartListeners() { boundaries.push('listeners:initialize'); } };
+    if (request === './utils/asset-resolver.cjs') return { resolveWindowIconPath: () => null };
+    if (request === './utils/renderer-loader.cjs') return { loadRendererContent(options) {
+      assert.equal(options.window, publishedWindow);
+      boundaries.push('navigation:work');
+      return navigation;
+    } };
     if (request === './utils/app-cleanup.cjs') return { setupAppCleanup: () => {} };
     if (request === './utils/safe-send.cjs') return { setMainWindow: () => {} };
     if (request === './utils/app-store.cjs') return store;
@@ -500,8 +546,11 @@ test('production main entry delegates lifecycle ownership and holds quit until b
     if (request === './services/update-service.cjs') return { getUpdateService: () => ({ startPeriodicChecks: () => {} }) };
     if (request === './services/server-mutation-coordinator.cjs') return { ServerMutationCoordinator: class {} };
     if (request === './services/server-mutation-context.cjs') return { installServerMutationCoordinator: () => {} };
-    if (request === './services/logger-service.cjs') return { getLogger: () => ({ info: () => {}, fatal: () => {} }) };
-    if (request === '../config/dev-config.cjs') return { enableDevConsole: false, enableDevServer: false };
+    if (request === './services/logger-service.cjs') return { getLogger() {
+      if (loggerNull) throw new Error('PRIVATE_LOGGER_FAILURE');
+      return { info: () => {}, fatal: () => {}, debug: () => {}, warn: () => {} };
+    } };
+    if (request === '../config/dev-config.cjs') { boundaries.push('imports:last'); return { enableDevConsole: false, enableDevServer: false }; }
     if (request === './bootstrap/runtime-flags.cjs') return {
       createRuntimeFlags() { calls.push('flags:create'); return runtimeFlags; }
     };
@@ -510,6 +559,8 @@ test('production main entry delegates lifecycle ownership and holds quit until b
       return {
         createModpackServiceGraph(dependencies) {
           calls.push('graph:create');
+          boundaries.push('graph:work');
+          capturedGraphDependencies = dependencies;
           assert.equal(dependencies.app, app);
           assert.equal(dependencies.store, store);
           graph.installSecurity = dependencies.startup.installSecurity;
@@ -543,6 +594,8 @@ test('production main entry delegates lifecycle ownership and holds quit until b
       'bootstrap:initialize',
       'app:when-ready'
     ]);
+    await inspect({ boundaries, traceLines, dependencies: capturedGraphDependencies,
+      getWindow: () => publishedWindow, finishNavigation });
     const firstQuit = { prevented: 0, preventDefault() { this.prevented += 1; } };
     appHandlers.get('before-quit')(firstQuit);
     assert.equal(firstQuit.prevented, 1);
@@ -560,5 +613,66 @@ test('production main entry delegates lifecycle ownership and holds quit until b
   } finally {
     delete require.cache[mainPath];
     Module._load = originalLoad;
+  }
+}
+
+test('production main entry delegates lifecycle ownership and holds quit until bootstrap disposal settles', async () => {
+  await mainEntryFixture();
+});
+
+test('startup trace real main brackets imports graph before-ready and forwards timing without a logger or details', async () => {
+  await mainEntryFixture(async ({ boundaries, traceLines, dependencies }) => {
+    assert.deepEqual(boundaries, [
+      'main:entry', 'imports:last', 'main:imports:complete', 'main:graph:start', 'graph:work',
+      'main:graph:complete', 'main:before-ready:start', 'before-ready:work', 'main:before-ready:complete'
+    ]);
+    dependencies.startup.markTiming('recovery:start', { path: 'PRIVATE_PATH', error: new Error('PRIVATE_ERROR') });
+    assert.equal(boundaries.at(-1), 'recovery:start');
+    assert.doesNotMatch(traceLines.join(''), /PRIVATE|path|error/);
+  }, { traceEnabled: true, loggerNull: true });
+});
+
+test('startup trace real window IPC boundary precedes listeners import setup and held navigation', async () => {
+  await mainEntryFixture(async ({ boundaries, dependencies, getWindow, finishNavigation }) => {
+    boundaries.length = 0;
+    dependencies.windowFactory();
+    assert.deepEqual(boundaries, [
+      'main-window:browser-window:create:start', 'browser-window:work', 'main-window:browser-window:create:complete',
+      'main:ipc:start', 'listeners:initialize', 'ipc-module:load', 'ipc:setup', 'main:ipc:complete',
+      'main-window:navigation:start', 'navigation:work'
+    ]);
+    getWindow().emit('ready-to-show');
+    assert.deepEqual(boundaries.slice(-2), ['main-window:ready-to-show', 'window:show']);
+    finishNavigation({ status: 'ready', mode: 'production' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(boundaries.at(-1), 'main-window:navigation:complete');
+    getWindow().emit('closed');
+    dependencies.windowFactory();
+    assert.equal(boundaries.filter(value => value === 'main:ipc:start').length, 1);
+    assert.equal(boundaries.filter(value => value === 'main-window:browser-window:create:start').length, 1);
+  }, { traceEnabled: true, loggerNull: true });
+});
+
+test('startup trace real main preserves IPC failure identity without false completion or navigation', async () => {
+  const ipcError = new Error('PRIVATE_ORIGINAL_IPC');
+  await mainEntryFixture(async ({ boundaries, dependencies }) => {
+    boundaries.length = 0;
+    assert.throws(() => dependencies.windowFactory(), actual => actual === ipcError);
+    assert.deepEqual(boundaries.slice(-4), ['main:ipc:start', 'listeners:initialize', 'ipc-module:load', 'ipc:setup']);
+    assert.equal(boundaries.includes('main:ipc:complete'), false);
+    assert.equal(boundaries.includes('navigation:work'), false);
+  }, { traceEnabled: true, loggerNull: true, ipcError });
+});
+
+test('startup trace disabled and broken sink leave actual main graph bootstrap and IPC behavior unchanged', async () => {
+  for (const traceEnabled of [false, true]) {
+    await mainEntryFixture(async ({ traceLines, dependencies, boundaries, finishNavigation }) => {
+      dependencies.startup.markTiming('recovery:start', { private: 'PRIVATE_DETAILS' });
+      dependencies.windowFactory();
+      assert.deepEqual(boundaries, ['imports:last', 'graph:work', 'before-ready:work', 'browser-window:work', 'listeners:initialize', 'ipc-module:load', 'ipc:setup', 'navigation:work']);
+      finishNavigation({ status: 'ready', mode: 'production' });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(traceLines, []);
+    }, { traceEnabled, brokenSink: true, loggerNull: true });
   }
 });

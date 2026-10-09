@@ -1300,11 +1300,15 @@ class ArchiveWorkerClient {
         }
       };
       const onAbort = () => terminate(budget.error());
-      controlChannel.onError(error => terminate(unavailable(error)));
+      controlChannel.onError(error => { if (!terminal) terminate(unavailable(error)); });
       const decoder = new StrictFrameDecoder(raw => {
         if (terminal) throw unavailable();
         const frame = validateWorkerFrame(raw);
-        if (frame.type === 'status') { terminal = frame; return; }
+        if (frame.type === 'status') {
+          terminal = frame;
+          if (keepaliveTimer) clearInterval(keepaliveTimer);
+          return;
+        }
         if (frame.type === 'stdout') stdoutBytes += BigInt(Buffer.byteLength(raw.text, 'utf8'));
         if (frame.type === 'stderr') stderrBytes += BigInt(Buffer.byteLength(raw.text, 'utf8'));
         if (frame.type === 'data') dataBytes += BigInt(Buffer.from(raw.data, 'base64').length);
@@ -1369,10 +1373,13 @@ class ArchiveWorkerClient {
       child.stdin.on('error', error => terminate(unavailable(error)));
       try {
         child.stdin.end(framedRequest);
-        keepaliveTimer = setInterval(() => {
-          if (!writeControl('keepalive')) terminate(unavailable());
-        }, this.keepaliveMs);
-        keepaliveTimer.unref?.();
+        if (!terminal && !terminationError && !settled && !closed) {
+          keepaliveTimer = setInterval(() => {
+            if (terminal || terminationError || settled || closed) return;
+            if (!writeControl('keepalive')) terminate(unavailable());
+          }, this.keepaliveMs);
+          keepaliveTimer.unref?.();
+        }
       } catch (error) {
         terminate(unavailable(error));
       }

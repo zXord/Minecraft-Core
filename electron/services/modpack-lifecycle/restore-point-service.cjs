@@ -59,6 +59,15 @@ function createBoundedProgressReporter(onProgress) {
   if (typeof onProgress !== 'function') throw backupFailure();
   let lastPublishedAt = 0;
   return (value, { force = false } = {}) => {
+    if (value.kind === 'start') {
+      return (async () => {
+        try {
+          await onProgress(Object.freeze(strictJsonClone(value, {
+            maxDepth: 8, maxCollection: 128, maxStringBytes: 4096
+          })));
+        } catch { /* progress observers never decide restore-point correctness */ }
+      })();
+    }
     const now = Date.now();
     if (!force && now - lastPublishedAt < 250) return;
     lastPublishedAt = now;
@@ -68,6 +77,28 @@ function createBoundedProgressReporter(onProgress) {
       })))).catch(() => {});
     } catch { /* progress observers never decide restore-point correctness */ }
   };
+}
+
+function creationVerificationReporter(operation, prefix) {
+  return value => {
+    const descriptors = assertPlainDataObject(value, new Set([
+      'phase', 'kind', 'activity', 'hashPass', 'processedBytes', 'totalBytes', 'entriesProcessed', 'entriesTotal'
+    ]));
+    const phase = descriptors.phase?.value;
+    const hashPass = descriptors.hashPass?.value;
+    let activity;
+    if (phase === 'archive-hash' && ['initial', 'final'].includes(hashPass)) activity = `${prefix}-${hashPass}-hash`;
+    else if (phase === 'entry-verify' && hashPass === undefined) activity = `${prefix}-entry-verify`;
+    else if (prefix === 'part' && hashPass === undefined &&
+        ((phase === 'scope' && descriptors.activity?.value === 'archive-source-check') ||
+         (phase === 'archive-write' && descriptors.activity?.value === 'archive-write'))) activity = descriptors.activity.value;
+    else throw backupFailure();
+    return operation.reportProgress({ ...value, activity });
+  };
+}
+
+function creationBoundary(operation, activity, phase = 'scope') {
+  return operation.reportProgress({ activity, phase, kind: 'start', processedBytes: 0, totalBytes: null });
 }
 
 function targetExists() {
@@ -294,7 +325,7 @@ class RestorePointService {
       const { serverPath, operationId } = request;
       throwIfCancelled(operation.signal);
       const items = this.#serverItems(serverPath);
-      operation.reportProgress({ phase: 'scope', processedBytes: 0, totalBytes: null }, { force: true });
+      await creationBoundary(operation, 'prepare-scope');
       const expectedScope = await enumerateArchiveScopeCooperatively(items, {
         fsApi: this.fs,
         signal: operation.signal
@@ -366,6 +397,7 @@ class RestorePointService {
         if (!sameIdentity(identityFromStat(backupStat), currentIntent.backupDirectory.identity)) throw backupFailure();
       }
       const items = this.#serverItems(serverPath);
+      await creationBoundary(operation, 'creation-scope');
       const expectedScope = await enumerateArchiveScopeCooperatively(items, {
         fsApi: this.fs,
         signal: operation.signal
@@ -391,7 +423,7 @@ class RestorePointService {
         expectedScope,
         fsApi: this.fs,
         signal: operation.signal,
-        onProgress: progress => operation.reportProgress(progress),
+        onProgress: creationVerificationReporter(operation, 'part'),
         onPartCreated: async partIdentity => {
           const next = normalizeRestoreCreation({ ...currentIntent, partIdentity, state: 'writing' }, operationId);
           if (onCreationState) await onCreationState(next);
@@ -400,6 +432,7 @@ class RestorePointService {
         faultInjector: this.faultInjector
       });
       throwIfCancelled(operation.signal);
+      await creationBoundary(operation, 'source-recheck');
       const postArchiveScope = await enumerateArchiveScopeCooperatively(this.#serverItems(serverPath), {
         fsApi: this.fs,
         signal: operation.signal
@@ -430,6 +463,7 @@ class RestorePointService {
       }, operationId);
       if (onCreationState) await onCreationState(verifiedIntent);
       currentIntent = verifiedIntent;
+      await creationBoundary(operation, 'publication', 'publication');
       await this.#writeIdentityGatedFile(pendingPath, metadataBytes(metadata), async metadataIdentity => {
         const next = normalizeRestoreCreation({
           ...currentIntent,
@@ -456,11 +490,15 @@ class RestorePointService {
       if (onCreationState) await onCreationState(published);
       currentIntent = published;
       const reference = this.#reference(serverPath, metadata);
-      await this.#verifyRestorePointLocked(reference, { recoverPending: false, operation });
+      await this.#verifyRestorePointLocked(reference, {
+        recoverPending: false,
+        operation: { ...operation, reportProgress: creationVerificationReporter(operation, 'published') }
+      });
       return reference;
     } catch (error) {
       if (paths && finalPublished && intendedMetadata && this.#exists(paths.metadataPath) && !this.#exists(paths.pendingPath)) {
         try {
+          await creationBoundary(operation, 'publication-reconciliation', 'publication');
           const loaded = this.#readMetadata(paths.metadataPath);
           if (loaded.sha256 !== metadataDigest(intendedMetadata) ||
               JSON.stringify(loaded.metadata) !== JSON.stringify(intendedMetadata)) throw backupFailure();

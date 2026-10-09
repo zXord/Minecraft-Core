@@ -450,7 +450,7 @@ function mutationFixture(operationKind, options = {}) {
     revalidate: method('revalidate'),
     createRestorePoint: method('createRestorePoint', async context => {
       for (const event of options.restorePointProgress || []) {
-        context.onProgress?.(event);
+        await context.onProgress?.(event);
         if (options.yieldBetweenRestorePointProgress) {
           await new Promise(resolve => setImmediate(resolve));
         }
@@ -565,10 +565,7 @@ test('production candidate callbacks advance durable lifecycle progress monotoni
 test('verified restore-point creation publishes bounded snapshot progress before candidate staging', async () => {
   const fixture = mutationFixture('update', {
     restorePointProgress: [
-      { phase: 'scope', processedBytes: 0, totalBytes: null },
-      { phase: 'archive-write', processedBytes: 50, totalBytes: 100, entriesProcessed: 2, entriesTotal: 4 },
-      { phase: 'archive-hash', processedBytes: 25, totalBytes: 50 },
-      { phase: 'entry-verify', processedBytes: 100, totalBytes: 100 }
+      ...Array.from({ length: 6 }, (_, index) => snapshotStart(index))
     ]
   });
 
@@ -591,13 +588,7 @@ test('a repeated restore archive verification sweep cannot move snapshot progres
   const fixture = mutationFixture('update', {
     yieldBetweenRestorePointProgress: true,
     restorePointProgress: [
-      { phase: 'scope', processedBytes: 0, totalBytes: null },
-      { phase: 'archive-write', processedBytes: 100, totalBytes: 100, entriesProcessed: 4, entriesTotal: 4 },
-      { phase: 'archive-hash', processedBytes: 100, totalBytes: 100 },
-      { phase: 'entry-verify', processedBytes: 100, totalBytes: 100 },
-      { phase: 'archive-hash', processedBytes: 0, totalBytes: 100 },
-      { phase: 'entry-verify', processedBytes: 0, totalBytes: 100 },
-      { phase: 'entry-verify', processedBytes: 100, totalBytes: 100 }
+      ...snapshotActivities.map((_, index) => snapshotStart(index))
     ]
   });
 
@@ -833,6 +824,302 @@ for (const operationKind of [
     }
   });
 }
+
+const snapshotActivities = [
+  ['prepare-scope', 'scope', null], ['creation-scope', 'scope', null],
+  ['archive-source-check', 'scope', null], ['archive-write', 'archive-write', 100],
+  ['part-initial-hash', 'archive-hash', 100, 'initial'],
+  ['part-entry-verify', 'entry-verify', 100], ['part-final-hash', 'archive-hash', 100, 'final'],
+  ['source-recheck', 'scope', null], ['publication', 'publication', null],
+  ['published-initial-hash', 'archive-hash', 100, 'initial'],
+  ['published-entry-verify', 'entry-verify', 100],
+  ['published-final-hash', 'archive-hash', 100, 'final'], ['record-reference', 'record-reference', null]
+];
+function snapshotStart(index) {
+  const [activity, phase, totalBytes, hashPass] = snapshotActivities[index];
+  return { activity, phase, kind: 'start', processedBytes: 0, totalBytes,
+    ...(hashPass ? { hashPass } : {}),
+    ...(phase === 'archive-write' ? { entriesProcessed: 0, entriesTotal: 4 } : {}) };
+}
+async function runSnapshotFixture(fixture) {
+  const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+  return waitForPhase(fixture.operationStore, queued.jobId, phase => ['completed', 'failed', 'cancelled'].includes(phase));
+}
+
+test('snapshot activity final and published passes remain visible with identical totals', async () => {
+  // Catches rank filtering that loses the final raw hash and repeated published verification.
+  const fixture = mutationFixture('update');
+  fixture.service.mutationRuntime.createRestorePoint = async ({ onProgress }) => {
+    for (let index = 0; index < snapshotActivities.length; index++) {
+      const receipt = onProgress(snapshotStart(index));
+      await receipt;
+      assert.equal(onProgress(snapshotStart(index)), receipt);
+    }
+    return { id: 'restore-new', verified: true };
+  };
+  const result = await runSnapshotFixture(fixture);
+  assert.equal(result.phase, 'completed');
+  const messages = fixture.operationStore.progressHistory.get('job-one').map(event => event.message);
+  assert.equal(messages.some(message => message.startsWith('Rechecking the saved archive after file verification')), true);
+  assert.equal(messages.some(message => message.startsWith('Checking the published snapshot archive')), true);
+  assert.equal(messages.some(message => message.startsWith('Rechecking the published archive after file verification')), true);
+  assert.equal(messages.at(messages.indexOf('Verified recovery snapshot ready') - 1), 'Recording the verified recovery snapshot');
+  const snapshotWrites = fixture.operationStore.progressHistory.get('job-one').filter(event => event.phase === 'snapshotting');
+  assert.equal(snapshotWrites.length, 15);
+  assert.equal(snapshotWrites.at(-1).percent, 34);
+  assert.equal(fixture.operationStore.progressHistory.get('job-one').find(event => event.phase === 'staging').percent, 35);
+});
+
+test('snapshot activity receipt holds corresponding work until the serialized store settles', async () => {
+  // Catches a discarded observer promise allowing work to outrun its activity write.
+  const fixture = mutationFixture('update');
+  const entered = deferred();
+  const release = deferred();
+  let workEntered = false;
+  const update = fixture.operationStore.updateProgress.bind(fixture.operationStore);
+  fixture.operationStore.updateProgress = async (jobId, request) => {
+    entered.resolve();
+    await release.promise;
+    return update(jobId, request);
+  };
+  fixture.service.mutationRuntime.createRestorePoint = async ({ onProgress }) => {
+    await onProgress(snapshotStart(0));
+    workEntered = true;
+    return { id: 'restore-new', verified: true };
+  };
+  const running = runSnapshotFixture(fixture);
+  await Promise.race([entered.promise, running]);
+  const held = workEntered;
+  release.resolve();
+  await running;
+  assert.equal(held, false);
+  assert.equal(workEntered, true);
+});
+
+test('snapshot counters obey a separate ten-second serialized admission gate', async () => {
+  // Catches per-event store writes, including a final-byte bypass before ten seconds.
+  const fixture = mutationFixture('update');
+  let now = 0;
+  fixture.service.snapshotProgressClock = () => now;
+  fixture.service.mutationRuntime.createRestorePoint = async ({ onProgress }) => {
+    for (let index = 0; index <= 3; index++) await onProgress(snapshotStart(index));
+    for (const [time, bytes] of [[0, 10], [9999, 20], [10000, 30], [19999, 100]]) {
+      now = time;
+      onProgress({ ...snapshotStart(3), kind: 'progress', processedBytes: bytes, entriesProcessed: 1 });
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    return { id: 'restore-new', verified: true };
+  };
+  const result = await runSnapshotFixture(fixture);
+  assert.equal(result.phase, 'completed');
+  const writes = fixture.operationStore.progressHistory.get('job-one').filter(event => event.message.startsWith('Saving the recovery snapshot'));
+  assert.equal(writes.length, 2);
+  assert.match(writes[1].message, /30 of 100 B/);
+});
+
+test('snapshot gate epoch begins after a delayed start write and coalesces counter floods', async () => {
+  // Catches enqueue-time admission and replacing a pending start with a chunk.
+  const fixture = mutationFixture('update');
+  let now = 0;
+  fixture.service.snapshotProgressClock = () => now;
+  const entered = deferred();
+  const release = deferred();
+  const update = fixture.operationStore.updateProgress.bind(fixture.operationStore);
+  fixture.operationStore.updateProgress = async (jobId, request) => {
+    if (request.progress.message.startsWith('Saving the recovery snapshot')) {
+      entered.resolve();
+      await release.promise;
+    }
+    return update(jobId, request);
+  };
+  fixture.service.mutationRuntime.createRestorePoint = async ({ onProgress }) => {
+    for (let index = 0; index < 3; index++) await onProgress(snapshotStart(index));
+    const sample = { ...snapshotStart(3), totalBytes: 10000 };
+    const start = onProgress(sample);
+    await entered.promise;
+    for (let bytes = 1; bytes <= 3000; bytes++) {
+      assert.equal(onProgress({ ...sample, kind: 'progress', processedBytes: bytes }), undefined);
+    }
+    now = 20000;
+    release.resolve();
+    await start;
+    await new Promise(resolve => setImmediate(resolve));
+    now = 29999;
+    onProgress({ ...sample, kind: 'progress', processedBytes: 3000 });
+    await new Promise(resolve => setImmediate(resolve));
+    now = 30000;
+    onProgress({ ...sample, kind: 'progress', processedBytes: 3000 });
+    await new Promise(resolve => setImmediate(resolve));
+    return { id: 'restore-new', verified: true };
+  };
+  assert.equal((await runSnapshotFixture(fixture)).phase, 'completed');
+  const writes = fixture.operationStore.progressHistory.get('job-one').filter(event => event.message.startsWith('Saving the recovery snapshot'));
+  assert.deepEqual(writes.map(event => event.message), [
+    'Saving the recovery snapshot (0 of 4 files, 0 of 9.77 KiB (approx.))',
+    'Saving the recovery snapshot (0 of 4 files, 2.93 of 9.77 KiB (approx.))'
+  ]);
+});
+
+test('snapshot receipts share starts and all settle on writer failure while primary errors retain precedence', async () => {
+  // Catches abandoned receipts, duplicate writes, unhandled chunk rejection, and drain masking integrity errors.
+  for (const integrityFailure of [false, true]) {
+    const fixture = mutationFixture('update');
+    const entered = deferred();
+    const release = deferred();
+    const storeError = new ModpackError('COMMIT_FAILED', 'progress-store failed');
+    let writes = 0;
+    const update = fixture.operationStore.updateProgress.bind(fixture.operationStore);
+    fixture.operationStore.updateProgress = async (jobId, request) => {
+      if (request.progress.message !== 'Scanning current server files for the recovery snapshot') return update(jobId, request);
+      writes++; entered.resolve(); await release.promise; throw storeError;
+    };
+    fixture.service.mutationRuntime.createRestorePoint = async ({ onProgress }) => {
+      const active = onProgress(snapshotStart(0));
+      await entered.promise;
+      assert.equal(onProgress(snapshotStart(0)), active);
+      const pending = onProgress(snapshotStart(1));
+      assert.equal(onProgress(snapshotStart(1)), pending);
+      const discarded = onProgress(snapshotStart(2));
+      release.resolve();
+      const results = await Promise.allSettled([active, pending, discarded]);
+      assert.deepEqual(results.map(result => [result.status, result.reason === storeError]), [
+        ['rejected', true], ['rejected', true], ['rejected', true]
+      ]);
+      await assert.rejects(onProgress(snapshotStart(3)), error => error === storeError);
+      assert.equal(onProgress({ ...snapshotStart(3), kind: 'progress', processedBytes: 50 }), undefined);
+      if (integrityFailure) throw new ModpackError('BACKUP_FAILED', 'archive integrity failed');
+      return { id: 'restore-new', verified: true };
+    };
+    const result = await runSnapshotFixture(fixture);
+    assert.equal(result.phase, 'failed');
+    assert.equal(result.outcome.errorCode, integrityFailure ? 'BACKUP_FAILED' : 'COMMIT_FAILED');
+    assert.equal(writes, 1);
+    assert.equal(fixture.operationStore.progressHistory.get('job-one').some(event => event.message === 'Verified recovery snapshot ready'), false);
+  }
+});
+
+test('snapshot strict samples reject invalid identity without getters and stale counters cannot relabel work', async () => {
+  // Catches pass inference, arbitrary jumps, changing totals, suppressed-sample watermark loss and getter evaluation.
+  const fixture = mutationFixture('update');
+  let now = 0;
+  fixture.service.snapshotProgressClock = () => now;
+  let getters = 0;
+  fixture.service.mutationRuntime.createRestorePoint = async ({ onProgress }) => {
+    const malformed = [
+      { phase: 'scope', processedBytes: 0, totalBytes: null },
+      snapshotStart(2), { ...snapshotStart(0), activity: 'unknown' },
+      { ...snapshotStart(0), kind: 'progress' }, { ...snapshotStart(0), totalBytes: 0 },
+      { ...snapshotStart(0), hashPass: undefined },
+      { ...snapshotStart(0), processedBytes: Number.MAX_SAFE_INTEGER + 1 },
+      Object.defineProperty({ ...snapshotStart(0) }, 'kind', { enumerable: true, get() { getters++; return 'start'; } })
+    ];
+    for (const sample of malformed) assert.throws(() => onProgress(sample), error => error.code === 'INVALID_REQUEST');
+    for (let index = 0; index <= 5; index++) {
+      const sample = snapshotStart(index);
+      if (index === 4) {
+        assert.throws(() => onProgress({ ...sample, hashPass: 'final' }), error => error.code === 'INVALID_REQUEST');
+        const { hashPass, ...missingPass } = sample;
+        assert.throws(() => onProgress(missingPass), error => error.code === 'INVALID_REQUEST');
+      }
+      await onProgress(sample);
+    }
+    onProgress({ ...snapshotStart(5), kind: 'progress', processedBytes: 99 });
+    await new Promise(resolve => setImmediate(resolve));
+    now = 10000;
+    onProgress({ ...snapshotStart(5), kind: 'progress', processedBytes: 98 });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.throws(() => onProgress({ ...snapshotStart(5), kind: 'progress', totalBytes: 101, processedBytes: 100 }), error => error.code === 'INVALID_REQUEST');
+    assert.throws(() => onProgress({ ...snapshotStart(6), kind: 'progress', processedBytes: 100 }), error => error.code === 'INVALID_REQUEST');
+    for (let index = 6; index <= 10; index++) await onProgress(snapshotStart(index));
+    onProgress({ ...snapshotStart(5), kind: 'progress', processedBytes: 100 });
+    await new Promise(resolve => setImmediate(resolve));
+    return { id: 'restore-new', verified: true };
+  };
+  assert.equal((await runSnapshotFixture(fixture)).phase, 'completed');
+  assert.equal(getters, 0);
+  const writes = fixture.operationStore.progressHistory.get('job-one').filter(event => event.phase === 'snapshotting');
+  assert.equal(writes.filter(event => event.message.startsWith('Verifying saved snapshot files')).length, 1);
+  assert.equal(writes.at(-2).message, 'Verifying published snapshot files (0 of 100 B)');
+});
+
+test('cancellation during a held snapshot start cannot admit queued or future activity writes', async () => {
+  // Catches moving phase gating out of the serialized writer or stale writes after cancellation wins.
+  const fixture = mutationFixture('update');
+  const entered = deferred();
+  const release = deferred();
+  const update = fixture.operationStore.updateProgress.bind(fixture.operationStore);
+  fixture.operationStore.updateProgress = async (jobId, request) => {
+    if (request.progress.message === 'Scanning current server files for the recovery snapshot') {
+      entered.resolve(); await release.promise;
+    }
+    return update(jobId, request);
+  };
+  fixture.service.mutationRuntime.createRestorePoint = async ({ onProgress }) => {
+    const active = onProgress(snapshotStart(0));
+    const queued = onProgress(snapshotStart(1));
+    await Promise.allSettled([active, queued]);
+    await onProgress(snapshotStart(2)).catch(() => {});
+    return { id: 'restore-new', verified: true };
+  };
+  const started = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+  await entered.promise;
+  await fixture.service.cancelJob(started.jobId);
+  release.resolve();
+  const result = await waitForPhase(fixture.operationStore, started.jobId, 'cancelled');
+  assert.equal(result.outcome.status, 'cancelled');
+  assert.equal(fixture.operationStore.progressHistory.get('job-one').some(event => /Scanning current server files|Rechecking server files|Checking snapshot source/.test(event.message)), false);
+  assert.equal(fixture.calls.some(([name]) => name === 'buildCandidate'), false);
+});
+
+test('snapshot reconciliation graph permits only real late fallback edges before reference recording', async () => {
+  // Catches silent record-reference loss after reconciliation or a general arbitrary-forward-jump escape hatch.
+  const reconciliation = { activity: 'publication-reconciliation', phase: 'publication', kind: 'start', processedBytes: 0, totalBytes: null };
+  for (const predecessor of [8, 9, 10, 11]) {
+    const fixture = mutationFixture('update');
+    fixture.service.mutationRuntime.createRestorePoint = async ({ onProgress }) => {
+      assert.throws(() => onProgress(reconciliation), error => error.code === 'INVALID_REQUEST');
+      for (let index = 0; index <= predecessor; index++) await onProgress(snapshotStart(index));
+      if (predecessor !== 11) assert.throws(() => onProgress(snapshotStart(12)), error => error.code === 'INVALID_REQUEST');
+      const receipt = onProgress(reconciliation);
+      assert.equal(onProgress(reconciliation), receipt);
+      await receipt;
+      if (predecessor < 11) assert.throws(() => onProgress(snapshotStart(11)), error => error.code === 'INVALID_REQUEST');
+      await onProgress(snapshotStart(12));
+      return { id: 'restore-new', verified: true };
+    };
+    const result = await runSnapshotFixture(fixture);
+    assert.equal(result.phase, 'completed');
+    const writes = fixture.operationStore.progressHistory.get('job-one').filter(event => event.phase === 'snapshotting');
+    assert.deepEqual(writes.slice(-3).map(event => event.message), [
+      'Reconciling and checking the published recovery snapshot', 'Recording the verified recovery snapshot', 'Verified recovery snapshot ready'
+    ]);
+    assert.equal(writes.length, predecessor + 5);
+    assert.equal(writes.every((event, index) => index === 0 || event.percent >= writes[index - 1].percent), true);
+  }
+});
+
+test('snapshot reconciliation writer failure rejects its active and queued reference receipts without ready', async () => {
+  // Catches a fallback-specific receipt escape that hides the retained store failure.
+  const fixture = mutationFixture('update');
+  const failure = new ModpackError('COMMIT_FAILED', 'reconciliation label store failure');
+  const update = fixture.operationStore.updateProgress.bind(fixture.operationStore);
+  fixture.operationStore.updateProgress = async (jobId, request) => {
+    if (request.progress.message === 'Reconciling and checking the published recovery snapshot') throw failure;
+    return update(jobId, request);
+  };
+  fixture.service.mutationRuntime.createRestorePoint = async ({ onProgress }) => {
+    for (let index = 0; index <= 8; index++) await onProgress(snapshotStart(index));
+    const active = onProgress({ activity: 'publication-reconciliation', phase: 'publication', kind: 'start', processedBytes: 0, totalBytes: null });
+    const reference = onProgress(snapshotStart(12));
+    const results = await Promise.allSettled([active, reference]);
+    assert.deepEqual(results.map(result => [result.status, result.reason === failure]), [['rejected', true], ['rejected', true]]);
+    return { id: 'restore-new', verified: true };
+  };
+  const result = await runSnapshotFixture(fixture);
+  assert.equal(result.phase, 'failed');
+  assert.equal(result.outcome.errorCode, 'COMMIT_FAILED');
+  assert.equal(fixture.operationStore.progressHistory.get('job-one').some(event => event.message === 'Verified recovery snapshot ready'), false);
+});
 
 test('new start-after-install selects one canonical boot instead of a candidate boot plus a live boot', async () => {
   const fixture = mutationFixture('install-new');

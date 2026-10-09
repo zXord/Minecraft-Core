@@ -1178,7 +1178,7 @@ test('existing candidate reports monotonic lifecycle progress around copy, recon
 
   await transaction.buildExistingCandidate(fixture.context);
 
-  assert.ok(progress.some(event => /^Copying server files \(\d+ of \d+ files, \d+ of \d+ bytes\)$/.test(event.message)));
+  assert.ok(progress.some(event => /^Copying server files \(\d+ of \d+ files, \d+ of \d+ B\)$/.test(event.message)));
   assert.ok(progress.some(event => event.message === 'Flushing copied server directories'));
   assert.ok(progress.some(event => event.message === 'Verifying the copied server files'));
   assert.deepEqual(progress.filter(event => event.percent !== 38 || event.message === 'Copying the live server into a protected candidate'), [
@@ -1276,10 +1276,10 @@ test('copy checkpoints publish first, latest ten-second samples, and completion 
 
   assert.deepEqual(progress.filter(event => event.message.startsWith('Copying server files ('))
     .map(({ measuredAt, message }) => ({ measuredAt, message })), [
-    { measuredAt: 0, message: 'Copying server files (0 of 6 files, 0 of 21 bytes)' },
-    { measuredAt: 10000, message: 'Copying server files (3 of 6 files, 6 of 21 bytes)' },
-    { measuredAt: 20000, message: 'Copying server files (5 of 6 files, 15 of 21 bytes)' },
-    { measuredAt: 20001, message: 'Copying server files (6 of 6 files, 21 of 21 bytes)' }
+    { measuredAt: 0, message: 'Copying server files (0 of 6 files, 0 of 21 B)' },
+    { measuredAt: 10000, message: 'Copying server files (3 of 6 files, 6 of 21 B)' },
+    { measuredAt: 20000, message: 'Copying server files (5 of 6 files, 15 of 21 B)' },
+    { measuredAt: 20001, message: 'Copying server files (6 of 6 files, 21 of 21 B)' }
   ]);
   assert.equal(sample, 7);
   assert.equal(publication.replacementCount(), 16);
@@ -1289,14 +1289,37 @@ test('copy checkpoints publish first, latest ten-second samples, and completion 
   assert.equal(fs.readFileSync(path.join(fixture.paths.candidatePath, 'f.txt'), 'utf8'), 'ffffff');
 });
 
+test('copy readable rounding never changes first, ten-second or final-file checkpoint admission', async t => {
+  // Catches formatted text driving copy admission or byte equality being interpreted as terminal success.
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await existingFixture(t);
+  setCopyCheckpointFiles(fixture, [Buffer.alloc(1), Buffer.alloc(1), Buffer.alloc(1), Buffer.alloc(1), Buffer.alloc(1), Buffer.alloc(2043)]);
+  const times = [0, 1, 9999, 10000, 10001, 20000, 20001];
+  let sample = 0;
+  let measuredAt;
+  fixture.context.copyProgressClock = () => (measuredAt = times[sample++]);
+  const progress = [];
+  fixture.context.onProgress = async event => { progress.push({ ...event, measuredAt }); };
+  await transaction.buildExistingCandidate(fixture.context);
+  assert.deepEqual(progress.filter(event => event.message.startsWith('Copying server files (')).map(event => [event.measuredAt, event.message]), [
+    [0, 'Copying server files (0 of 6 files, 0 of 2 KiB (approx.))'],
+    [10000, 'Copying server files (3 of 6 files, 0 of 2 KiB (approx.))'],
+    [20000, 'Copying server files (5 of 6 files, 0 of 2 KiB (approx.))'],
+    [20001, 'Copying server files (6 of 6 files, 2 of 2 KiB (approx.))']
+  ]);
+  assert.equal(sample, 7);
+  assert.deepEqual((await fixture.recoveryRegistry.load(fixture.context.jobId)).outcome.copy, { bytes: '2048', files: 6 });
+  assert.equal(progress.some(event => event.message === 'Live server copy verified'), true);
+});
+
 test('copy checkpoints retain quick and empty completion before immediate flush and verification milestones', async t => {
   const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
   for (const { name, contents, counters } of [
     { name: 'quick', contents: ['abc', 'defgh'], counters: [
-      'Copying server files (0 of 2 files, 0 of 8 bytes)',
-      'Copying server files (2 of 2 files, 8 of 8 bytes)'
+      'Copying server files (0 of 2 files, 0 of 8 B)',
+      'Copying server files (2 of 2 files, 8 of 8 B)'
     ] },
-    { name: 'empty', contents: [], counters: ['Copying server files (0 of 0 files, 0 of 0 bytes)'] }
+    { name: 'empty', contents: [], counters: ['Copying server files (0 of 0 files, 0 of 0 B)'] }
   ]) {
     await t.test(name, async subtest => {
       const fixture = await existingFixture(subtest);
@@ -1337,7 +1360,7 @@ test('copy checkpoints cancel during suppressed real-copy samples without waitin
 
   assert.equal(sample, 3);
   assert.deepEqual(progress.filter(event => event.message.startsWith('Copying server files ('))
-    .map(event => event.message), ['Copying server files (0 of 6 files, 0 of 21 bytes)']);
+    .map(event => event.message), ['Copying server files (0 of 6 files, 0 of 21 B)']);
   assert.equal(fs.existsSync(path.join(fixture.paths.candidatePath, 'b.txt')), true);
   assert.equal(fs.existsSync(path.join(fixture.paths.candidatePath, 'c.txt')), false);
   assert.equal(fixture.calls.includes('incoming:apply'), false);
@@ -1367,10 +1390,10 @@ test('copy checkpoints treat observer errors as failed attempts without replay o
   await transaction.buildExistingCandidate(fixture.context);
 
   assert.deepEqual(attemptedCounters, [
-    'Copying server files (0 of 6 files, 0 of 21 bytes)',
-    'Copying server files (3 of 6 files, 6 of 21 bytes)',
-    'Copying server files (5 of 6 files, 15 of 21 bytes)',
-    'Copying server files (6 of 6 files, 21 of 21 bytes)'
+    'Copying server files (0 of 6 files, 0 of 21 B)',
+    'Copying server files (3 of 6 files, 6 of 21 B)',
+    'Copying server files (5 of 6 files, 15 of 21 B)',
+    'Copying server files (6 of 6 files, 21 of 21 B)'
   ]);
   assert.equal((await fixture.recoveryRegistry.load(fixture.context.jobId)).phase, 'committing');
 });

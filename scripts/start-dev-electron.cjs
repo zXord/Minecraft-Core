@@ -1,3 +1,5 @@
+const { markStartupTrace, createStartupTrace } = require('../electron/utils/startup-trace.cjs');
+if (require.main === module) markStartupTrace('launcher:entry');
 const { once } = require('node:events');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
@@ -27,6 +29,7 @@ async function startDevElectron({
   spawnElectron,
   processLike = process
 } = {}) {
+  const markTrace = env === process.env ? markStartupTrace : createStartupTrace({ env });
   let stopping = false;
   let electron = null;
   let runtimeLease = null;
@@ -49,6 +52,7 @@ async function startDevElectron({
       if (!localAppData || !path.isAbsolute(localAppData)) {
         throw new TypeError('LOCALAPPDATA must be an absolute path for the Windows development runtime');
       }
+      markTrace('launcher:runtime-prepare:start');
       const prepared = await prepareDevRuntime({
         sourceExecutablePath,
         sourceDistributionPath: path.dirname(sourceExecutablePath),
@@ -57,8 +61,11 @@ async function startDevElectron({
         electronVersion,
         architecture
       });
+      markTrace('launcher:runtime-prepare:complete');
       if (stopping) return 0;
+      markTrace('launcher:runtime-lease:start');
       runtimeLease = await createDevRuntimeLease(prepared.cacheDirectory);
+      markTrace('launcher:runtime-lease:complete');
       if (stopping) return 0;
       electron = spawnProcess(prepared.executablePath, [projectRoot], {
         stdio: 'inherit',
@@ -74,6 +81,7 @@ async function startDevElectron({
             env
           });
     }
+    markTrace('launcher:spawn-returned');
     const [exitCode, signal] = await once(electron, 'exit');
     return exitCode ?? (signal ? 1 : 0);
   } finally {

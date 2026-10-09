@@ -1477,10 +1477,14 @@ test('management rollback planning reports ordered phases and one monotonic rest
     restoreTotalBytes: '3',
     restoreArchiveBytes: 3,
     restoreProgress: [
-      { phase: 'archive-hash', processedBytes: 1, totalBytes: 3 },
-      { phase: 'archive-hash', processedBytes: 3, totalBytes: 3 },
-      { phase: 'entry-verify', processedBytes: 1, totalBytes: 3 },
-      { phase: 'entry-verify', processedBytes: 3, totalBytes: 3 }
+      { phase: 'archive-hash', hashPass: 'initial', kind: 'start', processedBytes: 0, totalBytes: 3 },
+      { phase: 'archive-hash', hashPass: 'initial', kind: 'progress', processedBytes: 1, totalBytes: 3 },
+      { phase: 'archive-hash', hashPass: 'initial', kind: 'progress', processedBytes: 3, totalBytes: 3 },
+      { phase: 'entry-verify', kind: 'start', processedBytes: 0, totalBytes: 3 },
+      { phase: 'entry-verify', kind: 'progress', processedBytes: 1, totalBytes: 3 },
+      { phase: 'entry-verify', kind: 'progress', processedBytes: 3, totalBytes: 3 },
+      { phase: 'archive-hash', hashPass: 'final', kind: 'start', processedBytes: 0, totalBytes: 3 },
+      { phase: 'archive-hash', hashPass: 'final', kind: 'progress', processedBytes: 3, totalBytes: 3 }
     ]
   });
   const progress = [];
@@ -1499,6 +1503,8 @@ test('management rollback planning reports ordered phases and one monotonic rest
     'verifying-restore-point',
     'verifying-restore-point',
     'verifying-restore-point',
+    'verifying-restore-point',
+    'verifying-restore-point',
     'calculating-changes',
     'checking-capacity',
     'sealing-plan'
@@ -1506,7 +1512,7 @@ test('management rollback planning reports ordered phases and one monotonic rest
   assert.deepEqual(
     progress.filter(event => Number.isSafeInteger(event.processedBytes))
       .map(event => [event.processedBytes, event.totalBytes]),
-    [[1, 6], [3, 6], [4, 6], [6, 6]]
+    [[0, 6], [1, 6], [3, 6], [3, 6], [4, 6], [6, 6]]
   );
 });
 

@@ -1412,6 +1412,13 @@ class ProductionMutationRuntime {
       },
       ...operationOptions
     });
+    if (typeof onProgress === 'function') {
+      try {
+        await onProgress(Object.freeze({
+          activity: 'record-reference', phase: 'record-reference', kind: 'start', processedBytes: 0, totalBytes: null
+        }));
+      } catch { /* progress observers never decide reference publication */ }
+    }
     const recorded = await this.recoveryRegistry.transition(jobId, {
       expectedPhase: 'snapshotting',
       nextPhase: 'snapshotting',

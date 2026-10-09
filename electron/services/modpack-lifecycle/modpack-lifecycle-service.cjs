@@ -1,4 +1,5 @@
 const { strictJsonClone } = require('../../utils/durable-fs.cjs');
+const { formatProgressBytes } = require('../../utils/progress-bytes.cjs');
 const { ModpackError, FAILURE_CODES, deepFreeze } = require('../modpacks/errors.cjs');
 const {
   existingSwapCallsiteFromError,
@@ -415,131 +416,171 @@ function candidateProgress(value) {
   return deepFreeze({ phase, percent, message, currentItem: null });
 }
 
+const RESTORE_ACTIVITIES = [
+  ['prepare-scope', 'Scanning current server files for the recovery snapshot', 'scope'],
+  ['creation-scope', 'Rechecking server files before saving the recovery snapshot', 'scope'],
+  ['archive-source-check', 'Checking snapshot source files before archive creation', 'scope'],
+  ['archive-write', 'Saving the recovery snapshot', 'archive-write'],
+  ['part-initial-hash', 'Checking the saved snapshot archive', 'archive-hash', 'initial'],
+  ['part-entry-verify', 'Verifying saved snapshot files', 'entry-verify'],
+  ['part-final-hash', 'Rechecking the saved archive after file verification', 'archive-hash', 'final'],
+  ['source-recheck', 'Rechecking server files after saving the snapshot', 'scope'],
+  ['publication', 'Publishing and checking the recovery snapshot', 'publication'],
+  ['published-initial-hash', 'Checking the published snapshot archive', 'archive-hash', 'initial'],
+  ['published-entry-verify', 'Verifying published snapshot files', 'entry-verify'],
+  ['published-final-hash', 'Rechecking the published archive after file verification', 'archive-hash', 'final'],
+  ['record-reference', 'Recording the verified recovery snapshot', 'record-reference']
+];
+const RESTORE_RECONCILIATION = [
+  'publication-reconciliation', 'Reconciling and checking the published recovery snapshot', 'publication'
+];
+
 function restorePointCreationProgress(value) {
-  const allowedKeys = ['phase', 'processedBytes', 'totalBytes', 'entriesProcessed', 'entriesTotal'];
-  const phaseDescriptor = strictObject(value, allowedKeys, ['phase']).phase;
-  const phase = phaseDescriptor.value;
-  if (phase === 'complete') {
-    return deepFreeze({
-      phase: 'snapshotting', rank: 4, percent: 34,
-      message: 'Verified recovery snapshot ready', currentItem: null
-    });
+  const keys = ['phase', 'activity', 'kind', 'hashPass', 'processedBytes', 'totalBytes', 'entriesProcessed', 'entriesTotal'];
+  const descriptors = strictObject(value, keys, ['phase']);
+  const read = key => descriptors[key]?.value;
+  if (read('phase') === 'complete') {
+    if (Object.keys(descriptors).length !== 1) throw invalid();
+    return { rank: 14, kind: 'complete' };
   }
-
-  const descriptors = strictObject(value, allowedKeys, ['phase', 'processedBytes', 'totalBytes']);
-  const processedBytes = descriptors.processedBytes.value;
-  const totalBytes = descriptors.totalBytes.value;
-  if (!Number.isSafeInteger(processedBytes) || processedBytes < 0 ||
-      (totalBytes !== null && (!Number.isSafeInteger(totalBytes) || totalBytes < 0 || processedBytes > totalBytes))) {
-    throw invalid();
-  }
-  const hasEntriesProcessed = descriptors.entriesProcessed !== undefined;
-  const hasEntriesTotal = descriptors.entriesTotal !== undefined;
-  if (hasEntriesProcessed !== hasEntriesTotal || (hasEntriesProcessed && phase !== 'archive-write')) throw invalid();
-  const entriesProcessed = hasEntriesProcessed ? descriptors.entriesProcessed.value : 0;
-  const entriesTotal = hasEntriesTotal ? descriptors.entriesTotal.value : 0;
-  if (!Number.isSafeInteger(entriesProcessed) || entriesProcessed < 0 ||
-      !Number.isSafeInteger(entriesTotal) || entriesTotal < 0 || entriesProcessed > entriesTotal) throw invalid();
-
-  const ratioStep = (steps, processed = processedBytes, total = totalBytes) =>
-    total > 0 ? Math.floor((Math.min(processed, total) * steps) / total) : 0;
-  const details = [];
-  if (entriesTotal > 0) details.push(`${entriesProcessed} of ${entriesTotal} files`);
-  if (totalBytes > 0) details.push(`${processedBytes} of ${totalBytes} bytes`);
-  const withDetails = label => details.length > 0 ? `${label} (${details.join(', ')})` : label;
-
-  if (phase === 'scope' && totalBytes === null && !hasEntriesProcessed) {
-    return deepFreeze({
-      phase: 'snapshotting', rank: 0, percent: 16,
-      message: 'Scanning current server files for the recovery snapshot', currentItem: null
-    });
-  }
-  if (totalBytes === null) throw invalid();
+  const rank = read('activity') === RESTORE_RECONCILIATION[0] ? 13 :
+    RESTORE_ACTIVITIES.findIndex(([activity]) => activity === read('activity'));
+  if (rank < 0) throw invalid();
+  const [, , phase, hashPass] = rank === 13 ? RESTORE_RECONCILIATION : RESTORE_ACTIVITIES[rank];
+  const kind = read('kind');
+  const processedBytes = read('processedBytes');
+  const totalBytes = read('totalBytes');
+  if (read('phase') !== phase || read('hashPass') !== hashPass ||
+      (hashPass === undefined && descriptors.hashPass !== undefined) ||
+      !['start', 'progress'].includes(kind) || !Number.isSafeInteger(processedBytes) || processedBytes < 0) throw invalid();
+  const measured = ['archive-write', 'archive-hash', 'entry-verify'].includes(phase);
+  if (measured ? !Number.isSafeInteger(totalBytes) || totalBytes < processedBytes :
+      totalBytes !== null || processedBytes !== 0 || kind !== 'start') throw invalid();
+  const entriesProcessed = read('entriesProcessed');
+  const entriesTotal = read('entriesTotal');
   if (phase === 'archive-write') {
-    const measured = totalBytes > 0 ? ratioStep(7) : ratioStep(7, entriesProcessed, entriesTotal);
-    return deepFreeze({
-      phase: 'snapshotting', rank: 1, percent: 17 + Math.min(7, measured),
-      message: withDetails('Saving the recovery snapshot'), currentItem: null
-    });
-  }
-  if (phase === 'archive-hash' && !hasEntriesProcessed) {
-    return deepFreeze({
-      phase: 'snapshotting', rank: 2, percent: 25 + Math.min(3, ratioStep(3)),
-      message: withDetails('Checking the recovery snapshot archive'), currentItem: null
-    });
-  }
-  if (phase === 'entry-verify' && !hasEntriesProcessed) {
-    return deepFreeze({
-      phase: 'snapshotting', rank: 3, percent: 29 + Math.min(4, ratioStep(4)),
-      message: withDetails('Verifying recovery snapshot files'), currentItem: null
-    });
-  }
-  throw invalid();
+    if (!Number.isSafeInteger(entriesProcessed) || entriesProcessed < 0 ||
+        !Number.isSafeInteger(entriesTotal) || entriesTotal < entriesProcessed) throw invalid();
+  } else if (descriptors.entriesProcessed || descriptors.entriesTotal) throw invalid();
+  if (kind === 'start' && (processedBytes !== 0 || (entriesProcessed ?? 0) !== 0)) throw invalid();
+  return { rank, kind, processedBytes, totalBytes, entriesProcessed, entriesTotal };
 }
 
-function createRestorePointCreationProgressQueue(onProgress) {
+function snapshotMessage(sample, lastPercent) {
+  if (sample.kind === 'complete') return {
+    phase: 'snapshotting', percent: 34, message: 'Verified recovery snapshot ready', currentItem: null
+  };
+  const details = [];
+  if (sample.entriesTotal > 0) details.push(`${sample.entriesProcessed} of ${sample.entriesTotal} files`);
+  if (sample.totalBytes > 0) {
+    const bytes = formatProgressBytes(sample.processedBytes, sample.totalBytes);
+    if (bytes !== null) details.push(bytes);
+  }
+  const ratio = (steps, processed = sample.processedBytes, total = sample.totalBytes) =>
+    total > 0 ? Math.floor(processed * steps / total) : 0;
+  let percent = 16;
+  if (sample.rank === 3) percent = 17 + Math.min(7, sample.totalBytes > 0 ? ratio(7) : ratio(7, sample.entriesProcessed, sample.entriesTotal));
+  else if (sample.rank === 4) percent = 25 + Math.min(3, ratio(3));
+  else if (sample.rank === 5) percent = 29 + Math.min(4, ratio(4));
+  const label = (sample.rank === 13 ? RESTORE_RECONCILIATION : RESTORE_ACTIVITIES[sample.rank])[1];
+  return {
+    phase: 'snapshotting', percent: Math.max(lastPercent, percent),
+    message: details.length ? `${label} (${details.join(', ')})` : label, currentItem: null
+  };
+}
+
+function createRestorePointCreationProgressQueue(onProgress, clock) {
   let active = false;
-  let activeRank = -1;
-  let lastAcceptedRank = -1;
-  let lastAcceptedPercent = -1;
-  let lastProgressKey = null;
+  let lastRank = -1;
+  let lastPercent = 16;
   let failure = null;
   const pending = [];
   const idleWaiters = [];
-  const workHighWatermarks = new Map();
-
-  const settleIdleWaiters = () => {
-    for (const resolve of idleWaiters.splice(0)) resolve();
+  const activities = new Map();
+  const fail = error => {
+    failure = error;
+    pending.splice(0);
+    for (const state of activities.values()) state.reject(error);
   };
   const pump = async () => {
     if (active || failure !== null) return;
     active = true;
     try {
-      while (pending.length > 0 && failure === null) {
-        const next = pending.shift();
-        activeRank = next.rank;
+      while (pending.length && failure === null) {
+        const sample = pending.shift();
+        const state = activities.get(sample.rank);
         try {
-          await onProgress(next);
-        } catch (error) {
-          failure = error;
-          pending.splice(0);
-        }
+          await onProgress(() => {
+            if (sample.kind === 'progress') {
+              const now = clock();
+              if (now - state.epoch < 10_000) return null;
+              state.epoch = now;
+            }
+            const progress = snapshotMessage(sample, lastPercent);
+            lastPercent = progress.percent;
+            return progress;
+          });
+          if (sample.kind === 'start') {
+            state.epoch = clock();
+            state.resolve();
+          }
+        } catch (error) { fail(error); }
       }
     } finally {
-      activeRank = -1;
       active = false;
-      settleIdleWaiters();
+      for (const resolve of idleWaiters.splice(0)) resolve();
     }
   };
-
   return {
     push(value) {
-      if (typeof onProgress !== 'function' || failure !== null) return;
-      const progress = restorePointCreationProgress(value);
-      if (progress.rank < lastAcceptedRank || progress.rank < activeRank ||
-          progress.percent < lastAcceptedPercent) return;
-      if (progress.rank < 4) {
-        const workKey = `${value.phase}:${String(value.totalBytes)}:${String(value.entriesTotal ?? '')}`;
-        const prior = workHighWatermarks.get(workKey);
-        const processedBytes = value.processedBytes;
-        const entriesProcessed = value.entriesProcessed ?? 0;
-        if (prior && (processedBytes < prior.processedBytes || entriesProcessed < prior.entriesProcessed)) return;
-        workHighWatermarks.set(workKey, { processedBytes, entriesProcessed });
+      const sample = restorePointCreationProgress(value);
+      if (failure !== null) {
+        if (sample.kind !== 'start') return;
+        const receipt = Promise.reject(failure);
+        void receipt.catch(() => {});
+        return receipt;
       }
-      lastAcceptedRank = Math.max(lastAcceptedRank, progress.rank);
-      lastAcceptedPercent = Math.max(lastAcceptedPercent, progress.percent);
-      const progressKey = `${progress.rank}:${progress.percent}:${progress.message}`;
-      if (progressKey === lastProgressKey) return;
-      lastProgressKey = progressKey;
-      const samePhase = pending.findIndex(item => item.rank === progress.rank);
-      if (samePhase === -1) pending.push(progress);
-      else pending[samePhase] = progress;
+      if (sample.kind === 'complete') {
+        pending.push(sample);
+      } else if (sample.kind === 'start') {
+        const prior = activities.get(sample.rank);
+        if (prior) {
+          if (prior.totalBytes !== sample.totalBytes || prior.entriesTotal !== sample.entriesTotal) throw invalid();
+          return prior.receipt;
+        }
+        const allowed = lastRank === -1 ? [0, 1].includes(sample.rank) :
+          sample.rank === 13 ? [8, 9, 10, 11].includes(lastRank) :
+          lastRank === 13 ? sample.rank === 12 : sample.rank === lastRank + 1;
+        if (!allowed) throw invalid();
+        lastRank = sample.rank;
+        let resolve;
+        let reject;
+        const receipt = new Promise((yes, no) => { resolve = yes; reject = no; });
+        void receipt.catch(() => {});
+        activities.set(sample.rank, { ...sample, receipt, resolve, reject, epoch: null });
+        for (let index = pending.length - 1; index >= 0; index--) {
+          if (pending[index].kind === 'progress') pending.splice(index, 1);
+        }
+        pending.push(sample);
+        void pump();
+        return receipt;
+      } else {
+        if (sample.rank < lastRank) return;
+        const state = activities.get(sample.rank);
+        if (!state || sample.rank !== lastRank || state.totalBytes !== sample.totalBytes ||
+            state.entriesTotal !== sample.entriesTotal) throw invalid();
+        if (sample.processedBytes < state.processedBytes ||
+            (sample.entriesProcessed ?? 0) < (state.entriesProcessed ?? 0)) return;
+        state.processedBytes = sample.processedBytes;
+        state.entriesProcessed = sample.entriesProcessed;
+        const index = pending.findIndex(item => item.rank === sample.rank && item.kind === 'progress');
+        if (index < 0) pending.push(sample);
+        else pending[index] = sample;
+      }
       void pump();
     },
     async drain() {
-      while (active || pending.length > 0) {
-        await new Promise(resolve => idleWaiters.push(resolve));
-      }
+      while (active || pending.length) await new Promise(resolve => idleWaiters.push(resolve));
       if (failure !== null) throw failure;
     }
   };
@@ -739,7 +780,8 @@ class ModpackLifecycleService {
     stateEventSink = null,
     outcomeActionIssuer = null,
     workspaceRegistry = inspectionLoader?.workspaceRegistry ?? planRegistry?.workspaceRegistry ?? null,
-    yieldControl = defaultYieldControl
+    yieldControl = defaultYieldControl,
+    snapshotProgressClock = () => performance.now()
   } = {}) {
     if (!sourceResolver || typeof sourceResolver.resolveArtifactSetPlan !== 'function' ||
         !artifactDownloader || typeof artifactDownloader.downloadSet !== 'function' ||
@@ -752,7 +794,7 @@ class ModpackLifecycleService {
         (stateEventSink !== null && typeof stateEventSink !== 'function') ||
         (outcomeActionIssuer !== null && (!outcomeActionIssuer || typeof outcomeActionIssuer.issue !== 'function')) ||
         (workspaceRegistry !== null && (!workspaceRegistry || typeof workspaceRegistry.releaseOwner !== 'function')) ||
-        typeof yieldControl !== 'function') {
+        typeof yieldControl !== 'function' || typeof snapshotProgressClock !== 'function') {
       throw invalid();
     }
     this.sourceResolver = sourceResolver;
@@ -770,6 +812,7 @@ class ModpackLifecycleService {
     this.outcomeActionIssuer = outcomeActionIssuer;
     this.workspaceRegistry = workspaceRegistry;
     this.yieldControl = yieldControl;
+    this.snapshotProgressClock = snapshotProgressClock;
     this.inspections = new Map();
     this.activeOperations = new Map();
     this.releasedClaims = new Set();
@@ -1441,7 +1484,7 @@ class ModpackLifecycleService {
     if (existing) {
       await this.#transition(claimed.jobId, 'snapshotting', 15, 'Creating a verified restore point', signal);
       const snapshotProgress = createRestorePointCreationProgressQueue(
-        progress => this.#updateSnapshotProgress(claimed.jobId, progress, signal)
+        progress => this.#updateSnapshotProgress(claimed.jobId, progress, signal), this.snapshotProgressClock
       );
       // A production attempt may durably create or advance its recovery record
       // before createRestorePoint returns (including immediately before it
@@ -1983,18 +2026,19 @@ class ModpackLifecycleService {
     throw stale();
   }
 
-  async #updateSnapshotProgress(jobId, progress, signal) {
-    if (progress?.phase !== 'snapshotting' || !Number.isSafeInteger(progress.percent) ||
-        progress.percent < 16 || progress.percent > 34 || typeof progress.message !== 'string' ||
-        progress.message.length < 1 || progress.message.length > 512 || progress.currentItem !== null) throw invalid();
+  async #updateSnapshotProgress(jobId, admitProgress, signal) {
     await this.#throwIfCancelled(jobId, signal);
     const current = await this.operationStore.get(jobId);
     if (!current) throw stale();
     if (current.phase === 'cancelling' || current.cancellationRequested) throw cancelled();
-    if (current.phase !== 'snapshotting' || (current.progress !== null && progress.percent < current.progress.percent)) {
-      throw stale();
-    }
+    if (current.phase !== 'snapshotting') throw stale();
     if (typeof this.operationStore.updateProgress !== 'function') return current;
+    const progress = admitProgress();
+    if (progress === null) return current;
+    if (progress?.phase !== 'snapshotting' || !Number.isSafeInteger(progress.percent) ||
+        progress.percent < 16 || progress.percent > 34 || typeof progress.message !== 'string' ||
+        progress.message.length < 1 || progress.message.length > 512 || progress.currentItem !== null) throw invalid();
+    if (current.progress !== null && progress.percent < current.progress.percent) throw stale();
     return this.operationStore.updateProgress(jobId, {
       expectedPhase: 'snapshotting',
       progress: { percent: progress.percent, message: progress.message, currentItem: null }

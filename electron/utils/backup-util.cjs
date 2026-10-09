@@ -44,6 +44,12 @@ function reportProgress(onProgress, value) {
   } catch { /* progress observers never decide archive correctness */ }
 }
 
+async function reportProgressBoundary(onProgress, value) {
+  if (typeof onProgress !== 'function') return;
+  try { await onProgress(Object.freeze(strictJsonClone(value, { maxDepth: 8, maxCollection: 128, maxStringBytes: 4096 }))); }
+  catch { /* progress observers never decide archive correctness */ }
+}
+
 function normalizeStreamIdleTimeoutMs(value) {
   const timeoutMs = value === undefined ? DEFAULT_STREAM_IDLE_TIMEOUT_MS : value;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_STREAM_IDLE_TIMEOUT_MS) {
@@ -416,7 +422,7 @@ function openZipStreaming(descriptor, yauzlApi) {
   });
 }
 
-async function hashPinnedZip(handle, expectedSize, signal, onProgress) {
+async function hashPinnedZip(handle, expectedSize, signal, onProgress, hashPass) {
   const hash = crypto.createHash('sha256');
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   let bytes = 0;
@@ -430,7 +436,7 @@ async function hashPinnedZip(handle, expectedSize, signal, onProgress) {
       if (!Number.isSafeInteger(bytes) || BigInt(bytes) > expectedSize) throw backupFailure();
       hash.update(buffer.subarray(0, count));
       reportProgress(onProgress, {
-        phase: 'archive-hash', processedBytes: bytes, totalBytes: Number(expectedSize)
+        phase: 'archive-hash', hashPass, kind: 'progress', processedBytes: bytes, totalBytes: Number(expectedSize)
       });
     }
     throwIfCancelled(signal);
@@ -469,9 +475,15 @@ async function verifyZipScopeStreaming(zipPath, expectedScope, options = {}) {
         typeof handle.read !== 'function' || typeof handle.close !== 'function') throw backupFailure();
     const pinnedBefore = await handle.stat({ bigint: true });
     assertStableFileStat(before, pinnedBefore, before, zipPath, fsApi);
-    const initialDigest = await hashPinnedZip(handle, pinnedBefore.size, signal, options.onProgress);
+    await reportProgressBoundary(options.onProgress, {
+      phase: 'archive-hash', hashPass: 'initial', kind: 'start', processedBytes: 0, totalBytes: Number(pinnedBefore.size)
+    });
+    const initialDigest = await hashPinnedZip(handle, pinnedBefore.size, signal, options.onProgress, 'initial');
     const archiveSha256 = initialDigest.sha256;
     const archiveBytes = initialDigest.size;
+    await reportProgressBoundary(options.onProgress, {
+      phase: 'entry-verify', kind: 'start', processedBytes: 0, totalBytes: expected.totalBytes
+    });
     const zip = await openZipStreaming(handle.fd, yauzlApi);
     const declared = new Map(expected.entries.map(entry => [entry.path, entry]));
     const observed = new Set();
@@ -537,7 +549,7 @@ async function verifyZipScopeStreaming(zipPath, expectedScope, options = {}) {
                 hash.update(chunk);
                 options.onChunk?.(chunk);
                 reportProgress(options.onProgress, {
-                  phase: 'entry-verify', processedBytes: totalBytes + measured, totalBytes: expected.totalBytes
+                  phase: 'entry-verify', kind: 'progress', processedBytes: totalBytes + measured, totalBytes: expected.totalBytes
                 });
               } catch (streamError) {
                 try { stream.destroy(streamError); } catch { /* fail below retains the primary error */ }
@@ -583,7 +595,10 @@ async function verifyZipScopeStreaming(zipPath, expectedScope, options = {}) {
       fsApi.lstatSync(zipPath, { bigint: true }), zipPath, fsApi);
     // Entry hashes protect decompressed content; a final raw hash also binds
     // archive headers/comments to the exact digest returned to restore callers.
-    const finalDigest = await hashPinnedZip(handle, pinnedBefore.size, signal, options.onProgress);
+    await reportProgressBoundary(options.onProgress, {
+      phase: 'archive-hash', hashPass: 'final', kind: 'start', processedBytes: 0, totalBytes: Number(pinnedBefore.size)
+    });
+    const finalDigest = await hashPinnedZip(handle, pinnedBefore.size, signal, options.onProgress, 'final');
     if (finalDigest.sha256 !== archiveSha256) throw backupFailure();
     const pinnedAfter = await handle.stat({ bigint: true });
     const after = fsApi.lstatSync(zipPath, { bigint: true });
@@ -641,6 +656,9 @@ async function createVerifiedZip({
     if (!parentStat.isDirectory() || parentStat.isSymbolicLink() ||
         !sameLocalPath(fsApi.realpathSync.native(parent), parent)) throw backupFailure();
     const expected = normalizeExpectedScope(expectedScope);
+    await reportProgressBoundary(onProgress, {
+      activity: 'archive-source-check', phase: 'scope', kind: 'start', processedBytes: 0, totalBytes: null
+    });
     const current = await enumerateArchiveScopeInternalCooperatively(items, fsApi, defaultYieldControl, signal);
     if (JSON.stringify(current.publicScope) !== JSON.stringify(expected)) throw backupFailure();
     throwIfCancelled(signal);
@@ -664,6 +682,10 @@ async function createVerifiedZip({
         linked.dev !== created.dev || linked.ino !== created.ino || linked.birthtimeNs !== created.birthtimeNs) {
       throw backupFailure();
     }
+    await reportProgressBoundary(onProgress, {
+      activity: 'archive-write', phase: 'archive-write', kind: 'start', processedBytes: 0,
+      totalBytes: expected.totalBytes, entriesProcessed: 0, entriesTotal: expected.entries.length
+    });
     const output = fsApi.createWriteStream(partPath, { fd: handle.fd, autoClose: false });
     const archive = archiveFactory('zip', { zlib: { level: 1 } });
     await new Promise((resolve, reject) => {
@@ -682,6 +704,7 @@ async function createVerifiedZip({
       archive.on('progress', progress => {
         reportProgress(onProgress, {
           phase: 'archive-write',
+          kind: 'progress', activity: 'archive-write',
           processedBytes: progress?.fs?.processedBytes ?? 0,
           totalBytes: expected.totalBytes,
           entriesProcessed: progress?.entries?.processed ?? 0,
@@ -721,7 +744,12 @@ async function createVerifiedZip({
     throwIfCancelled(signal);
     const archiveEvidence = await zipStreamVerifier(partPath, expected, {
       signal,
-      onProgress: progress => reportProgress(onProgress, progress),
+      onProgress: progress => {
+        try {
+          const event = strictJsonClone(progress, { maxDepth: 8, maxCollection: 128, maxStringBytes: 4096 });
+          return event.kind === 'start' ? reportProgressBoundary(onProgress, event) : reportProgress(onProgress, event);
+        } catch { /* malformed observer samples do not decide archive correctness */ }
+      },
       fsApi,
       asyncFsApi
     });

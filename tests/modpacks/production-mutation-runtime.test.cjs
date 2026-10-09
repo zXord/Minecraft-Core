@@ -1065,10 +1065,32 @@ test('unmanaged existing revalidation pins the reviewed directory and creates a 
     lease
   });
   const controller = new AbortController();
-  const onProgress = () => {};
-  const restorePoint = await runtime.createRestorePoint({
+  let releaseReference;
+  let referenceEntered;
+  const referenceBarrier = new Promise(resolve => { releaseReference = resolve; });
+  const referenceObserved = new Promise(resolve => { referenceEntered = resolve; });
+  const referenceEvents = [];
+  const onProgress = async event => {
+    referenceEvents.push({ event, reference: structuredClone(recoveryRegistry.record.restorePoint) });
+    if (event.activity !== 'record-reference') return;
+    referenceEntered();
+    await referenceBarrier;
+  };
+  let returned = false;
+  const creating = runtime.createRestorePoint({
     jobId: 'job-adoption', plan, resolved, signal: controller.signal, onProgress
-  });
+  }).then(value => { returned = true; return value; });
+  await referenceObserved;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(returned, false);
+  assert.equal(recoveryRegistry.record.restorePoint, null);
+  releaseReference();
+  const restorePoint = await creating;
+  assert.deepEqual(referenceEvents, [
+    { event: { activity: 'prepare-scope', phase: 'scope', kind: 'start', processedBytes: 0, totalBytes: null }, reference: null },
+    { event: { activity: 'record-reference', phase: 'record-reference', kind: 'start', processedBytes: 0, totalBytes: null }, reference: null }
+  ]);
+  assert.equal(recoveryRegistry.record.restorePoint.id, 'restore-unmanaged');
 
   assert.equal(recoveryRegistry.record.target.kind, 'existing');
   assert.equal(recoveryRegistry.record.outcome.runtime.source, null);
@@ -1099,14 +1121,20 @@ test('unmanaged existing revalidation pins the reviewed directory and creates a 
     resolved,
     lease
   });
-  const inactiveRestore = await runtime.createRestorePoint({
-    jobId: 'job-adoption-inactive', plan, resolved
-  });
+  const delayedCancel = new AbortController();
+  await assert.rejects(runtime.createRestorePoint({
+    jobId: 'job-adoption-inactive', plan, resolved, signal: delayedCancel.signal,
+    async onProgress(event) {
+      if (event.activity !== 'record-reference') return;
+      delayedCancel.abort();
+      throw new Error('observational rejection');
+    }
+  }), { code: 'CANCELLED' });
 
   assert.deepEqual(recoveryRegistry.record.outcome.runtime.source, runtimeTuple);
   assert.equal(restoreRequests.length, 2);
   assert.deepEqual(restoreRequests[1].sourceRuntime, runtimeTuple);
-  assert.deepEqual(inactiveRestore.sourceRuntime, runtimeTuple);
+  assert.equal(recoveryRegistry.record.restorePoint.id, 'restore-unmanaged');
   }, { operationId: 'job-adoption-inactive' });
 });
 

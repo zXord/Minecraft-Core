@@ -2,6 +2,130 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const os = require('node:os');
 const path = require('node:path');
+const Module = require('node:module');
+
+async function withEarlyTrace(importEnv, events, run, { brokenSink = false } = {}) {
+  const modulePath = path.resolve(__dirname, '../electron/startup-entry.cjs');
+  const originalLoad = Module._load;
+  Module._load = function(request, parent, isMain) {
+    if (request === './utils/startup-trace.cjs') {
+      const { createStartupTrace } = originalLoad(request, parent, isMain);
+      const options = {
+        now: () => 100, utcNow: () => '2026-10-09T00:00:00.000Z', pid: 123,
+        sink(line) {
+          if (brokenSink) throw new Error('private sink failure');
+          events.push(JSON.parse(line.slice('[Minecraft Core startup trace] '.length)).marker);
+        }
+      };
+      return {
+        markStartupTrace: createStartupTrace({ ...options, env: importEnv }),
+        createStartupTrace: ({ env }) => createStartupTrace({ ...options, env })
+      };
+    }
+    return originalLoad(request, parent, isMain);
+  };
+  delete require.cache[modulePath];
+  try { return await run(require(modulePath)); }
+  finally { delete require.cache[modulePath]; Module._load = originalLoad; }
+}
+
+test('startup trace brackets held readiness document and main load with supplied opt-in despite disabled import', async () => {
+  const events = [];
+  await withEarlyTrace({}, events, async entry => {
+    let finishReady, finishDocument, finishMain;
+    const ready = new Promise(resolve => { finishReady = resolve; });
+    const document = new Promise(resolve => { finishDocument = resolve; });
+    const main = new Promise(resolve => { finishMain = resolve; });
+    const window = { isDestroyed: () => false };
+    const startup = entry.startEarlyStartup({
+      app: { whenReady() { events.push('ready'); return ready; } },
+      env: { MINECRAFT_CORE_STARTUP_TRACE: '1' },
+      resolveIconPath() { events.push('resolve'); return null; },
+      prepareIconPath() { events.push('prepare'); return null; },
+      createWindow() { events.push('create'); return window; },
+      waitForWindowDocument(value) { assert.equal(value, window); events.push('document'); return document; },
+      loadMain() { events.push('main'); return main; }
+    });
+    assert.deepEqual(events, ['early:when-ready:start', 'ready']);
+    finishReady();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(events, [
+      'early:when-ready:start', 'ready', 'early:when-ready:complete',
+      'early:icon:start', 'resolve', 'prepare', 'early:icon:complete',
+      'early:shortcut-attempt:start', 'early:shortcut-attempt:complete',
+      'early:window:create:start', 'create', 'early:window:create:complete', 'early:document:start', 'document'
+    ]);
+    finishDocument();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(events.slice(-3), ['early:document:complete', 'early:main-load:start', 'main']);
+    finishMain();
+    assert.equal(await startup, window);
+    assert.equal(events.at(-1), 'early:main-load:complete');
+    assert.equal(entry.claimEarlyStartupWindow(), window);
+  });
+});
+
+test('startup trace early module entry is import-owned but test-mode body uses supplied env and skips window boundaries', async () => {
+  const events = [];
+  await withEarlyTrace({ MINECRAFT_CORE_STARTUP_TRACE: '1' }, events, async entry => {
+    assert.deepEqual(events, ['early:entry', 'early:imports:complete']);
+    events.length = 0;
+    for (const enabled of [false, true]) {
+      const result = await entry.startEarlyStartup({
+        app: { whenReady() { events.push('ready'); return Promise.resolve(); } },
+        env: { NODE_ENV: 'test', MINECRAFT_CORE_TEST_MODE: '1', ...(enabled ? { MINECRAFT_CORE_STARTUP_TRACE: '1' } : {}) },
+        createWindow() { assert.fail('test mode must bypass startup window'); },
+        loadMain() { events.push('main'); }
+      });
+      assert.equal(result, null);
+      assert.deepEqual(events, enabled ? [
+        'early:when-ready:start', 'ready', 'early:when-ready:complete', 'early:main-load:start', 'main', 'early:main-load:complete'
+      ] : ['ready', 'main']);
+      events.length = 0;
+    }
+  });
+});
+
+test('startup trace early failures retain readiness and import error identity and cleanup even with broken diagnostics', async () => {
+  for (const failureAt of ['ready', 'main']) {
+    for (const brokenSink of [false, true]) {
+      const events = [];
+      const originalError = new Error('PRIVATE_ORIGINAL');
+      await withEarlyTrace({}, events, async entry => {
+        const window = { isDestroyed: () => false, close() { events.push('close'); } };
+        await assert.rejects(entry.startEarlyStartup({
+          app: { whenReady() { if (failureAt === 'ready') return Promise.reject(originalError); return Promise.resolve(); }, quit() { events.push('quit'); } },
+          env: { MINECRAFT_CORE_STARTUP_TRACE: '1' },
+          resolveIconPath: () => null, prepareIconPath: () => null,
+          createWindow: () => window, waitForWindowDocument: async () => {},
+          loadMain() { throw originalError; }
+        }), actual => actual === originalError);
+        assert.deepEqual(events.filter(value => ['close', 'quit'].includes(value)), failureAt === 'ready' ? ['quit'] : ['close', 'quit']);
+        assert.equal(events.includes('early:main-load:complete'), false);
+        assert.equal(events.includes('early:failed'), !brokenSink);
+        assert.equal(entry.claimEarlyStartupWindow(), null);
+      }, { brokenSink });
+    }
+  }
+});
+
+test('startup trace reused early window has document and main boundaries but no creation markers', async () => {
+  const events = [];
+  await withEarlyTrace({}, events, async entry => {
+    const window = { isDestroyed: () => false };
+    entry.publishEarlyStartupWindow(window);
+    try {
+      assert.equal(await entry.startEarlyStartup({
+        app: { whenReady: async () => {} }, env: { MINECRAFT_CORE_STARTUP_TRACE: '1' },
+        resolveIconPath: () => null, prepareIconPath: () => null,
+        createWindow() { assert.fail('live existing window must be reused'); },
+        waitForWindowDocument: async () => {}, loadMain: () => {}
+      }), window);
+      assert.equal(events.some(value => value.startsWith('early:window:create:')), false);
+      assert.deepEqual(events.slice(-4), ['early:document:start', 'early:document:complete', 'early:main-load:start', 'early:main-load:complete']);
+    } finally { assert.equal(entry.claimEarlyStartupWindow(), window); }
+  });
+});
 
 function loadStartupEntry() {
   try {
