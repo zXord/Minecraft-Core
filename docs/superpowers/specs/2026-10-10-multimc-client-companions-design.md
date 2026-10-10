@@ -1,0 +1,49 @@
+# Explicit MultiMC ZIP client companions
+
+## Intent and evidence
+
+The user requested a working matching client workflow for GitHub modpacks, including the exact TerraFirmaGreg0.13.4 server they have been testing. Existing real instances remain excluded. This extends the existing companion-review/install workflow; it does not turn a client ZIP into a server pack or silently repair an MRPACK.
+
+The native0.13.4 client preview failed before installation. Its final required resourcepack's public URL currently returns404. Read-only HTTP206 diagnostics found exactly matching size/SHA1/SHA512 bytes in the same release's official MultiMC ZIP, asset477754821. The whole ZIP was not downloaded/verified by that probe and no bytes were saved into app state. The same bounded diagnostic found standard formatVersion1 metadata for Minecraft1.20.1, Forge47.4.13, and dependency-only LWJGL3.3.1; content directories are config/defaultconfigs/kubejs/mods/resourcepacks/shaderpacks/tacz. The probe is evidence of feasibility, not native acceptance.
+
+[MultiMC's export documentation](https://github.com/MultiMC/Launcher/wiki/Export-Instance) describes a ZIP containing game content under `.minecraft`, launcher metadata in `instance.cfg` and `mmc-pack.json`, and separate custom runtime folders. [Its patch documentation](https://github.com/MultiMC/Launcher/wiki/JSON-Patches) describes additional launcher/runtime behavior that this importer must not execute or silently emulate.
+
+## Decision and alternatives
+
+Add explicit same-release selection of supported MultiMC client ZIPs alongside MRPACKs. Use the complete verified uploaded asset, extract it with the existing guarded archive service, review its exact runtime and bundled content, and install through the existing client ownership/transaction/runtime flow.
+
+A one-file cache injection would only hide this particular failed test and is not a product workflow. A generic missing-file mirror/fallback system would require new source authority and UI; it is not needed for this pack because the publisher already provides a complete client export. No automatic switch of an existing MRPACK pairing is allowed: the server owner explicitly inspects and accepts the ZIP, then the client reviews and installs that new exact companion.
+
+## Supported format and boundaries
+
+- GitHub companions may select one `.mrpack` or `.zip` asset from the exact installed repository/release. Discovery extension is only a hint; inspected bytes decide support. Modrinth remains MRPACK-only. Local companions, client RARs, arbitrary ZIP layouts, and automatic missing-file recovery are outside this change.
+- A ZIP must contain one coherent MultiMC export at its archive root: regular `mmc-pack.json`, regular `instance.cfg`, and `.minecraft` content. Wrapped/nested/ambiguous roots are refused initially. An archive containing both competing MRPACK and MultiMC manifests is refused.
+- This is a content-only export: refuse conventional root-level pack-manager download manifests (including CurseForge `manifest.json` and competing Modrinth metadata), rather than interpreting them or claiming absent payload is bundled. An entry inventory alone cannot prove the author's pack is semantically complete; real launch/join remains required acceptance.
+- Parse bounded UTF-8 `mmc-pack.json`, maximum256KiB, with formatVersion exactly1 and bounded unique component IDs. Require one exact `net.minecraft` version; allow at most one supported loader (`net.minecraftforge` or `net.fabricmc.fabric-loader`), otherwise vanilla. Use the existing Java-version resolver and Windows/x64 runtime normalizer. Mutable aliases, unknown/custom runtime components, duplicate or conflicting loaders, nonstandard patches/libraries/jarmods, and unsupported loaders refuse explicitly.
+- A dependency-only `org.lwjgl3` component may be recognized, with its exact version retained as a private runtime constraint. Validate that version against the app-installed effective client library profile before sealing publication; do not install launcher-supplied native libraries or silently override the declared version. Absence of this component adds no extra constraint. This is a local check after existing runtime preparation, not another network lookup or runtime metadata source.
+- `instance.cfg` is a format marker only. Do not apply its commands, Java path, memory flags, credentials, or launcher settings. Use a locally generated generic export label; the paired server release remains the authoritative displayed pack version. Review clearly states that Minecraft Core prepares the declared Minecraft/loader runtime and does not import launcher commands/settings.
+- Copy only regular files and directories beneath `.minecraft/`, stripping that one prefix. Retain existing normalized Windows path/collision/size/link/reparse protections. Apply `clientPathPolicy` to every target: protected saves/auth/runtime/app-state content and executable scripts refuse rather than being copied. Existing options/servers settings retain preserve-after-seed semantics. Root launcher metadata/assets outside `.minecraft` are not installed; custom runtime folders specifically refuse.
+
+## Architecture and state
+
+Keep the shared server archive classifier unchanged: `multimc-client-only` remains blocked for server installation. Add a small client-only MultiMC metadata/content-plan adapter. Reuse archive inspection, verified download, owned extraction, copy/hashing and client transaction machinery rather than a second extractor or ad-hoc filesystem path.
+
+The client preparer chooses exactly one supported format from inspected entries, stores its format and manifest digest privately, rechecks that evidence on reuse, and emits a common prepared content manifest. MultiMC has no external dependency downloads and no optional-file choices: `downloadBytes: "0"`, `optionalFiles: []`, `optionalFileIds: []`; nonempty choices refuse. Bundled copy progress uses actual file/byte totals. MRPACK behavior stays unchanged.
+
+Keep companion descriptor schema1: source asset ID, whole-archive SHA256, installed-server fingerprint and runtime tuple already bind the selected content. Determine format again from that exact artifact at client preview/install. Do not trust renderer-carried format, paths, runtime constraints, or root selection. Keep the additional LWJGL constraint inside the retained prepared plan and enforce it before seal; no network calls after seal and no new public authority fields.
+
+Same-release and runtime equality, current server health, whole-archive size/digest, retained review expiry, session binding, client process exclusion, full-tree baseline, conflict choices, preserved settings, durable staging/publication/recovery and cleanup all remain in force. A ZIP may change the companion descriptor without changing the server revision; existing clients then use the ordinary update-required/review path. No pack-specific filename/hash special cases are introduced.
+
+## UI and errors
+
+The existing companion list says supported client archives, explicitly naming MRPACK and MultiMC ZIP; asset names remain visible and must be selected. Inspecting a server ZIP or unsupported launcher export produces a clear unsupported-client-format outcome and never pairs it. Inspection review names the installed server release/runtime and explains bundled files versus additional downloads. Client install remains a separate explicit reviewed action. Missing MRPACK downloads retain truthful filename/status errors; no hidden fallback happens.
+
+## Verification
+
+TDD for metadata parsing and root/format refusal, runtime extraction and LWJGL constraints, path/collision/protected-content rejection, exact ZIP asset binding, server-runtime mismatch, format-specific optional choices, cancellation/owner cleanup, and unchanged MRPACK behavior. Use tiny inert ZIP fixtures through real archive/preparer seams, real client transaction publication with preserved preferences, and rendered companion selection/review tests. Whole-archive digest mismatch must fail before extraction; client-only server classification must remain blocked.
+
+After independent review and frozen regression/build gates, root reopens the normal isolated b1 app, selects/inspects/accepts official0.13.4 MultiMC through native controls, then reviews and installs into the existing disposable empty client only. Installation requires applicable action-time confirmation. Verify, restart, Microsoft sign-in and real world join remain distinct native gates; user-only security/authentication prompts are not bypassed. Never copy diagnostic bytes into the cache/profile or infer a pass from script fixtures.
+
+## Self-review and sequencing
+
+Architectural extension of the existing client archive seam, not a new launcher. User has explicitly delegated written design/plan review and implementation decisions to root. Exact-runtime/content constraints and unsupported-format boundaries are deliberate. Complete the session-recovery integration first because both changes touch client service/preparer callers; no parallel edits to those files. Independent design/task review and a written implementation plan precede product edits. The current full regression run remains source-frozen; this document does not authorize edits during it.
