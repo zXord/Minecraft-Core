@@ -175,7 +175,11 @@ function createClientPackHandlers({clientPackService,companionService} = {}) {
       const key=name === 'install' ? `plan:${input.planId}` : `inspection:${input.inspectionId}`;
       const cap=owner.capabilities.get(key);
       if (!cap || Date.now()-cap.createdAt >= 900000 || (name === 'install' ? cap.clientId !== input.clientId :
-        cap.serverId !== input.serverId || cap.fingerprint !== input.expectedServerFingerprint)) throw fail();
+        cap.serverId !== input.serverId || cap.fingerprint !== input.expectedServerFingerprint)) {
+        if (name === 'install') throw new ModpackError('INVALID_REQUEST',
+          'This installation review is no longer valid. Review matching pack again before installing.');
+        throw fail();
+      }
       owner.capabilities.delete(key);
     }
     if (!input.requestId) return service[method](input);

@@ -174,8 +174,12 @@ class ClientPackTransaction {
   }
   async stage({ target, baseline, oldManifest, prepared, descriptor, optionalFileIds, conflictChoices = {}, signal, operationId = crypto.randomUUID(), onProgress }) {
     if (onProgress !== undefined && typeof onProgress !== 'function') throw fail('INVALID_REQUEST');
+    const report = event => {
+      try { Promise.resolve(onProgress?.(Object.freeze(event))).catch(() => {}); } catch { /* Observation cannot alter transaction authority. */ }
+    };
     signal?.throwIfAborted();
     const evidence = preparedManifestEvidence(prepared, descriptor, optionalFileIds);
+    report({ phase: 'checking-client-files' });
     const live = await inspectServerDirectoryTree(target.clientPath, this._options());
     if (!sameTree(live, baseline)) throw fail('PLAN_STALE');
     const ownership = planOwnership(baseline, oldManifest, prepared.manifest.entries);
@@ -199,12 +203,13 @@ class ClientPackTransaction {
     if (candidateIdentity.volumeSerial !== parentIdentity.volumeSerial) throw fail();
     await this._write(context, { ...this.contexts.get(context).record, candidateIdentity });
     await copyServerDirectoryContents(context.clientPath, context.candidatePath, { ...this._options(), durableFs: this.durableFs, expectedSourceSnapshot: baseline, signal,
-      ...(onProgress ? { onCopyProgress: ({ activity, ...measured }) => onProgress({
+      ...(onProgress ? { onCopyProgress: ({ activity, ...measured }) => report({
         phase: activity === 'copying-live-files' ? 'copying-client-files' :
           activity === 'flushing-candidate-directories' ? 'flushing-client-files' : 'checking-client-copy',
         ...measured
       }) } : {}) });
     const selected = normalizeEntries(prepared.manifest.entries);
+    report({ phase: 'checking-prepared-pack' });
     const staged = await captureServerDirectoryCopySource(prepared.path, { ...this._options(), signal });
     const stagedFiles = new Map(staged.entries.map(e => [e.pathKey, e]));
     for (const entry of selected) {
@@ -215,12 +220,19 @@ class ClientPackTransaction {
     const remove = [...ownership.removals, ...ownership.conflicts.filter(c => c.action === 'remove' && conflictChoices[c.path] === 'replace').map(c => c.path)];
     for (const relative of remove) await fs.unlink(path.join(context.candidatePath, ...liveFiles.get(relative.toLowerCase()).path.split('/')));
     const entries = [];
+    const isPreserved = entry => ownership.preserved.includes(entry.path) || conflictChoices[entry.path] === 'preserve';
+    const copyEntries = selected.filter(entry => !isPreserved(entry));
+    const totalItems = copyEntries.length, stride = Math.max(1, Math.ceil(totalItems / 200));
+    const totalBytes = copyEntries.reduce((sum, entry) => sum + BigInt(entry.size), 0n).toString();
+    let completedItems = 0, completedBytes = 0n;
+    const reportCopy = () => report({ phase: 'copying-pack-files', completedItems, totalItems, completedBytes: completedBytes.toString(), totalBytes });
+    reportCopy();
     let candidateHashService = null;
     try {
       for (const entry of selected) {
         signal?.throwIfAborted();
         const existing = liveFiles.get(entry.pathKey);
-        const preserved = ownership.preserved.includes(entry.path) || conflictChoices[entry.path] === 'preserve';
+        const preserved = isPreserved(entry);
         if (!preserved) {
           if (candidateHashService === null) {
             const service = this.hashServiceFactory();
@@ -231,6 +243,8 @@ class ClientPackTransaction {
           const measured = await copyRegularFile(path.join(prepared.path, ...entry.path.split('/')), destination,
             { ...this._options(), signal, replace: !!existing, candidateHashService });
           if (measured.sha256 !== entry.sha256 || measured.size !== entry.size) throw fail('PLAN_STALE');
+          completedItems++; completedBytes += BigInt(measured.size);
+          if (completedItems % stride === 0 || completedItems === totalItems) reportCopy();
         }
         entries.push({ ...entry, ...(preserved && existing?.sha256 !== entry.sha256 ? { preserved: true } : {}) });
       }
@@ -238,6 +252,7 @@ class ClientPackTransaction {
       // The operation owns this lazy service; disposal must finish before either
       // manifest publication or the outer catch can assert writer quiescence.
       if (candidateHashService !== null) {
+        report({ phase: 'finishing-pack-copy' });
         await candidateHashService.dispose();
         copyWorkersQuiescent = true;
       }
@@ -247,6 +262,7 @@ class ClientPackTransaction {
       entries.push({ ...oldManifest.entries.find(e => e.pathKey === conflict.path.toLowerCase()), preserved: true });
     }
     const manifest = normalizeClientPackManifest({ ...evidence, descriptor, optionalFileIds, entries });
+    report({ phase: 'writing-client-manifest' });
     await this.stateStore.write(context.candidatePath, manifest);
     return context;
     } catch (cause) {

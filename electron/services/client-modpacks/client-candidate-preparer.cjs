@@ -123,6 +123,7 @@ class ClientCandidatePreparer {
     try {
       const prior = this.inspections.get(inspectionId);
       if (prior) {
+        report({ activity: 'revalidating-client-files' });
         await revalidateEvidence(this, inspectionId, prior, signal);
         return prior.value;
       }
@@ -136,6 +137,7 @@ class ClientCandidatePreparer {
       checkCancellation(signal);
       report({ activity: 'verifying-archive' });
       const root = this.workspaceRegistry.resolveOwnedWorkspace({ ownerId: inspectionId, id: outputId, kind: 'output' }).path;
+      report({ activity: 'reading-client-metadata' });
       const { manifest, digest, identity: metadataIdentity } = await readMetadata(root, indexPath, format, this.reparseInspector, signal);
       const archiveEntries = entries.map(entry => ({ path: entry.entryName, type: entry.type, size: format === 'multimc' ? entry.size : Number(entry.size) }));
       const plan = format === 'multimc' ? buildMultiMCClientPlan({ manifest, archiveEntries }) : buildMrpackClientPlan({ manifest, archiveEntries });
@@ -149,10 +151,16 @@ class ClientCandidatePreparer {
         if (stat.size.toString() !== marker.size) throw failure('PLAN_STALE');
         identities.set(marker.entryName, fileIdentityFromStat(stat));
       }
+      const totalItems = plan.finalOverrides.length, stride = Math.max(1, Math.ceil(totalItems / 200));
+      let completedItems = 0;
+      const reportChecks = () => report({ activity: 'checking-bundled-files', completedItems, totalItems });
+      reportChecks();
       for (const operation of plan.finalOverrides) {
         const stat = await safeStat(root, operation.archivePath, this.reparseInspector, signal);
         if (stat.size.toString() !== operation.size) throw failure('PLAN_STALE');
         identities.set(operation.archivePath, fileIdentityFromStat(stat));
+        completedItems++;
+        if (completedItems % stride === 0 || completedItems === totalItems) reportChecks();
       }
       const value = deepFreeze({ inspectionId, outputId, runtime,
         name: format === 'multimc' ? 'MultiMC client export' : manifest.name, version: format === 'multimc' ? runtime.minecraftVersion : manifest.versionId,
@@ -238,6 +246,7 @@ class ClientCandidatePreparer {
       }
       checkCancellation(signal);
       if (completedItems !== totalItems || processedBytes !== assemblyBytes) throw failure('PLAN_STALE');
+      report({ activity: 'revalidating-client-files' });
       await revalidateEvidence(this, inspectionId, prior, signal);
       const ordered = [...entries.values()].sort((left, right) => left.pathKey.localeCompare(right.pathKey, 'en-US'));
       return deepFreeze({ ownerId, outputId, path: root, runtime: inspected.runtime, manifest: { entries: ordered },

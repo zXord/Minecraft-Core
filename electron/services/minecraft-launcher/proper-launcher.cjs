@@ -1697,19 +1697,45 @@ class ProperMinecraftLauncher extends EventEmitter {
         classpathEntries.push(entryPath);
       };
 
-      const primaryVersionId = launchJson.jar || launchJson.inheritsFrom || minecraftVersion;
-      const launchVersionJar = path.join(clientPath, 'versions', launchVersion, `${launchVersion}.jar`);
+      const managedAuthority = launchReservation?.authority;
+      const primaryVersionId = managedAuthority
+        ? managedAuthority.runtime.minecraftVersion
+        : launchJson.jar || launchJson.inheritsFrom || minecraftVersion;
       const primaryVersionJar = path.join(clientPath, 'versions', primaryVersionId, `${primaryVersionId}.jar`);
-      addClasspathEntry(launchVersionJar);
-      addClasspathEntry(primaryVersionJar);
-
-      const launchLibraries = Array.isArray(launchJson.libraries) ? launchJson.libraries : [];
-      for (const library of launchLibraries) {
-        const artifactPath = resolveLibraryArtifactPath(library);
-        if (!artifactPath) {
-          continue;
+      if (managedAuthority) {
+        const { safePath, failure } = require('../client-modpacks/client-runtime-installer.cjs');
+        assertAssetStageActive(launchAttempt.controller.signal);
+        const resolved = await Version.parse(clientPath, managedAuthority.profileId, { name: 'windows', arch: 'x64', version: '' });
+        assertAssetStageActive(launchAttempt.controller.signal);
+        if (resolved?.minecraftVersion !== primaryVersionId || !Array.isArray(resolved?.libraries) || resolved.libraries.length > 10000) {
+          throw failure();
         }
-        addClasspathEntry(path.join(clientPath, 'libraries', artifactPath));
+        const addRequiredClasspathEntry = (relativePath) => {
+          const entryPath = safePath(clientPath, relativePath);
+          if (!classpathSet.has(entryPath)) {
+            classpathSet.add(entryPath);
+            classpathEntries.push(entryPath);
+          }
+        };
+        // Use the verifier's effective libraries and base JAR, never an unverified child JAR.
+        addRequiredClasspathEntry(`versions/${primaryVersionId}/${primaryVersionId}.jar`);
+        for (const library of resolved.libraries) {
+          if (typeof library?.download?.path !== 'string' || library.download.path !== library.path) throw failure();
+          addRequiredClasspathEntry(`libraries/${library.download.path}`);
+        }
+      } else {
+        const launchVersionJar = path.join(clientPath, 'versions', launchVersion, `${launchVersion}.jar`);
+        addClasspathEntry(launchVersionJar);
+        addClasspathEntry(primaryVersionJar);
+
+        const launchLibraries = Array.isArray(launchJson.libraries) ? launchJson.libraries : [];
+        for (const library of launchLibraries) {
+          const artifactPath = resolveLibraryArtifactPath(library);
+          if (!artifactPath) {
+            continue;
+          }
+          addClasspathEntry(path.join(clientPath, 'libraries', artifactPath));
+        }
       }
 
       if (classpathEntries.length === 0) {

@@ -624,3 +624,124 @@ test('path guard uses at most two exact-key bounded reads and fails closed if le
   } };
   await assert.rejects(f.tx.assertNoUnsettledAtPath(f.live), { code: 'RECOVERY_REQUIRED' });
 });
+
+
+// Task 7: actual progress remains observation, never publication authority.
+const phaseOf = event => event.phase ?? event.activity;
+const phases = events => events.map(phaseOf).filter((phase, i, values) => i === 0 || phase !== values[i - 1]);
+const measurements = (events, phase) => events.filter(event => phaseOf(event) === phase).map(event => ({
+  completedItems: String(event.completedItems), totalItems: String(event.totalItems),
+  ...(event.completedBytes === undefined ? {} : { completedBytes: String(event.completedBytes), totalBytes: String(event.totalBytes) })
+}));
+function assertSubsequence(actual, expected) {
+  let previous = -1;
+  for (const value of expected) { const index = actual.indexOf(value, previous + 1); assert.ok(index > previous, `Missing ordered phase ${value}: ${actual}`); previous = index; }
+}
+function addPayload(f) {
+  for (const [relative, bytes] of [['config/a.cfg', 'aaa'], ['config/b.cfg', 'bbbbb']]) {
+    const file = path.join(f.prepared.path, relative); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes);
+    f.prepared.manifest.entries.push({ path: relative, pathKey: relative, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), size: String(bytes.length), policy: 'managed' });
+  }
+}
+
+test('task7: selected pack progress counts only verified copies and clears counts before settlement', async t => {
+  const f = fixture(t); addPayload(f); const events = [], observations = [];
+  const operationId = crypto.randomUUID(); const candidate = f.tx.candidatePathFor(f.target, operationId);
+  const context = await stage(f, { operationId, onProgress: event => {
+    events.push(event);
+    if (event.phase !== 'copying-pack-files') return;
+    // Record instead of asserting in the observer: producer MUST swallow observer errors.
+    const copies = f.prepared.manifest.entries.filter(entry => entry.policy === 'managed' && fs.existsSync(path.join(candidate, entry.path)));
+    observations.push({ completed: Number(event.completedItems), valid: copies.filter(entry => {
+      const bytes = fs.readFileSync(path.join(candidate, entry.path));
+      return crypto.createHash('sha256').update(bytes).digest('hex') === entry.sha256 && String(bytes.length) === entry.size;
+    }).length });
+  } });
+  const copy = measurements(events, 'copying-pack-files');
+  assert.deepEqual(copy.map(e => e.completedItems), ['0', '1', '2', '3']);
+  assert.ok(copy.every(e => e.totalItems === '3' && e.totalBytes === '11'));
+  assert.equal(copy[0].completedBytes, '0'); assert.equal(copy.at(-1).completedBytes, '11');
+  assert.deepEqual(observations, [0, 1, 2, 3].map(n => ({ completed: n, valid: n })));
+  assertSubsequence(phases(events), ['checking-client-files', 'checking-client-copy', 'checking-prepared-pack', 'copying-pack-files', 'finishing-pack-copy', 'writing-client-manifest']);
+  for (const event of events.filter(e => ['checking-prepared-pack', 'finishing-pack-copy', 'writing-client-manifest'].includes(e.phase))) {
+    assert.equal(event.completedItems, undefined); assert.equal(event.completedBytes, undefined);
+  }
+  assert.equal(JSON.stringify(events).includes(f.root), false);
+  assert.equal(fs.readFileSync(path.join(context.candidatePath, 'options.txt'), 'utf8'), 'mine');
+  assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'mine');
+  assert.equal((await f.tx.status(f.target)).phase, 'preparing', 'stage counters do not commit installation');
+});
+
+for (const mode of ['abort', 'changed-next-source']) test(`task7: ${mode} cannot advance a selected-copy count past completed work`, async t => {
+  const f = fixture(t); addPayload(f); const controller = new AbortController(); const events = [];
+  const operationId = crypto.randomUUID(), candidate = f.tx.candidatePathFor(f.target, operationId); let injected = false;
+  await assert.rejects(stage(f, { operationId, signal: controller.signal, onProgress: event => {
+    events.push(event);
+    if (event.phase !== 'copying-pack-files' || String(event.completedItems) !== '1' || injected) return;
+    injected = true;
+    if (mode === 'abort') controller.abort();
+    else {
+      fs.writeFileSync(path.join(f.prepared.path, 'config/b.cfg'), 'changed after captured plan');
+    }
+  } }), error => mode === 'abort' ? error.name === 'AbortError' || error.code === 'CANCELLED' : error.code === 'PLAN_STALE');
+  assert.equal(injected, true); assert.deepEqual(measurements(events, 'copying-pack-files').map(e => e.completedItems), ['0', '1']);
+  assert.equal(events.some(e => e.phase === 'writing-client-manifest'), false);
+  assert.equal((await f.tx.status(f.target)).phase, 'abandoned');
+  assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'mine');
+  assert.equal(fs.existsSync(path.join(f.live, 'mods/new.jar')), false);
+});
+
+for (const rejection of ['sync', 'async']) test(`task7: ${rejection} selected-copy observer failure cannot alter staging`, async t => {
+  const f = fixture(t); let calls = 0;
+  const context = await stage(f, { onProgress: event => {
+    if (event.phase !== 'copying-pack-files') return;
+    calls++;
+    if (rejection === 'sync') throw new Error('inert observer failure');
+    return Promise.reject(new Error('inert rejected observer'));
+  } });
+  assert.ok(calls >= 2); assert.equal(fs.readFileSync(path.join(context.candidatePath, 'mods/new.jar'), 'utf8'), 'new');
+  assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'mine');
+  assert.equal((await f.tx.status(f.target)).phase, 'preparing');
+});
+
+for (const selection of ['empty', 'preserved-only']) test(`task7: ${selection} has a zero selected-copy denominator, never a fabricated completion`, async t => {
+  const f = fixture(t); const events = [];
+  f.prepared.manifest.entries = selection === 'empty' ? [] : f.prepared.manifest.entries.filter(entry => entry.path === 'options.txt');
+  await stage(f, { onProgress: event => events.push(event) });
+  assert.deepEqual(measurements(events, 'copying-pack-files'), [{ completedItems: '0', totalItems: '0', completedBytes: '0', totalBytes: '0' }]);
+  assert.equal(events.some(e => e.phase === 'finishing-pack-copy'), false, 'no hash service was created');
+  assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'mine');
+});
+
+test('task7: explicitly preserved managed conflict is excluded from selected-copy totals', async t => {
+  const f = fixture(t); addPayload(f); write(f.live, 'mods/new.jar', 'personal'); const events = [];
+  const context = await stage(f, { conflictChoices: { 'mods/new.jar': 'preserve' }, onProgress: event => events.push(event) });
+  assert.deepEqual(measurements(events, 'copying-pack-files'), [
+    { completedItems: '0', totalItems: '2', completedBytes: '0', totalBytes: '8' },
+    { completedItems: '1', totalItems: '2', completedBytes: '3', totalBytes: '8' },
+    { completedItems: '2', totalItems: '2', completedBytes: '8', totalBytes: '8' }
+  ]);
+  assert.equal(fs.readFileSync(path.join(context.candidatePath, 'mods/new.jar'), 'utf8'), 'personal');
+  assert.equal(fs.readFileSync(path.join(f.live, 'mods/new.jar'), 'utf8'), 'personal');
+});
+test('task7: selected-copy progress has bounded stride emissions without losing measured totals', async t => {
+  const f = fixture(t); const events = [];
+  for (let index = 0; index < 400; index++) {
+    const relative = `config/bulk-${String(index).padStart(3, '0')}.cfg`;
+    write(f.prepared.path, relative, 'x');
+    f.prepared.manifest.entries.push({ path: relative, pathKey: relative, sha256: hash('x'), size: '1', policy: 'managed' });
+  }
+  const context = await stage(f, { onProgress: event => events.push(event) });
+  const copies = measurements(events, 'copying-pack-files');
+  assert.equal(copies.length, 135); assert.deepEqual(copies.slice(0, 3).map(e => e.completedItems), ['0', '3', '6']);
+  assert.deepEqual(copies.at(-1), { completedItems: '401', totalItems: '401', completedBytes: '403', totalBytes: '403' });
+  assert.equal(fs.readdirSync(path.join(context.candidatePath, 'config')).length, 400);
+});
+test('task7: pending observer promise is never awaited by staging', async t => {
+  const f = fixture(t); let release; const gate = new Promise(resolve => { release = resolve; }); let observed = 0, timer;
+  const outcome = stage(f, { onProgress: event => { if (event.phase === 'copying-pack-files') { observed++; return gate; } } });
+  try {
+    const context = await Promise.race([outcome, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Staging awaited observer')), 5000); })]);
+    assert.equal(observed, 2); assert.equal(fs.readFileSync(path.join(context.candidatePath, 'mods/new.jar'), 'utf8'), 'new');
+  } finally { clearTimeout(timer); release(); await outcome; }
+});

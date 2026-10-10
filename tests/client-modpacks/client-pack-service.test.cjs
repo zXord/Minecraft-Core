@@ -898,7 +898,8 @@ test('real producer progress shapes become bounded path-free service progress', 
   assert.deepEqual(events.slice(1).map(({ clientId, operationId, ...event }) => event), [
     { phase: 'downloading-archive', completedBytes: '4', totalBytes: '12' },
     { phase: 'downloading-archive' }, { phase: 'downloading-archive' },
-    { phase: 'extracting-pack', completedBytes: '10', totalBytes: '12' }
+    { phase: 'extracting-pack', completedBytes: '10', totalBytes: '12' },
+    { phase: 'checking-client-files' }
   ]);
   assert.equal(JSON.stringify(events).includes(f.live), false); assert.equal(JSON.stringify(events).includes('secret'), false);
 });
@@ -1023,4 +1024,29 @@ for (const fault of ['non-abort-error', 'unknown-journal']) test(`cancel during 
   else { assert.equal(installError.code, 'RECOVERY_REQUIRED'); assert.equal(cancelError.code, 'RECOVERY_REQUIRED'); }
   assert.equal(f.forgottenOperations.length - forgottenBefore, fault === 'unknown-journal' ? 0 : 1);
   assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'settings');
+});
+
+
+// Task 7: actual progress remains observation, never publication authority.
+const phaseOf = event => event.phase ?? event.activity;
+const phases = events => events.map(phaseOf).filter((phase, i, values) => i === 0 || phase !== values[i - 1]);
+const measurements = (events, phase) => events.filter(event => phaseOf(event) === phase).map(event => ({
+  completedItems: String(event.completedItems), totalItems: String(event.totalItems),
+  ...(event.completedBytes === undefined ? {} : { completedBytes: String(event.completedBytes), totalBytes: String(event.totalBytes) })
+}));
+function assertSubsequence(actual, expected) {
+  let previous = -1;
+  for (const value of expected) { const index = actual.indexOf(value, previous + 1); assert.ok(index > previous, `Missing ordered phase ${value}: ${actual}`); previous = index; }
+}
+test('task7: service reports phase-local selected copy then indeterminate checks until actual installation result', async t => {
+  const f = fixture(t), reviewEvents = [], events = [];
+  const review = await f.service.preview({ clientId: 'one' }, { onProgress: event => reviewEvents.push(event) });
+  assert.equal(reviewEvents.at(-1).phase, 'checking-client-files');
+  const result = await f.service.install({ clientId: 'one', planId: review.planId, conflictChoices: {} }, { onProgress: event => events.push(event) });
+  assertSubsequence(phases(events), ['checking-prepared-pack', 'copying-pack-files', 'finishing-pack-copy', 'writing-client-manifest',
+    'checking-candidate-files', 'preparing-runtime', 'verifying-runtime', 'checking-candidate-files', 'sealing-client-files', 'publishing', 'verifying-installation', 'cleaning-installation']);
+  assert.deepEqual(measurements(events, 'copying-pack-files'), [0, 1].map(n => ({ completedItems: String(n), totalItems: '1', completedBytes: String(n * 4), totalBytes: '4' })));
+  assert.ok(events.every(event => event.clientId === 'one' && typeof event.operationId === 'string'));
+  assert.equal(events.at(-1).completedItems, undefined); assert.equal(JSON.stringify(events).includes(f.live), false);
+  assert.equal(result.status, 'ready');
 });

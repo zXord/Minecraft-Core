@@ -18,6 +18,35 @@ test('server drift stays a refusal with renderer-local Verify and Repair guidanc
     /Use Modpack Verify and Repair/.test(error.message) && !error.message.includes('secret'));
   assert.equal(allowsLegacyClient({ status: 'error', code: 'CLIENT_PACK_SERVER_CHANGED' }), false);
 });
+
+test('invalid installation review reaches the renderer with review-again guidance and no retry', async t => {
+  const { clientPackApi } = await modulePromise;
+  const { EventEmitter } = require('node:events');
+  const { createClientPackHandlers } = require('../../electron/ipc/client-pack-handlers.cjs');
+  const unexpected = async () => assert.fail('A missing review must not dispatch a service operation');
+  const boundary = createClientPackHandlers({
+    clientPackService: Object.fromEntries(['getState','preview','install','cancel','verify','recover'].map(name => [name, unexpected])),
+    companionService: Object.fromEntries(['getStatus','listAssets','inspect','accept'].map(name => [name, unexpected]))
+  });
+  t.after(() => boundary.dispose());
+  const owner = new EventEmitter(); Object.assign(owner, { id: 1, send() {}, isDestroyed: () => false });
+  const calls = [], listeners = new Set(); let added = 0, removed = 0;
+  global.window = { electron: {
+    on: (_, callback) => { added++; listeners.add(callback); },
+    removeListener: (_, callback) => { assert.equal(listeners.delete(callback), true); removed++; },
+    invoke(channel, input) { calls.push(channel); return boundary.handlers[channel]({ sender: owner }, input); }
+  } };
+  await assert.rejects(clientPackApi.install({ clientId: 'qa', planId: 'missing', conflictChoices: {} },
+    { onProgress: () => assert.fail('A refused capability must not publish progress') }), error => {
+    assert.equal(error.code, 'INVALID_REQUEST');
+    assert.match(error.message, /review is no longer valid.*Review matching pack again/i);
+    assert.doesNotMatch(error.message, /expired|server.*changed|files.*changed/i);
+    return true;
+  });
+  assert.deepEqual(calls, ['client-packs:install']);
+  assert.deepEqual([added, removed], [1, 1]);
+  assert.equal(listeners.size, 0);
+});
 test('missing published dependency gives file-specific guidance without trusting remote error text', async () => {
   const { ClientPackApiError } = await modulePromise;
   const error = new ClientPackApiError({ code: 'ARTIFACT_UNAVAILABLE', message: 'PRIVATE token=secret',

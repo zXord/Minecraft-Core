@@ -156,7 +156,7 @@ for (const selection of ['empty', 'preserved-only']) test(`${selection} selectio
 });
 
 // Break caught: not awaiting disposal, or placing it after manifest write/abandon.
-for (const mode of ['success', 'hash-failure', 'abort']) test(`stage waits for held disposal before ${mode === 'success' ? 'manifest publication and return' : `${mode} abandonment`}`, async t => {
+for (const mode of ['success', 'hash-failure', 'abort']) test(`task7: stage waits for held disposal before ${mode === 'success' ? 'manifest publication and return' : `${mode} abandonment`}`, async t => {
   const entered = deferred(), release = deferred(); const controller = new AbortController();
   let f, mutated = false; const events = [];
   const owned = ownedHashFactory(t, {
@@ -176,12 +176,14 @@ for (const mode of ['success', 'hash-failure', 'abort']) test(`stage waits for h
   t.mock.method(f.tx, 'abandon', async (...args) => { events.push('abandon'); return originalAbandon(...args); });
   const operationId = '11111111-1111-4111-8111-111111111111';
   const candidatePath = f.tx.candidatePathFor(f.target, operationId);
-  const outcome = stage(f, { operationId, signal: controller.signal }).then(context => ({ context }), error => ({ error }));
+  const progress = [];
+  const outcome = stage(f, { operationId, signal: controller.signal, onProgress: event => progress.push(event) }).then(context => ({ context }), error => ({ error }));
   let settled = false; void outcome.then(() => { settled = true; });
   try {
     const boundary = await bounded(Promise.race([entered.promise.then(() => 'dispose'), outcome.then(() => 'settled')]), 'stage disposal boundary');
     assert.equal(boundary, 'dispose', 'stage must use and await its operation-owned hash service');
     assert.equal(settled, false); assert.equal(events.includes('manifest-write'), false); assert.equal(events.includes('abandon'), false);
+    assert.deepEqual(progress.at(-1), { phase: 'finishing-pack-copy' }, 'finishing phase must be visible during, not after, disposal');
     assert.equal((await f.tx.status(f.target)).phase, 'preparing');
     assert.equal(await f.stateStore.read(candidatePath), null); assertOldLive(f);
     assert.equal(fs.readFileSync(path.join(candidatePath, 'config/one.cfg'), 'utf8'), 'one');
@@ -205,7 +207,7 @@ for (const mode of ['success', 'hash-failure', 'abort']) test(`stage waits for h
 });
 
 // Break caught: treating a rejected disposal as quiescent and publishing or abandoning anyway.
-for (const mode of ['success', 'hash-failure', 'abort']) test(`${mode} plus disposal rejection retains preparing evidence without claiming quiescent abandonment`, async t => {
+for (const mode of ['success', 'hash-failure', 'abort']) test(`task7: ${mode} plus disposal rejection retains preparing evidence without claiming quiescent abandonment`, async t => {
   let f, mutated = false; const controller = new AbortController();
   const owned = ownedHashFactory(t, {
     beforeHash(file) {
@@ -222,7 +224,9 @@ for (const mode of ['success', 'hash-failure', 'abort']) test(`${mode} plus disp
   t.mock.method(f.stateStore, 'write', async (...args) => { events.push('manifest-write'); return originalWrite(...args); });
   t.mock.method(f.tx, 'abandon', async (...args) => { events.push('abandon'); return originalAbandon(...args); });
   const operationId = '22222222-2222-4222-8222-222222222222';
-  await assert.rejects(stage(f, { operationId, signal: controller.signal }), { code: 'RECOVERY_REQUIRED' });
+  const progress = [];
+  await assert.rejects(stage(f, { operationId, signal: controller.signal, onProgress: event => progress.push(event) }), { code: 'RECOVERY_REQUIRED' });
+  assert.deepEqual(progress.at(-1), { phase: 'finishing-pack-copy' });
   assert.deepEqual(events, []); assert.equal((await f.tx.status(f.target)).phase, 'preparing');
   const candidatePath = f.tx.candidatePathFor(f.target, operationId);
   assert.equal(await f.stateStore.read(candidatePath), null);

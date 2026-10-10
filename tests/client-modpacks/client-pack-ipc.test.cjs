@@ -131,6 +131,77 @@ test('preview capability is bound to the originating sender and client and consu
   assert.equal((await f.call('install',input)).ok,true);
   assert.equal((await f.call('install',{...input,requestId:'retry-r'})).error?.code,'INVALID_REQUEST');assert.equal(installs,1);await f.dispose();
 });
+for (const age of [899999, 900000]) test(`installation review at age ${age} keeps its exact expiry boundary and actionable refusal`, async t => {
+  let now = 1000, installs = 0;
+  t.mock.method(Date, 'now', () => now);
+  const f = fixture({ client: { install: async ({ clientId }) => { installs++; return { clientId, status: 'ready', verified: true }; } } });
+  t.after(() => f.dispose());
+  await prepare(f); now += age;
+  const result = await f.call('install', { clientId: 'c', planId: 'p', conflictChoices: {}, requestId: 'install' });
+  assert.equal(installs, age === 899999 ? 1 : 0);
+  if (age === 899999) assert.equal(result.ok, true);
+  else {
+    assert.equal(result.error?.code, 'INVALID_REQUEST');
+    assert.match(result.error.message, /review is no longer valid.*Review matching pack again/i);
+  }
+});
+
+test('slow preparation receives a fresh review lifetime only after completion', async t => {
+  let now = 1000, installs = 0;
+  t.mock.method(Date, 'now', () => now);
+  const f = fixture({ client: {
+    preview: async ({ clientId }) => { now += 1200000; return preview(clientId); },
+    install: async ({ clientId }) => { installs++; return { clientId, status: 'ready', verified: true }; }
+  } });
+  t.after(() => f.dispose());
+  await prepare(f); now += 899999;
+  assert.equal((await f.call('install', { clientId: 'c', planId: 'p', conflictChoices: {}, requestId: 'install' })).ok, true);
+  assert.equal(installs, 1);
+});
+
+for (const reason of ['missing', 'expired-pruned', 'evicted', 'consumed', 'other-sender', 'other-client']) {
+  test(`${reason} review refuses before installation with non-causal review-again guidance`, async t => {
+    let now = 1000, installs = 0, serial = 0;
+    t.mock.method(Date, 'now', () => now);
+    const f = fixture({ client: {
+      preview: async ({ clientId }) => ({ ...preview(clientId), planId: `plan-${serial++}` }),
+      install: async ({ clientId }) => { installs++; return { clientId, status: 'ready', verified: true }; }
+    } });
+    t.after(() => f.dispose());
+    const input = { clientId: 'c', planId: 'plan-0', conflictChoices: {}, requestId: 'install' };
+    if (reason !== 'missing') await prepare(f);
+    if (reason === 'expired-pruned') {
+      now += 900000;
+      await f.call('preview', { clientId: 'c', requestId: 'prune' });
+    }
+    if (reason === 'evicted') for (let n = 0; n < 16; n++) await f.call('preview', { clientId: 'c', requestId: `fill-${n}` });
+    if (reason === 'consumed') assert.equal((await f.call('install', { ...input, requestId: 'first-install' })).ok, true);
+    const before = installs;
+    const result = await f.call('install', reason === 'other-client' ? { ...input, clientId: 'wrong' } : input,
+      reason === 'other-sender' ? f.other : f.owner);
+    assert.equal(installs, before);
+    assert.equal(result.error?.code, 'INVALID_REQUEST');
+    assert.match(result.error.message, /review is no longer valid.*Review matching pack again/i);
+    assert.doesNotMatch(result.error.message, /expired|server.*changed|files.*changed/i);
+    if (reason === 'other-sender' || reason === 'other-client') {
+      assert.equal((await f.call('install', { ...input, requestId: 'correct-owner' })).ok, true);
+      assert.equal(installs, 1, 'foreign refusal must not consume the rightful review');
+    }
+  });
+}
+
+test('malformed install and companion acceptance keep their unrelated error guidance', async t => {
+  const f = fixture(); t.after(() => f.dispose());
+  for (const [name, input] of [
+    ['install', { clientId: 'c', planId: 'p', conflictChoices: {}, requestId: 'r', clientPath: 'C:/private' }],
+    ['accept-companion', { serverId: 's', expectedServerFingerprint: 'a'.repeat(64), inspectionId: 'missing' }]
+  ]) {
+    const result = await f.call(name, input);
+    assert.equal(result.error?.code, 'INVALID_REQUEST');
+    assert.doesNotMatch(result.error.message, /review.*no longer valid|Review matching pack again/i);
+  }
+});
+
 test('inspection capability cannot be accepted by another sender or for another fingerprint',async()=>{
   let accepts=0;const f=fixture({companion:{inspect:async()=>({inspectionId:'i',...descriptor,name:'TFG',version:'0.13.4',optionalFiles:[],downloadBytes:'0'}),accept:async()=>{accepts++;return descriptor;}}});
   assert.equal((await f.call('inspect-companion',{serverId:'s',expectedServerFingerprint:'a'.repeat(64),requestId:'inspect-r'})).ok,true);

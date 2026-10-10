@@ -22,8 +22,50 @@
     'update-required':'Matching pack update required', modified:'Matching pack files modified', ready:'Matching pack ready',
     'runtime-incomplete':'Matching runtime incomplete', 'recovery-required':'Matching pack recovery required'
   };
+  const phaseLabels = {
+    preparing:'Preparing matching client pack', 'downloading-archive':'Downloading client archive',
+    materialize:'Preparing verified archive', list:'Reading archive contents', validate:'Checking archive paths and limits', classify:'Identifying archive format',
+    extracting:'Extracting client archive', 'verifying-archive':'Checking extracted archive safety',
+    'reading-client-metadata':'Reading client pack metadata', 'checking-bundled-files':'Checking bundled pack files',
+    'revalidating-client-files':'Rechecking inspected pack files', 'checking-client-files':'Checking existing client files',
+    'copying-client-files':'Copying existing client files', 'flushing-client-files':'Saving copied client files', 'checking-client-copy':'Checking the existing-client copy',
+    'checking-prepared-pack':'Checking prepared pack files', 'copying-pack-files':'Installing selected pack files',
+    'finishing-pack-copy':'Finishing pack file checks', 'writing-client-manifest':'Saving client pack ownership',
+    'checking-candidate-files':'Checking prepared client files', 'preparing-runtime':'Preparing Minecraft and loader',
+    'verifying-runtime':'Checking Minecraft and loader', 'sealing-client-files':'Checking and saving installation',
+    publishing:'Publishing reviewed installation', 'verifying-installation':'Verifying installed client pack', 'cleaning-installation':'Checking retained installation files',
+    'assembling-files':'Preparing selected pack files', 'downloading-pack-files':'Downloading required pack files',
+    java:'Preparing Java', minecraft:'Preparing Minecraft', loader:'Preparing loader', libraries:'Preparing runtime libraries', verify:'Checking runtime files'
+  };
+  const fileLabels = {
+    'copying-pack-files': {verb:'Copied', noun:'pack files', meter:'Pack files copied'},
+    'copying-client-files': {verb:'Copied', noun:'existing client files', meter:'Existing client files copied'},
+    'checking-bundled-files': {verb:'Checked', noun:'bundled files', meter:'Bundled files checked'},
+    'assembling-files': {verb:'Prepared', noun:'selected pack files', meter:'Selected pack files prepared'}
+  };
+  const downloadPhases = new Set(['downloading', 'downloading-archive', 'downloading-pack-files', 'java', 'minecraft', 'loader', 'libraries']);
+  // Keep exact bounded counters until the final fixed-scale phase-local ratio.
+  // Number conversion before comparison would accept distinct >2^53 integers as equal.
+  function ratio(completed, total) {
+    const decimal = value => typeof value === 'string' && /^(0|[1-9][0-9]{0,29})$/.test(value);
+    if (!decimal(completed) || !decimal(total)) return null;
+    const done = BigInt(completed), maximum = BigInt(total);
+    return maximum > 0n && done <= maximum ? Number(done * 1000000n / maximum) : null;
+  }
+  function measuredProgress(event) {
+    if (!event) return null;
+    if (Object.hasOwn(fileLabels, event.phase)) {
+      const value = ratio(event.completedItems, event.totalItems);
+      return value === null ? null : {value, label:fileLabels[event.phase].meter};
+    }
+    const value = ratio(event.completedBytes, event.totalBytes);
+    return value === null ? null : {value, label:downloadPhases.has(event.phase) ? 'Download progress' : 'Measured byte progress'};
+  }
   $: if (mounted && clientId !== currentId) switchClient();
   $: canInstall = !!plan && !busy && plan.conflicts.every(item => choices[item.path] === 'preserve' || (choices[item.path] === 'replace' && item.replaceAllowed));
+  $: progressLabel = Object.hasOwn(phaseLabels, progress?.phase) ? phaseLabels[progress.phase] : 'Working on matching client pack';
+  $: progressFiles = Object.hasOwn(fileLabels, progress?.phase) ? fileLabels[progress.phase] : null;
+  $: progressMeter = measuredProgress(progress);
   function number(value) { try { return BigInt(value).toLocaleString(); } catch { return 'Unknown'; } }
   function switchClient() {
     currentId = clientId;
@@ -134,10 +176,10 @@
     {#if state.recoveryReason === 'restart-required'}<p>Save your work, restart Windows, then reopen Minecraft Core and retry recovery. The app will not restart Windows for you.</p>{/if}
   {/if}
   {#if progress}
-    <div role="status" aria-live="polite"><strong>{progress.phase.replaceAll('-',' ')}</strong>
+    <div role="status" aria-live="polite"><strong>{progressLabel}</strong>
       {#if progress.completedBytes !== undefined}<p>{number(progress.completedBytes)}{progress.totalBytes !== undefined ? ` / ${number(progress.totalBytes)}` : ''} bytes</p>{/if}
-      {#if progress.completedItems !== undefined}<p>{number(progress.completedItems)}{progress.totalItems !== undefined ? ` / ${number(progress.totalItems)}` : ''} files</p>{/if}
-      {#if progress.totalBytes !== undefined && Number(progress.totalBytes)>0 && progress.completedBytes !== undefined}<progress aria-label="Measured download progress" max={Number(progress.totalBytes)} value={Number(progress.completedBytes)}></progress>{:else}<progress aria-label="Working; total unknown"></progress>{/if}
+      {#if progress.completedItems !== undefined}<p>{#if progressFiles}{progressFiles.verb} {number(progress.completedItems)}{progress.totalItems !== undefined ? ` of ${number(progress.totalItems)}` : ''} {progressFiles.noun}{:else}{number(progress.completedItems)}{progress.totalItems !== undefined ? ` / ${number(progress.totalItems)}` : ''} files{/if}</p>{/if}
+      {#if progressMeter}<progress aria-label={progressMeter.label} max="1000000" value={progressMeter.value}></progress>{:else}<progress aria-label="Working; total unknown"></progress>{/if}
       {#if controller}<button type="button" on:click={() => controller?.abort()}>Cancel request</button>{/if}
     </div>
   {/if}

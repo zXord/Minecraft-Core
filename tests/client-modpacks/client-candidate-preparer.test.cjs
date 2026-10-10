@@ -498,3 +498,57 @@ test('MultiMC cancellation awaits hashing, rejects busy eviction, and cleans onl
   assert.equal([...f.registry.records.values()].filter(r => r.ownerId.startsWith('client-candidate-')).length, 0);
   assert.ok(f.registry.resolveOwnedWorkspace({ ownerId: 'unrelated-owner', id: unrelated, kind: 'output' }));
 });
+
+
+// Task 7: actual progress remains observation, never publication authority.
+const phaseOf = event => event.phase ?? event.activity;
+const phases = events => events.map(phaseOf).filter((phase, i, values) => i === 0 || phase !== values[i - 1]);
+const measurements = (events, phase) => events.filter(event => phaseOf(event) === phase).map(event => ({
+  completedItems: String(event.completedItems), totalItems: String(event.totalItems),
+  ...(event.completedBytes === undefined ? {} : { completedBytes: String(event.completedBytes), totalBytes: String(event.totalBytes) })
+}));
+function assertSubsequence(actual, expected) {
+  let previous = -1;
+  for (const value of expected) { const index = actual.indexOf(value, previous + 1); assert.ok(index > previous, `Missing ordered phase ${value}: ${actual}`); previous = index; }
+}
+for (const multimc of [false, true]) test(`task7: ${multimc ? 'MultiMC' : 'MRPACK'} fresh bundled checks and cached/final revalidation have distinct phases`, async t => {
+  const f = await fixture(t, { multimc }); const fresh = [], cached = [], preparedEvents = [];
+  const first = await f.preparer.inspect({ inspectionId: f.inspectionId, onProgress: event => fresh.push(event) });
+  assertSubsequence(phases(fresh), ['extracting', 'verifying-archive', 'reading-client-metadata', 'checking-bundled-files']);
+  assert.deepEqual(measurements(fresh, 'checking-bundled-files'), [0, 1, 2].map(n => ({ completedItems: String(n), totalItems: '2' })));
+  assert.equal(fresh.some(e => e.activity === 'checking-bundled-files' && e.processedBytes !== undefined), false, 'stat size is not measured bytes read');
+  assert.equal(await f.preparer.inspect({ inspectionId: f.inspectionId, onProgress: event => cached.push(event) }), first);
+  assert.deepEqual(phases(cached), ['revalidating-client-files']);
+  const result = await f.preparer.prepare({ inspectionId: f.inspectionId, optionalFileIds: [], onProgress: event => preparedEvents.push(event) });
+  assertSubsequence(phases(preparedEvents), ['revalidating-client-files', 'assembling-files', 'revalidating-client-files']);
+  assert.equal(phaseOf(preparedEvents.at(-1)), 'revalidating-client-files');
+  assert.equal(preparedEvents.at(-1).completedItems, undefined);
+  if (multimc) assert.equal(f.downloads.length, 0);
+  await f.preparer.release(result.ownerId);
+});
+test('task7: cancelling a fresh bundled-file check stops before another completed count or retained inspection', async t => {
+  const f = await fixture(t, { multimc: true }); const controller = new AbortController(); const events = [];
+  await assert.rejects(f.preparer.inspect({ inspectionId: f.inspectionId, signal: controller.signal, onProgress: event => {
+    events.push(event); if (event.activity === 'checking-bundled-files' && String(event.completedItems) === '1') controller.abort();
+  } }), { code: 'CANCELLED' });
+  assert.deepEqual(measurements(events, 'checking-bundled-files').map(e => e.completedItems), ['0', '1']);
+  assert.equal(f.preparer.inspections.has(f.inspectionId), false);
+});
+for (const rejection of ['sync', 'async']) test(`task7: ${rejection} fresh-check observer failure cannot change inspected evidence`, async t => {
+  const f = await fixture(t, { multimc: true }); let observed = 0;
+  const result = await f.preparer.inspect({ inspectionId: f.inspectionId, onProgress: event => {
+    if (event.activity !== 'checking-bundled-files') return;
+    observed++; if (rejection === 'sync') throw new Error('observer'); return Promise.reject(new Error('observer'));
+  } });
+  assert.equal(observed, 3); assert.equal(result.contentFormat, 'multimc'); assert.equal(f.downloads.length, 0);
+});
+
+test('task7: bundled-check progress uses a bounded stride and retains the final exact count', async t => {
+  const extra = Object.fromEntries(Array.from({ length: 399 }, (_, index) => [`.minecraft/config/bulk-${index}.cfg`, Buffer.from('x')]));
+  const f = await fixture(t, { multimc: true, extra }); const events = [];
+  await f.preparer.inspect({ inspectionId: f.inspectionId, onProgress: event => events.push(event) });
+  const checks = measurements(events, 'checking-bundled-files');
+  assert.equal(checks.length, 135); assert.deepEqual(checks.slice(0, 3).map(e => e.completedItems), ['0', '3', '6']);
+  assert.deepEqual(checks.at(-1), { completedItems: '401', totalItems: '401' });
+  assert.equal(f.preparer.inspections.get(f.inspectionId).identities.size, 402, 'all payload identities and the launcher marker remain checked');
+});

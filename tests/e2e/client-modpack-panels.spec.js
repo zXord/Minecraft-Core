@@ -675,3 +675,106 @@ test('a recovery follow-up cannot paint its old error into a newer same-client r
   await expect(page.getByText('No matching client pack paired',{exact:true})).toBeVisible();
   await expect(page.getByText('Old recovery error',{exact:true})).toHaveCount(0);
 });
+
+test('task7: selected-copy counters are local, human-labelled, and cannot complete the held install', async ({ page }) => {
+  await start(page);
+  await page.evaluate(() => { window.preview.conflicts = []; window.pending['client-packs:install'] = []; });
+  await page.getByRole('button', { name: 'Review matching pack' }).click();
+  await page.getByRole('button', { name: 'Install reviewed pack' }).click();
+  const emit = event => page.evaluate(event => {
+    const input = window.pending['client-packs:install'][0].input;
+    for (const listener of window.listeners) listener({ ...input, ...event });
+  }, event);
+  const cancel = page.getByRole('button', { name: 'Cancel request' });
+  await cancel.focus();
+  await emit({ phase: 'copying-pack-files', completedItems: '2', totalItems: '3', completedBytes: '8', totalBytes: '12' });
+  await expect(page.getByText('Installing selected pack files', { exact: true })).toBeVisible();
+  await expect(page.getByText('Copied 2 of 3 pack files', { exact: true })).toBeVisible();
+  await expect.poll(() => page.getByRole('progressbar', { name: 'Pack files copied' }).evaluate(meter => meter.value / meter.max)).toBeCloseTo(2 / 3, 4);
+  await expect(cancel).toBeFocused(); await expect(cancel).toBeEnabled();
+  await emit({ phase: 'copying-pack-files', completedItems: '3', totalItems: '3', completedBytes: '12', totalBytes: '12' });
+  await expect(page.getByText('Matching pack ready', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Install reviewed pack' })).toHaveCount(0);
+  await emit({ phase: 'finishing-pack-copy' });
+  await expect(page.getByText('Finishing pack file checks', { exact: true })).toBeVisible();
+  await expect(page.getByRole('progressbar')).not.toHaveAttribute('value');
+  await expect(page.getByText('Copied 3 of 3 pack files', { exact: true })).toHaveCount(0);
+  await expect(cancel).toBeFocused(); await expect(cancel).toBeEnabled();
+  await emit({ phase: 'private-unknown-token' });
+  await expect(page.getByText('Working on matching client pack', { exact: true })).toBeVisible();
+  await expect(page.getByText('private-unknown-token', { exact: true })).toHaveCount(0);
+  await cancel.click();
+  await expect.poll(() => page.evaluate(() => window.calls.filter(call => call.channel === 'client-packs:cancel').length)).toBe(1);
+  // Settle the held request; progress itself must never settle it.
+  await page.evaluate(() => window.pending['client-packs:install'][0].resolve({ ok: false, error: { code: 'CANCELLED', message: 'Cancelled' } }));
+  await expect(page.getByRole('progressbar')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.listeners.size)).toBe(0);
+});
+
+for (const counts of [
+  { completedItems: '0', totalItems: '0' },
+  { completedItems: '2' },
+  { completedItems: '4', totalItems: '3' },
+  { completedItems: '9007199254740993', totalItems: '9007199254740992' }
+]) test(`task7: unusable local total stays indeterminate: ${JSON.stringify(counts)}`, async ({ page }) => {
+  await start(page); await page.evaluate(() => { window.pending['client-packs:preview'] = []; });
+  await page.getByRole('button', { name: 'Review matching pack' }).click();
+  await page.evaluate(counts => {
+    const input = window.pending['client-packs:preview'][0].input;
+    for (const listener of window.listeners) listener({ ...input, phase: 'checking-bundled-files', ...counts });
+  }, counts);
+  await expect(page.getByText('Checking bundled pack files', { exact: true })).toBeVisible();
+  await expect(page.getByRole('progressbar')).not.toHaveAttribute('value');
+  await expect(page.getByRole('button', { name: 'Cancel request' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Install reviewed pack' })).toHaveCount(0);
+  await page.evaluate(() => window.pending['client-packs:preview'][0].resolve({ ok: false, error: { code: 'CANCELLED', message: 'fixture settlement' } }));
+});
+
+test('task7: valid beyond-safe-integer file counts retain their measured ratio', async ({ page }) => {
+  await start(page); await page.evaluate(() => { window.pending['client-packs:preview'] = []; });
+  await page.getByRole('button', { name: 'Review matching pack' }).click();
+  await page.evaluate(() => {
+    const input = window.pending['client-packs:preview'][0].input;
+    for (const listener of window.listeners) listener({ ...input, phase: 'checking-bundled-files', completedItems: '9007199254740993', totalItems: '18014398509481986' });
+  });
+  await expect(page.getByText('Checked 9,007,199,254,740,993 of 18,014,398,509,481,986 bundled files', { exact: true })).toBeVisible();
+  await expect.poll(() => page.getByRole('progressbar', { name: 'Bundled files checked' }).evaluate(meter => meter.value / meter.max)).toBeCloseTo(0.5, 5);
+  await page.evaluate(() => {
+    const input = window.pending['client-packs:preview'][0].input;
+    for (const listener of window.listeners) listener({ ...input, phase: 'complete' });
+  });
+  await expect(page.getByText('Working on matching client pack', { exact: true })).toBeVisible();
+  await expect(page.getByRole('progressbar')).not.toHaveAttribute('value');
+  await expect(page.getByRole('button', { name: 'Install reviewed pack' })).toHaveCount(0);
+  await page.evaluate(() => window.pending['client-packs:preview'][0].resolve({ ok: false, error: { code: 'CANCELLED', message: 'fixture settlement' } }));
+});
+test('task7: inherited object keys are unknown phases, not display labels or file work', async ({ page }) => {
+  await start(page); await page.evaluate(() => { window.pending['client-packs:preview'] = []; });
+  await page.getByRole('button', { name: 'Review matching pack' }).click();
+  await page.evaluate(() => {
+    const input = window.pending['client-packs:preview'][0].input;
+    for (const listener of window.listeners) listener({ ...input, phase: 'constructor' });
+  });
+  await expect(page.getByText('Working on matching client pack', { exact: true })).toBeVisible();
+  await expect(page.getByRole('progressbar')).not.toHaveAttribute('value');
+  await page.evaluate(() => window.pending['client-packs:preview'][0].resolve({ ok: false, error: { code: 'CANCELLED', message: 'fixture settlement' } }));
+});
+test('task7: refused one-use install capability asks for a fresh explicit review without retrying', async ({ page }) => {
+  await start(page);
+  await page.evaluate(() => { window.preview.conflicts = []; window.pending['client-packs:install'] = []; });
+  await page.getByRole('button', { name: 'Review matching pack' }).click();
+  await page.getByRole('button', { name: 'Install reviewed pack' }).click();
+  await expect.poll(() => page.evaluate(() => window.pending['client-packs:install'].length)).toBe(1);
+  await page.evaluate(() => window.pending['client-packs:install'][0].resolve({ ok: false, error: {
+    code: 'INVALID_REQUEST', message: 'This installation review is no longer valid. Review matching pack again before installing.'
+  } }));
+  await expect(page.getByRole('alert')).toContainText('Review matching pack again before installing');
+  await expect(page.getByRole('button', { name: 'Install reviewed pack' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Review matching pack' })).toBeEnabled();
+  expect(await page.evaluate(() => window.calls.filter(call => call.channel === 'client-packs:preview').length)).toBe(1);
+  expect(await page.evaluate(() => window.calls.filter(call => call.channel === 'client-packs:install').length)).toBe(1);
+  await page.getByRole('button', { name: 'Review matching pack' }).click();
+  await expect(page.getByRole('button', { name: 'Install reviewed pack' })).toBeEnabled();
+  expect(await page.evaluate(() => window.calls.filter(call => call.channel === 'client-packs:preview').length)).toBe(2);
+  expect(await page.evaluate(() => window.calls.filter(call => call.channel === 'client-packs:install').length)).toBe(1);
+});

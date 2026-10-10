@@ -126,6 +126,7 @@ class ClientPackService {
         if (!Array.isArray(selected) || new Set(selected).size !== selected.length || selected.some(id => !available.includes(id))) throw fail();
         plan.optionalFileIds = [...selected];
         plan.prepared = await this.candidatePreparer.prepare({ inspectionId: plan.inspectionId, optionalFileIds: selected, signal: operation.signal, onProgress: operation.onProgress });
+        operation.onProgress({ phase: 'checking-client-files' });
         plan.baseline = await captureServerDirectoryCopySource(target.clientPath, { ...(this.reparseInspector ? { reparseInspector: this.reparseInspector } : {}), signal: operation.signal });
         plan.oldManifest = await this.stateStore.read(target.clientPath);
         const changes = planOwnership(plan.baseline, plan.oldManifest, plan.prepared.manifest.entries);
@@ -153,23 +154,30 @@ class ClientPackService {
             await this.runtimeInstaller.reserveOperation({ operationId: operation.operationId, clientPath: this.transaction.candidatePathFor(target, operation.operationId) });
             context = await this.transaction.stage({ target, baseline: plan.baseline, oldManifest: plan.oldManifest, prepared: plan.prepared,
               descriptor: plan.descriptor, optionalFileIds: plan.optionalFileIds, conflictChoices: value.conflictChoices, signal: operation.signal, operationId: operation.operationId, onProgress: operation.onProgress });
+            operation.onProgress({ phase: 'checking-candidate-files' });
             const preservedSnapshot = await captureServerDirectoryCopySource(context.candidatePath, this.reparseInspector ? { reparseInspector: this.reparseInspector } : {});
             runtimeStarted = true;
+            operation.onProgress({ phase: 'preparing-runtime' });
             const preparedRuntime = await this.runtimeInstaller.prepare({ clientPath: context.candidatePath, runtime: plan.descriptor.runtime,
               signal: operation.signal, onProgress: operation.onProgress, operationId: operation.operationId });
             if (preparedRuntime?.quiescent !== true || !sameRuntime(preparedRuntime.runtime, plan.descriptor.runtime)) throw fail('RUNTIME_INCOMPLETE');
             cancelled(operation.signal);
+            operation.onProgress({ phase: 'verifying-runtime' });
             await this._runtime(context.candidatePath, plan.descriptor.runtime, plan.prepared.runtimeConstraints);
+            operation.onProgress({ phase: 'checking-candidate-files' });
             const runtimeSnapshot = await captureServerDirectoryCopySource(context.candidatePath, this.reparseInspector ? { reparseInspector: this.reparseInspector } : {});
             if (!equal(nonRuntimeFiles(preservedSnapshot), nonRuntimeFiles(runtimeSnapshot))) throw fail('PLAN_STALE');
             if (!equal((await this._requirement(value.clientId, { signal: operation.signal, deadline: operation.deadline, expectedBinding: plan.binding })).descriptor, plan.descriptor)) throw fail('PLAN_STALE');
             cancelled(operation.signal);
+            operation.onProgress({ phase: 'sealing-client-files' });
             await this.transaction.seal(context);
             // Cancellation stops at the durable ready marker; publication must now settle or recover.
             publicationStarted = true; operation.onProgress({ phase: 'publishing' });
             await this.transaction.publish(context);
+            operation.onProgress({ phase: 'verifying-installation' });
             const verified = await this._verify(target, plan.descriptor);
             cleanupAttempted = true;
+            operation.onProgress({ phase: 'cleaning-installation' });
             const cleanup = await this._cleanupSettled(target);
             return deepFreeze({ clientId: value.clientId, status: verified.verified ? 'ready' : 'modified', verified: verified.verified, cleanup });
           } catch (cause) {
