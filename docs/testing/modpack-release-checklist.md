@@ -158,7 +158,7 @@ Preserve the older **a1** interrupted operation `op2-bbb18ef48d2efa541c9569569b4
 - [ ] Upgrade the disposable server from 0.13.4 to exact 0.13.5 through the UI; verify runtime, retained settings/data, launch and join.
 - [ ] Pair/install the matching client release and verify the client follows the server version, not an unrelated latest version.
 - [ ] Test a reviewed downgrade to 0.13.4 and restore-point rollback separately. Preserve a recoverable test world; do not assume arbitrary world downgrades are safe. Recheck client transition and actual join.
-- [ ] Stop the disposable server, reversibly remove/rename one managed test JAR, and confirm drift is detected and the client cannot silently install/launch against an invalid managed state. Restore or Repair normally, then verify recovery and join.
+- [ ] First check that ordinary individual-JAR controls explain that the pack is managed and direct the user to Modpack/Detach; do not silently bypass that guard. Then stop the disposable server, reversibly rename one managed test JAR through ordinary file controls, and confirm external drift is detected and the client cannot silently install/launch against an invalid managed state. Restore or Repair normally, then verify recovery and join. This is an isolated external-change test, not permission to edit real instances or unlock managed controls.
 - [ ] Test user-added files and configuration conflicts: review choices must preserve the intended files and not silently discard them.
 - [ ] Test Detach last or on another isolated disposable instance: files remain, modpack management/notifications stop, and ordinary mod controls unlock. Check matching-client behavior after Detach.
 
@@ -187,6 +187,6 @@ Preserve the older **a1** interrupted operation `op2-bbb18ef48d2efa541c9569569b4
 
 ## Supporting records
 
-Detailed history: [Native verification evidence](2026-10-08-native-modpack-verification.md). Implementation scope: [Matching client pack plan](../superpowers/plans/2026-10-08-matching-client-packs.md). Latest local code checkpoint: `c66a584`, branch `codex/verify-modpacks-client-packs`; clean final combined gate and remaining native tests are still required. No push/release. Three unrelated user edits remain excluded.
+Detailed history: [Native verification evidence](2026-10-08-native-modpack-verification.md). Implementation scope: [Matching client pack plan](../superpowers/plans/2026-10-08-matching-client-packs.md). Latest integrated source checkpoints: session recovery `73cd00e`, MRPACK redirects `f8740eb`, branch `codex/verify-modpacks-client-packs`; MultiMC work is in progress. A clean final combined gate and remaining native tests are still required. No push/release. Three unrelated user edits remain excluded.
 
 Additional working evidence is retained under `.superpowers/sdd/2026-10-08-matching-client-packs/`, particularly `progress.md`, `task-6-native-resume-1143.md`, and `task-6-post-candidate-recovery-audit.md`. Those scratch files must not be the only record of unfinished work; update this repository checklist when status changes.
