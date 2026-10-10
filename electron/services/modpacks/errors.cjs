@@ -1,7 +1,7 @@
 const CLIENT_PACK_SERVER_CHANGED_GUIDANCE = "The server's managed mod files differ from the installed pack. Use Modpack Verify and Repair before installing or launching its matching client pack.";
 
 const FAILURE_CODES = Object.freeze([
-  'INVALID_RELEASE_URL', 'RATE_LIMITED', 'REPOSITORY_NOT_FOUND', 'RELEASE_NOT_FOUND', 'ASSET_AMBIGUOUS', 'ASSET_SELECTION_REQUIRED', 'ASSET_CHANGED',
+  'INVALID_RELEASE_URL', 'RATE_LIMITED', 'REPOSITORY_NOT_FOUND', 'RELEASE_NOT_FOUND', 'ASSET_AMBIGUOUS', 'ASSET_SELECTION_REQUIRED', 'ASSET_CHANGED', 'ARTIFACT_UNAVAILABLE',
   'UNSUPPORTED_ARCHIVE', 'MAGIC_EXTENSION_MISMATCH', 'ENCRYPTED_ARCHIVE', 'MULTIPART_VOLUME_MISSING', 'ARCHIVE_LIMIT_EXCEEDED',
   'UNSAFE_ARCHIVE_ENTRY', 'ARCHIVE_ENTRY_COLLISION', 'EXTRACTOR_UNAVAILABLE', 'EXTRACTOR_FAILED', 'MANIFEST_INVALID', 'CLIENT_ONLY_PACK',
   'MISSING_PROVIDER_DIGEST', 'HASH_MISMATCH', 'PACK_ROOT_AMBIGUOUS', 'LOADER_CONFLICT', 'UNSUPPORTED_LOADER', 'UNSUPPORTED_RUNTIME_LAYOUT',
@@ -17,6 +17,7 @@ const DETAIL_FIELDS = Object.freeze({
   ASSET_AMBIGUOUS: { count: 'decimal' },
   ASSET_SELECTION_REQUIRED: { count: 'decimal' },
   ASSET_CHANGED: { partId: 'id' },
+  ARTIFACT_UNAVAILABLE: { fileName: 'fileName', httpStatus: ['404', '410'] },
   UNSUPPORTED_ARCHIVE: { archiveFamily: 'archiveFamily' },
   MAGIC_EXTENSION_MISMATCH: { archiveFamily: 'archiveFamily' },
   ENCRYPTED_ARCHIVE: {},
@@ -103,6 +104,7 @@ function isAllowedDetail(kind, value) {
       'minPreflightReserveBytes', 'preflightReservePercent'
     ].includes(value);
     case 'field': return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9.]{0,127}$/.test(value);
+    case 'fileName': return isSafeText(value) && !/[\u007f<>:"|*]/.test(value) && value !== '.' && value !== '..';
     default: return false;
   }
 }

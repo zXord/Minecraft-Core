@@ -64,6 +64,23 @@ async function start(page, status = 'install-required', kind = 'client') {
   if (kind !== 'client') await page.evaluate(kind => window.show(kind,'a'),kind);
 }
 
+test('missing required published file stays a review failure with actionable safe details', async ({page}) => {
+  await start(page);
+  await page.evaluate(() => {
+    window.fail = {'client-packs:preview': {code:'ARTIFACT_UNAVAILABLE',message:'PRIVATE token=secret',
+      details:{fileName:'midnight-ae2-30e7823.zip',httpStatus:'404',url:'https://private/?token=secret'}}};
+  });
+  await page.getByRole('button',{name:'Review matching pack'}).click();
+  await expect(page.getByRole('alert')).toContainText('midnight-ae2-30e7823.zip');
+  await expect(page.getByRole('alert')).toContainText('HTTP 404');
+  await expect(page.getByRole('alert')).toContainText('server owner');
+  await expect(page.getByRole('alert')).not.toContainText(/PRIVATE|token=|https:/);
+  await expect(page.getByRole('button',{name:'Review matching pack'})).toBeEnabled();
+  await expect(page.getByRole('button',{name:/Install reviewed|Install matching/})).toHaveCount(0);
+  expect(await page.evaluate(() => window.currentStatus)).toBe('install-required');
+  expect(await page.evaluate(() => window.calls.filter(call => call.channel === 'client-packs:install'))).toEqual([]);
+});
+
 async function companionEvidence(page, label, errors) {
   if (!process.env.COMPANION_WARNING_EVIDENCE) return;
   const prefix = path.join(process.env.COMPANION_WARNING_EVIDENCE, `${process.env.COMPANION_WARNING_PHASE ?? 'fixture'}-${label}`);

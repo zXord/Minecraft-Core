@@ -1,7 +1,16 @@
+function unavailableArtifactMessage(details) {
+  const name = details?.fileName;
+  const safeName = typeof name === 'string' && name.length > 0 && name.length <= 256 &&
+    !/[\\/\u0000-\u001f\u007f<>:"|?*]/.test(name) && name !== '.' && name !== '..';
+  const status = ['404', '410'].includes(details?.httpStatus) ? ` (HTTP ${details.httpStatus})` : '';
+  return `The pack's published download${safeName ? ` for ${name}` : ''} is unavailable${status}. Retry if the publisher restores it, or ask the server owner to pair an available matching client pack.`;
+}
+
 export class ClientPackApiError extends Error {
   constructor(error = {}) {
     const message = error.code === 'CLIENT_PACK_SERVER_CHANGED'
       ? "The server's managed mod files differ from the installed pack. Use Modpack Verify and Repair before installing or launching its matching client pack."
+      : error.code === 'ARTIFACT_UNAVAILABLE' ? unavailableArtifactMessage(error.details)
       : error.message || 'Matching client pack is unavailable. Refresh and try again.';
     super(message);
     this.name = 'ClientPackApiError';

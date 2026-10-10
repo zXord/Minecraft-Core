@@ -8,7 +8,7 @@ const ts = require('typescript');
 const { FAILURE_CODES, ModpackError, PUBLIC_ERROR_DETAILS_BY_CODE } = require('../../electron/services/modpacks/errors.cjs');
 
 const APPROVED_CODES = [
-  'INVALID_RELEASE_URL', 'RATE_LIMITED', 'REPOSITORY_NOT_FOUND', 'RELEASE_NOT_FOUND', 'ASSET_AMBIGUOUS', 'ASSET_SELECTION_REQUIRED', 'ASSET_CHANGED',
+  'INVALID_RELEASE_URL', 'RATE_LIMITED', 'REPOSITORY_NOT_FOUND', 'RELEASE_NOT_FOUND', 'ASSET_AMBIGUOUS', 'ASSET_SELECTION_REQUIRED', 'ASSET_CHANGED', 'ARTIFACT_UNAVAILABLE',
   'UNSUPPORTED_ARCHIVE', 'MAGIC_EXTENSION_MISMATCH', 'ENCRYPTED_ARCHIVE', 'MULTIPART_VOLUME_MISSING', 'ARCHIVE_LIMIT_EXCEEDED',
   'UNSAFE_ARCHIVE_ENTRY', 'ARCHIVE_ENTRY_COLLISION', 'EXTRACTOR_UNAVAILABLE', 'EXTRACTOR_FAILED', 'MANIFEST_INVALID', 'CLIENT_ONLY_PACK',
   'MISSING_PROVIDER_DIGEST', 'HASH_MISMATCH', 'PACK_ROOT_AMBIGUOUS', 'LOADER_CONFLICT', 'UNSUPPORTED_LOADER', 'UNSUPPORTED_RUNTIME_LAYOUT',
@@ -34,6 +34,7 @@ test('renderer type contract accepts the runtime-direction failure codes', t => 
     "const retryAsSwitch: ModpackFailureCode = 'SWITCH_REQUIRED';",
     "const retryAfterRateLimit: ModpackFailureCode = 'RATE_LIMITED';",
     "const retryAtShorterPath: ModpackFailureCode = 'SERVER_PATH_TOO_LONG';",
+    "const missingPublishedFile: ModpackFailureCode = 'ARTIFACT_UNAVAILABLE';",
     "const pairClient: ModpackFailureCode = 'CLIENT_PACK_UNAVAILABLE';",
     "const refuseManagedModEdit: ModpackFailureCode = 'MANAGED_MOD_EDIT_BLOCKED';",
     "const stopClient: ModpackFailureCode = 'CLIENT_RUNNING';",
@@ -57,6 +58,15 @@ test('public error details cannot leak paths or signed URLs', () => {
     details: { algorithm: 'sha256', path: 'C:\\secret', url: 'https://x/?token=y' }
   });
   assert.deepEqual(error.toPublicResult().error.details, { algorithm: 'sha256' });
+});
+
+test('unavailable artifact details refuse paths, URLs, controls and unrecognized status', () => {
+  for (const fileName of ['C:\\secret', '../secret', 'https://x/?token=secret', 'secret\nheader', 'secret\x7f']) {
+    const result = new ModpackError('ARTIFACT_UNAVAILABLE', 'The published file is unavailable', {
+      details: { fileName, httpStatus: '500', path: 'C:\\secret', url: 'https://x/?token=y' }
+    }).toPublicResult();
+    assert.deepEqual(result.error.details, {});
+  }
 });
 
 test('server path errors expose only the retryable destination field', () => {

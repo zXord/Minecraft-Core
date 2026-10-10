@@ -128,7 +128,9 @@ class ClientPackService {
         plan.baseline = await captureServerDirectoryCopySource(target.clientPath, { ...(this.reparseInspector ? { reparseInspector: this.reparseInspector } : {}), signal: operation.signal });
         plan.oldManifest = await this.stateStore.read(target.clientPath);
         const changes = planOwnership(plan.baseline, plan.oldManifest, plan.prepared.manifest.entries);
-        cancelled(operation.signal); plan.active = false;
+        cancelled(operation.signal);
+        // Retention starts when the review is ready, not during downloads or scans.
+        plan.createdAt = this.clock(); plan.active = false;
         return deepFreeze({ clientId: value.clientId, planId: plan.planId, descriptor, optionalFiles: inspected.optionalFiles,
           optionalFileIds: selected, downloadBytes: inspected.downloadBytes, ...changes });
       } catch (cause) { await this._release(plan); throw cause; }

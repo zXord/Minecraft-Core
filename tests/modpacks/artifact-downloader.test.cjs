@@ -155,6 +155,28 @@ test('GitHub downloads require the exact issued plan and derive canonical reques
   }
 });
 
+test('missing published files identify only their safe filename and missing HTTP status', async t => {
+  for (const statusCode of [404, 410]) await t.test(String(statusCode), async () => {
+    const content = Buffer.from('expected');
+    const url = 'https://cdn.example/private?token=secret';
+    const f = await fixture({ responses: new Map([[url, { statusCode, body: Buffer.from('private upstream body') }]]) });
+    try {
+      const request = part(content, { url });
+      delete request.fileName;
+      request.targetPath = 'resourcepacks/midnight-ae2-30e7823.zip';
+      await assert.rejects(f.downloader.downloadPart(request), error => {
+        const result = error.toPublicResult();
+        assert.equal(result.error.code, 'ARTIFACT_UNAVAILABLE');
+        assert.deepEqual(result.error.details, { fileName: 'midnight-ae2-30e7823.zip', httpStatus: String(statusCode) });
+        assert.equal(result.error.retryable, false);
+        assert.doesNotMatch(JSON.stringify(result), /secret|private|https:|resourcepacks/);
+        return true;
+      });
+      assert.deepEqual(await partialFiles(f.cache.root), []);
+    } finally { await f.cleanup(); }
+  });
+});
+
 test('GitHub asset rate limits are retryable while unrelated forbidden responses stay redacted', async t => {
   const content = Buffer.from('rate-limited GitHub bytes');
   const { artifactPlan, downloadUrl } = await issuedGitHubPlan(content);

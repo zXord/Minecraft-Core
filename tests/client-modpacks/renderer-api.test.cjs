@@ -18,6 +18,20 @@ test('server drift stays a refusal with renderer-local Verify and Repair guidanc
     /Use Modpack Verify and Repair/.test(error.message) && !error.message.includes('secret'));
   assert.equal(allowsLegacyClient({ status: 'error', code: 'CLIENT_PACK_SERVER_CHANGED' }), false);
 });
+test('missing published dependency gives file-specific guidance without trusting remote error text', async () => {
+  const { ClientPackApiError } = await modulePromise;
+  const error = new ClientPackApiError({ code: 'ARTIFACT_UNAVAILABLE', message: 'PRIVATE token=secret',
+    details: { fileName: 'midnight-ae2-30e7823.zip', httpStatus: '404', url: 'https://x/?token=secret' } });
+  assert.match(error.message, /midnight-ae2-30e7823\.zip/);
+  assert.match(error.message, /HTTP 404/);
+  assert.match(error.message, /server owner/);
+  assert.doesNotMatch(error.message, /PRIVATE|secret|https:/);
+  for (const fileName of ['C:\\secret', '../secret', 'https://x/?token=secret', 'secret\nheader']) {
+    const invalid = new ClientPackApiError({ code: 'ARTIFACT_UNAVAILABLE', message: 'PRIVATE', details: { fileName, httpStatus: 'bad' } });
+    assert.doesNotMatch(invalid.message, /secret|PRIVATE|HTTP bad/);
+    assert.match(invalid.message, /published download/);
+  }
+});
 test('progress uses both scope identifiers and removes only its own listener on settlement', async () => {
   const { clientPackApi } = await modulePromise;
   const listeners = new Set();

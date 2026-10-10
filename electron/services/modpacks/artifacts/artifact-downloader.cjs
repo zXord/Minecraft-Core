@@ -168,6 +168,13 @@ class ArtifactDownloader {
         (response.statusCode === 403 && response.headers?.['x-ratelimit-remaining'] === '0')
       );
       if (githubRateLimited) { response.destroy?.(); throw rateLimited(); }
+      if (response && [404, 410].includes(response.statusCode)) {
+        response.destroy?.();
+        const fileName = partPlan.fileName ?? (typeof partPlan.targetPath === 'string' ? partPlan.targetPath.split('/').at(-1) : undefined);
+        throw new ModpackError('ARTIFACT_UNAVAILABLE', 'The published file is unavailable', {
+          details: { fileName, httpStatus: String(response.statusCode) }
+        });
+      }
       if (!response || typeof response[Symbol.asyncIterator] !== 'function' || !Number.isSafeInteger(response.statusCode) || response.statusCode < 200 || response.statusCode >= 300) {
         response?.destroy?.(); throw safeDownloadFailure();
       }

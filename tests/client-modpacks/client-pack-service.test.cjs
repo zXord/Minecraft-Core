@@ -65,6 +65,47 @@ test('preview and install publish verified main-owned plan with path-free DTOs',
   assert.equal((await f.service.getLaunchAuthority({ clientId: 'one' })).profileId, '1.20.1-forge-47.3.12');
   assert.equal((await f.service.verify({ clientId: 'one' })).verified, true);
 });
+for (const slowBoundary of ['candidate preparation', 'final state read']) {
+  test(`slow ${slowBoundary} does not consume the completed preview review window`, async t => {
+    const f = fixture(t);
+    let now = 1000;
+    f.service.clock = () => now;
+    const dependency = slowBoundary === 'candidate preparation' ? f.dependencies.candidatePreparer : f.dependencies.stateStore;
+    const method = slowBoundary === 'candidate preparation' ? 'prepare' : 'read';
+    const original = dependency[method].bind(dependency);
+    let delayed = false;
+    dependency[method] = async (...args) => {
+      const result = await original(...args);
+      if (!delayed) { now += 900001; delayed = true; }
+      return result;
+    };
+    const preview = await f.service.preview({ clientId: 'one' });
+    assert.equal(delayed, true);
+    const result = await f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} });
+    assert.equal(result.status, 'ready');
+    assert.equal(result.verified, true);
+    assert.equal(fs.readFileSync(path.join(f.live, 'mods/pack.jar'), 'utf8'), 'pack');
+    assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'settings');
+  });
+}
+test('completed preview still expires without staging after its review window', async t => {
+  const f = fixture(t);
+  let now = 1000;
+  f.service.clock = () => now;
+  const prepare = f.dependencies.candidatePreparer.prepare.bind(f.dependencies.candidatePreparer);
+  f.dependencies.candidatePreparer.prepare = async options => {
+    const result = await prepare(options);
+    now += 900001;
+    return result;
+  };
+  const preview = await f.service.preview({ clientId: 'one' });
+  now += 900001;
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'PLAN_STALE' });
+  assert.equal(await f.transaction.status(f.target), null);
+  assert.equal(f.runtimeOperations.size, 0);
+  assert.equal(fs.existsSync(path.join(f.live, 'mods')), false);
+  assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'settings');
+});
 test('renderer source or unknown optional IDs cannot authorize preparation', async t => {
   const f = fixture(t);
   await assert.rejects(f.service.preview({ clientId: 'one', source: descriptor.source }), { code: 'INVALID_REQUEST' });
