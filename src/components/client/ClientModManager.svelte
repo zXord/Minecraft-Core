@@ -31,7 +31,7 @@
   import { checkModDependencies, showDependencyModal, installWithDependencies } from '../../utils/mods/modDependencyHelper.js';
   import { checkDependencyCompatibility } from '../../utils/mods/modCompatibility.js';
   import { safeInvoke } from '../../utils/ipcUtils.js';
-  import { buildAuthHeaders, ensureSessionToken, getManagementBaseUrl } from '../../utils/managementAuth.js';
+  import { readManagementJson } from '../../utils/managementAuth.js';
   // Content-type aware stores for shaders/resource packs search and tabs
   import {
     activeContentType,
@@ -90,7 +90,7 @@
   export { handleRefreshFromParent as refreshFromDashboard };
   
   // Export the acknowledgment function so parent can call it
-  export { acknowledgeAllDependencies };
+  export { acknowledgeDependencies as acknowledgeAllDependencies };
   // Core state now provided by clientModManager store
   
   // Client mod finding state
@@ -139,12 +139,30 @@
   let previousPath = instance?.path || null;
   // Local delete confirmation state for asset deletions
   let showAssetDeleteConfirm = false;
+  let dependencyInstallScope = null;
   let pendingAssetDelete = null; // { type: 'shaderpacks'|'resourcepacks', fileName: string }
 
   let isCheckingModSync = false; // Guard to prevent reactive loops
   let suppressInstalledInfoSync = 0;
   let hasSeenInitialInstalledInfo = false;
   const modSyncQueue = createAsyncLatestQueue();
+  let alive = true;
+  let assetsSequence = 0;
+  let ownerController = new AbortController();
+  let ownerInstance = instance;
+  let ownerAuthority = JSON.stringify(instance);
+  $: if (instance !== ownerInstance || JSON.stringify(instance) !== ownerAuthority) {
+    ownerController.abort();
+    ownerController = new AbortController();
+    ownerInstance = instance;
+    ownerAuthority = JSON.stringify(instance);
+  }
+  function captureRead() {
+    const selected = instance;
+    const authority = JSON.stringify(selected);
+    const signal = ownerController.signal;
+    return { selected, signal, isCurrent: () => alive && !signal.aborted && instance === selected && JSON.stringify(instance) === authority };
+  }
 
   function getDownloadSourceLabel(source) {
     switch (source) {
@@ -167,24 +185,31 @@
   }
 
   async function handleRequiredDownload(downloadSourceOverride = null) {
-    const result = await downloadRequiredMods(instance, { downloadSourceOverride });
-    captureDownloadSourceSwitch(result, { kind: 'required' });
+    const scope = captureRead();
+    const result = await downloadRequiredMods(scope.selected, { ...scope, downloadSourceOverride });
+    if (scope.isCurrent()) captureDownloadSourceSwitch(result, { kind: 'required' });
   }
 
   async function handleOptionalDownload(downloadSourceOverride = null) {
-    const result = await downloadOptionalMods(instance, { downloadSourceOverride });
-    captureDownloadSourceSwitch(result, { kind: 'optional' });
+    const scope = captureRead();
+    const result = await downloadOptionalMods(scope.selected, { ...scope, downloadSourceOverride });
+    if (scope.isCurrent()) captureDownloadSourceSwitch(result, { kind: 'optional' });
   }
 
   async function handleSingleRequiredDownload(mod, downloadSourceOverride = null) {
-    const result = await downloadSingleRequiredMod(instance, mod, { downloadSourceOverride });
-    captureDownloadSourceSwitch(result, { kind: 'single-required', mod });
+    const scope = captureRead();
+    const result = await downloadSingleRequiredMod(scope.selected, mod, { ...scope, downloadSourceOverride });
+    if (scope.isCurrent()) captureDownloadSourceSwitch(result, { kind: 'single-required', mod });
   }
 
   async function handleSingleOptionalDownload(mod, downloadSourceOverride = null) {
-    const result = await downloadSingleOptionalMod(instance, mod, { downloadSourceOverride });
-    captureDownloadSourceSwitch(result, { kind: 'single-optional', mod });
+    const scope = captureRead();
+    const result = await downloadSingleOptionalMod(scope.selected, mod, { ...scope, downloadSourceOverride });
+    if (scope.isCurrent()) captureDownloadSourceSwitch(result, { kind: 'single-optional', mod });
   }
+
+  function acknowledgeDependencies() { const scope = captureRead(); return acknowledgeAllDependencies(scope.selected, scope); }
+  function runModAction(action, ...args) { const scope = captureRead(); return action(scope.selected, ...args, scope); }
 
   async function runPendingSourceSwitch(downloadSourceOverride = null) {
     const pending = pendingDownloadSourceSwitch;
@@ -369,11 +394,13 @@
   // Function to load acknowledged dependencies from persistent storage
   async function loadAcknowledgedDependencies() {
     if (!instance?.path) return;
+    const scope = captureRead();
     
     try {
       const result = await window.electron.invoke('load-expected-mod-state', {
-        clientPath: instance.path
+        clientPath: scope.selected.path
       });
+      if (!scope.isCurrent()) return;
       if (result.success && result.acknowledgedDeps) {
         // Merge with existing acknowledged deps instead of overwriting
         acknowledgedDeps.update(currentSet => {
@@ -397,32 +424,32 @@
     }
   }
 
-  function enqueueModSync(task) {
+  function enqueueModSync(task, scope = captureRead()) {
     return modSyncQueue.enqueue(async () => {
-      if (!instance?.path) return;
+      if (!scope.selected?.path || !scope.isCurrent()) return;
       isCheckingModSync = true;
       try {
-        await task();
+        await task(scope);
       } finally {
         isCheckingModSync = false;
       }
     });
   }
 
-  function syncInstalledMods() {
-    return enqueueModSync(() =>
-      withInstalledInfoSyncSuppressed(() => refreshInstalledMods(instance))
+  function syncInstalledMods(scope = captureRead()) {
+    return enqueueModSync(scope =>
+      withInstalledInfoSyncSuppressed(() => refreshInstalledMods(scope.selected, scope)), scope
     );
   }
 
-  function syncServerMods() {
-    return enqueueModSync(() =>
-      withInstalledInfoSyncSuppressed(() => loadModsFromServer(instance))
+  function syncServerMods(scope = captureRead()) {
+    return enqueueModSync(scope =>
+      withInstalledInfoSyncSuppressed(() => loadModsFromServer(scope.selected, scope)), scope
     );
   }
 
   function syncModStatusOnly() {
-    return enqueueModSync(() => checkModSynchronization(instance));
+    return enqueueModSync(scope => checkModSynchronization(scope.selected, scope));
   }
 
   // Connect to server and get mod information
@@ -472,6 +499,8 @@
   });
 
   onDestroy(() => {
+    alive = false;
+    ownerController.abort();
     modSyncQueue.cancel();
     if (downloadManagerCleanup) downloadManagerCleanup();
     if (unsubscribeInstalledInfo) unsubscribeInstalledInfo();
@@ -485,39 +514,40 @@
 
 
   // Reload installed mod info and update synchronization status
-  async function refreshMods() {
-    await syncServerMods();
-    await refreshAssets();
+  async function refreshMods(scope = captureRead()) {
+    if (!scope?.isCurrent) scope = captureRead(); // click handlers supply an Event
+    if (!scope.isCurrent()) return;
+    await syncServerMods(scope);
+    if (!scope.isCurrent()) return;
+    await refreshAssets(scope);
+    if (!scope.isCurrent()) return;
     successMessage.set('Mod list refreshed');
-    setTimeout(() => successMessage.set(''), 3000);
+    setTimeout(() => { if (scope.isCurrent()) successMessage.set(''); }, 3000);
   }
 
-  async function refreshAssets() {
-    if (!instance?.path) return;
+  async function refreshAssets(scope = captureRead()) {
+    if (!scope.selected?.path || !scope.isCurrent()) return;
+    const { selected, isCurrent: selectedCurrent } = scope;
+    const sequence = ++assetsSequence;
+    const current = () => selectedCurrent() && sequence === assetsSequence;
     try {
-      const shaderRes = await window.electron.invoke('list-client-assets', { clientPath: instance.path, type: 'shaderpacks' });
+      const shaderRes = await window.electron.invoke('list-client-assets', { clientPath: selected.path, type: 'shaderpacks' });
+      if (!current()) return;
       shaderAssets = shaderRes?.success ? (shaderRes.items || []) : [];
-      const rpRes = await window.electron.invoke('list-client-assets', { clientPath: instance.path, type: 'resourcepacks' });
+      const rpRes = await window.electron.invoke('list-client-assets', { clientPath: selected.path, type: 'resourcepacks' });
+      if (!current()) return;
       resourcePackAssets = rpRes?.success ? (rpRes.items || []) : [];
 
       // Also fetch server-required items for assets to compute Required status
       if (instance?.serverIp && instance?.serverPort) {
         try {
-          await ensureSessionToken(instance);
-          const base = getManagementBaseUrl(instance);
-          if (!base) return;
+          const readAssets = type => readManagementJson(selected, `/api/assets/list/${type}`, {
+            signal: scope.signal, isCurrent: current
+          }).then(r => r.ok ? r.data : null).catch(() => null);
           const [srvShaders, srvRps] = await Promise.all([
-            fetch(`${base}/api/assets/list/shaderpacks`, {
-              method: 'GET',
-              headers: buildAuthHeaders(instance),
-              signal: AbortSignal.timeout(10000)
-            }).then(r => r.ok ? r.json() : null).catch(() => null),
-            fetch(`${base}/api/assets/list/resourcepacks`, {
-              method: 'GET',
-              headers: buildAuthHeaders(instance),
-              signal: AbortSignal.timeout(10000)
-            }).then(r => r.ok ? r.json() : null).catch(() => null)
+            readAssets('shaderpacks'), readAssets('resourcepacks')
           ]);
+          if (!current()) return;
           serverShaderItems = srvShaders?.success ? (srvShaders.items || []) : [];
           serverResourcePackItems = srvRps?.success ? (srvRps.items || []) : [];
           // Log server required lists as part of snapshot
@@ -526,6 +556,7 @@
         }
       }
       // Update global stores so Search/Mod cards can reflect installed status immediately
+      if (!current()) return;
       try {
 
         // Shaders
@@ -567,6 +598,8 @@
 
   // Handle installing a different version for a client asset (using Modrinth)
   async function handleInstallAssetVersion(event) {
+    const scope = captureRead();
+    if (!scope.isCurrent()) return;
     const { item, version } = event.detail;
     if (!item?.projectId || !version?.id) return;
     try {
@@ -580,20 +613,23 @@
         ...modLike,
         loader: get(loaderType) || 'vanilla',
         version: get(minecraftVersion) || '1.20.1',
-        clientPath: instance?.path,
+        clientPath: scope.selected?.path,
         forceReinstall: true,
         contentType: $activeContentType === CONTENT_TYPES.SHADERS ? 'shaders' : ($activeContentType === CONTENT_TYPES.RESOURCE_PACKS ? 'resourcepacks' : 'mods')
       };
       const result = await window.electron.invoke('install-client-mod', modData);
+      if (!scope.isCurrent()) return;
       if (result?.success) {
-        await refreshAssets();
+        await refreshAssets(scope);
+        if (!scope.isCurrent()) return;
         notifyAssetsChanged();
         successMessage.set('Installed selected version');
-        setTimeout(() => successMessage.set(''), 2500);
+        setTimeout(() => { if (scope.isCurrent()) successMessage.set(''); }, 2500);
       }
     } catch (e) {
+      if (!scope.isCurrent()) return;
       errorMessage.set('Failed to install selected version');
-      setTimeout(() => errorMessage.set(''), 3000);
+      setTimeout(() => { if (scope.isCurrent()) errorMessage.set(''); }, 3000);
     }
   }
 
@@ -602,6 +638,20 @@
   const baseName = (fn) => (fn || '').toLowerCase().split(/[\\\/]/).pop();
   const installedSet = new Set((installedList || []).map(a => baseName(a.fileName)));
   return requiredList.filter(it => !installedSet.has(baseName(it.fileName))).length;
+  }
+
+  async function handleAssetAction(type, action, item) {
+    const scope = captureRead();
+    if (!scope.isCurrent()) return;
+    await window.electron.invoke(action === 'download' ? 'minecraft-download-assets' : 'delete-client-asset', {
+      clientPath: scope.selected.path, type,
+      ...(action === 'download' ? { requiredItems: [item] } : { fileName: item.fileName })
+    });
+    if (!scope.isCurrent()) return;
+    await refreshAssets(scope);
+    if (!scope.isCurrent()) return;
+    notifyAssetsChanged();
+    dispatch('asset-changed', { type, action, fileName: item.fileName });
   }
 
   function countOutdatedAssets(requiredList, installedList) {
@@ -625,43 +675,51 @@
   }
 
   async function downloadRequiredAssets(type) {
-    if (!instance?.path || !instance?.serverIp || !instance?.serverPort) return;
+    const scope = captureRead();
+    if (!scope.isCurrent()) return;
+    if (!scope.selected?.path || !instance?.serverIp || !instance?.serverPort) return;
     const requiredItems = type === 'shaderpacks' ? serverShaderItems : serverResourcePackItems;
     if (!requiredItems?.length) return;
     try {
   await window.electron.invoke('minecraft-download-assets', {
-        clientPath: instance.path,
+        clientPath: scope.selected?.path,
         type,
         requiredItems,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
       });
-  await refreshAssets();
+  if (!scope.isCurrent()) return;
+  await refreshAssets(scope);
+  if (!scope.isCurrent()) return;
   notifyAssetsChanged();
       successMessage.set('Assets synchronized');
-      setTimeout(() => successMessage.set(''), 3000);
+      setTimeout(() => { if (scope.isCurrent()) successMessage.set(''); }, 3000);
     } catch (err) {
+      if (!scope.isCurrent()) return;
       // ignore; progress UI handles errors elsewhere
     }
   }
 
   // Handle file drop for adding mods directly
   async function handleDroppedFiles(event) {
+    const scope = captureRead();
+    if (!scope.isCurrent()) return;
     const { files } = event.detail;
 
     if (files && files.length > 0) {
       try {
         successMessage.set(`Processing ${files.length} files...`);
 
-          const result = await uploadDroppedMods(files, instance?.path);
+          const result = await uploadDroppedMods(files, scope.selected?.path);
 
+          if (!scope.isCurrent()) return;
           if (result.success) {
             successMessage.set(`Successfully added ${result.count} mods`);
 
-            await syncInstalledMods();
+            await syncInstalledMods(scope);
         } else {
           errorMessage.set(`Failed to add mods: ${result.failed.join(', ')}`);
         }
       } catch (error) {
+      if (!scope.isCurrent()) return;
         errorMessage.set(`Failed to process files: ${error.message || 'Unknown error'}`);
       }
     }  }
@@ -692,11 +750,12 @@
   }
 
   // Install a mod to the client instance
-  async function installClientMod(mod, versionId = null, customPath = null) {
-    const pathToUse = customPath || instance.path;
+  async function installClientMod(mod, versionId = null, customPath = null, scope = captureRead()) {
+    if (!scope.isCurrent()) return;
+    const pathToUse = customPath || scope.selected?.path;
     if (!pathToUse) {
       errorMessage.set('No client path configured');
-      setTimeout(() => errorMessage.set(''), 5000);
+      setTimeout(() => { if (scope.isCurrent()) errorMessage.set(''); }, 5000);
       return;
     }
 
@@ -723,9 +782,10 @@
 
       const result = await window.electron.invoke('install-client-mod', modData);
 
+      if (!scope.isCurrent()) return;
       if (result && result.success) {
         successMessage.set(`Successfully installed ${mod.name} to client`);
-        setTimeout(() => successMessage.set(''), 5000);
+        setTimeout(() => { if (scope.isCurrent()) successMessage.set(''); }, 5000);
         // Refresh based on content type
         if ($activeContentType === CONTENT_TYPES.MODS) {
           installedModIds.update(ids => {
@@ -745,30 +805,33 @@
               }
             ];
           });
-          await syncInstalledMods();
+          await syncInstalledMods(scope);
         } else {
           // Silent refresh for shaders/resource packs so Installed shows immediately
-          await refreshAssets();
+          await refreshAssets(scope);
+          if (!scope.isCurrent()) return;
           notifyAssetsChanged();
         }
       } else {
         throw new Error(result?.error || 'Installation failed');
       }
     } catch (err) {
+      if (!scope.isCurrent()) return;
       errorMessage.set(`Failed to install ${mod.name}: ${err.message}`);
-      setTimeout(() => errorMessage.set(''), 5000);
+      setTimeout(() => { if (scope.isCurrent()) errorMessage.set(''); }, 5000);
     } finally {
-      installingModIds.update(ids => {
+      if (scope.isCurrent()) installingModIds.update(ids => {
         ids.delete(mod.id);
         return ids;
       });
     }  }
 
   // Wrapper used by installWithDependencies for client installs
-  async function clientInstallFn(mod, path) {
+  async function clientInstallFn(mod, path, scope) {
+    if (!scope.isCurrent()) return false;
     try {
-      await installClientMod(mod, mod.selectedVersionId, path);
-      return true;
+      await installClientMod(mod, mod.selectedVersionId, path, scope);
+      return scope.isCurrent();
     } catch (error) {
       return false;
     }
@@ -785,7 +848,7 @@
     }
     if (tab === 'search') {
       // Refresh installed mod info when switching to find-mods tab
-        loadInstalledInfo(instance);
+        { const scope = captureRead(); loadInstalledInfo(scope.selected, scope); }
       // Trigger search if we have a keyword and current content type has no results yet
       const hasKeyword = !!get(searchKeyword);
       const hasResults =
@@ -800,6 +863,8 @@
 
   // Handle content type switching similar to server UI
   async function switchContentType(contentTypeId) {
+    const scope = captureRead();
+    if (!scope.isCurrent()) return;
     if ($activeContentType === contentTypeId) return;
     contentTypeSwitching.set(true);
     try {
@@ -808,28 +873,34 @@
       if (activeTab === 'search') {
         // Ensure installed IDs/info are loaded for proper installed flags in search results
         try {
-          await loadContent(instance?.path || '', contentTypeId);
-        } catch (_) {}
+          await loadContent(scope.selected?.path || '', contentTypeId, scope);
+        } catch (_) {
+          if (!scope.isCurrent()) return;
+        }
+        if (!scope.isCurrent()) return;
         // Trigger search if keyword present
         if (get(searchKeyword)) {
           await searchClientMods();
         }
       } else if (activeTab === 'installed') {
         if (contentTypeId === CONTENT_TYPES.MODS) {
-          await syncInstalledMods();
+          await syncInstalledMods(scope);
         } else {
-          await refreshAssets();
+          await refreshAssets(scope);
         }
       }
     } finally {
-      contentTypeSwitching.set(false);
+      if (scope.isCurrent()) contentTypeSwitching.set(false);
     }
   }
   // Install selected mod and its dependencies using helper
   async function handleInstallWithDependencies() {
+    const scope = dependencyInstallScope || captureRead();
+    if (!scope.isCurrent()) return;
     try {
-      const result = await installWithDependencies(instance?.path, clientInstallFn, 'mods');
+      const result = await installWithDependencies(scope.selected?.path, (mod, path) => clientInstallFn(mod, path, scope), 'mods');
 
+      if (!scope.isCurrent()) return;
       if (!result) {
         const mod = get(modToInstall);
         if (mod && mod.id) {
@@ -852,15 +923,19 @@
         }
       }
     } catch (error) {
+      if (!scope.isCurrent()) return;
       errorMessage.set(`Failed to install dependencies: ${error.message || 'Unknown error'}`);
       installingModIds.set(new SvelteSet());
     }
   }
   // Handle mod installation with dependency checks
   async function handleInstallMod(event) {
+    const scope = captureRead();
+    if (!scope.isCurrent()) return;
     const { mod, versionId } = event.detail;
     const ver = versionId || mod.selectedVersionId;    // Refresh installed mod info so dependency checks see all current mods
-    await loadInstalledInfo(instance);
+    await loadInstalledInfo(scope.selected, scope);
+    if (!scope.isCurrent()) return;
     
     // Get fresh installed mod info for accurate dependency checking
     const freshInstalledInfo = get(installedModInfo);
@@ -889,6 +964,7 @@
 
     try {
   const dependencies = await checkModDependencies(modForInstall, new Set(), { interactive: true });
+      if (!scope.isCurrent()) return;
       let compatibilityIssues = [];
 
       try {
@@ -899,11 +975,15 @@
             source: modForInstall.source,
             loader: get(loaderType),
             gameVersion: get(minecraftVersion)
-          });          if (versionInfo && versionInfo.dependencies && versionInfo.dependencies.length > 0) {
+          });
+          if (!scope.isCurrent()) return;
+          if (versionInfo && versionInfo.dependencies && versionInfo.dependencies.length > 0) {
             compatibilityIssues = await checkDependencyCompatibility(versionInfo.dependencies, modForInstall.id, freshInstalledInfo);
+            if (!scope.isCurrent()) return;
           }
         }
       } catch (compatErr) {
+        if (!scope.isCurrent()) return;
       }
 
       if ((dependencies && dependencies.length > 0) || compatibilityIssues.length > 0) {
@@ -920,6 +1000,7 @@
           );
         }
 
+        dependencyInstallScope = scope;
         showDependencyModal(modForInstall, dependencies);
 
         installingModIds.update(ids => {
@@ -929,10 +1010,12 @@
         return;
       }
 
-      await installClientMod(modForInstall, ver);
+      if (!scope.isCurrent()) return;
+      await installClientMod(modForInstall, ver, null, scope);
     } catch (err) {
+      if (!scope.isCurrent()) return;
       errorMessage.set(`Failed to install ${modForInstall.name}: ${err.message}`);
-      setTimeout(() => errorMessage.set(''), 5000);
+      setTimeout(() => { if (scope.isCurrent()) errorMessage.set(''); }, 5000);
       installingModIds.update(ids => {
         ids.delete(modForInstall.id);
         return ids;      });
@@ -946,6 +1029,8 @@
 
   // Wrapper function for mod toggle that handles completion notification
   async function handleModToggleWrapper(instance, fileName, enabled) {
+    const scope = captureRead();
+    if (!scope.isCurrent()) return;
     try {
       // Add timeout to prevent infinite loading - increased to 15 seconds
       const timeoutPromise = new Promise((_, reject) => 
@@ -953,16 +1038,18 @@
       );
       
       await Promise.race([
-        handleModToggle(instance, fileName, enabled),
+        handleModToggle(scope.selected, fileName, enabled, scope),
         timeoutPromise
       ]);
       
     } catch (error) {
+      if (!scope.isCurrent()) return;
       // Error handling is already done in the utility function
     } finally {
       // Always notify completion to remove loading state, regardless of success or failure
       // Use setTimeout to ensure components are ready
       setTimeout(() => {
+        if (!scope.isCurrent()) return;
         try {
           if (optionalModListComponent && typeof optionalModListComponent.onToggleComplete === 'function') {
             optionalModListComponent.onToggleComplete(fileName);
@@ -978,11 +1065,14 @@
   }
 
   // Handle mod removal event - refresh state to clear outdated mod data
-  function handleModRemoved(event) {
+  async function handleModRemoved(event) {
+    const scope = captureRead();
+    if (!scope.isCurrent()) return;
     const { fileName } = event.detail;
     
     // Refresh mod data to update the UI state
-    refreshMods();
+    await refreshMods(scope);
+    if (!scope.isCurrent()) return;
     
     // Dispatch event to parent to trigger comprehensive state refresh
     dispatch('mod-removed', { fileName });
@@ -1111,11 +1201,11 @@
               {@const acknowledgments = pendingAcknowledgments || []}
               
               {#if actualRemovals.length > 0}
-                <button class="compact-btn primary" on:click={() => handleBulkServerModRemoval(instance, actualRemovals.map(r => r.fileName))}>
+                <button class="compact-btn primary" on:click={() => runModAction(handleBulkServerModRemoval, actualRemovals.map(r => r.fileName))}>
                   🔄 Remove {actualRemovals.length} mod{actualRemovals.length > 1 ? 's' : ''}
                 </button>
               {:else if acknowledgments.length > 0}
-                <button class="compact-btn primary" on:click={() => acknowledgeAllDependencies(instance)}>
+                <button class="compact-btn primary" on:click={() => acknowledgeDependencies()}>
                   ✓ Acknowledge ({acknowledgments.length})
                 </button>
               {/if}
@@ -1195,9 +1285,9 @@
                 serverManagedFiles={$serverManagedFiles}
                 on:download={() => handleRequiredDownload()}
                 on:downloadSingle={(e) => handleSingleRequiredDownload(e.detail.mod)}
-                on:remove={(e) => handleServerModRemoval(instance, e.detail.fileName)}
-                on:acknowledge={(e) => handleDependencyAcknowledgment(instance, e.detail.fileName)}
-                on:updateMod={(e) => updateServerMod(instance, e)}
+                on:remove={(e) => runModAction(handleServerModRemoval, e.detail.fileName)}
+                on:acknowledge={(e) => runModAction(handleDependencyAcknowledgment, e.detail.fileName)}
+                on:updateMod={(e) => runModAction(updateServerMod, e)}
               />
             </div>
 
@@ -1213,8 +1303,8 @@
                   on:toggle={(e) => handleModToggleWrapper(instance, e.detail.fileName, e.detail.enabled)}
                   on:download={() => handleOptionalDownload()}
                   on:downloadSingle={(e) => handleSingleOptionalDownload(e.detail.mod)}
-                  on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
-                  on:updateMod={(e) => updateServerMod(instance, e)}
+                  on:delete={(e) => runModAction(handleModDelete, e.detail.fileName)}
+                  on:updateMod={(e) => runModAction(updateServerMod, e)}
                 />
               </div>
             {/if}
@@ -1233,7 +1323,7 @@
                 modSyncStatus={$modSyncStatus}
                 {clientModVersionUpdates}
                 on:toggle={(e) => handleModToggleWrapper(instance, e.detail.fileName, e.detail.enabled)}
-                on:delete={(e) => handleModDelete(instance, e.detail.fileName)}
+                on:delete={(e) => runModAction(handleModDelete, e.detail.fileName)}
                 on:install={handleInstallMod}
                 on:mod-removed={handleModRemoved}
               />
@@ -1253,8 +1343,8 @@
               description="These shaders are managed by the server. Items marked To Remove will be deleted."
               items={requiredShaderItemsExtended}
               installedItems={shaderAssets}
-              on:download={(async (e) => { const it = e.detail.item; await window.electron.invoke('minecraft-download-assets', { clientPath: instance.path, type: 'shaderpacks', requiredItems: [it], serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }}); await refreshAssets(); notifyAssetsChanged(); dispatch('asset-changed', { type: 'shaderpacks', action: 'download', fileName: it.fileName }); })}
-              on:remove={(async (e) => { const it = e.detail.item; await window.electron.invoke('delete-client-asset', { clientPath: instance.path, type: 'shaderpacks', fileName: it.fileName }); await refreshAssets(); notifyAssetsChanged(); dispatch('asset-changed', { type: 'shaderpacks', action: 'remove', fileName: it.fileName }); })}
+              on:download={e => handleAssetAction('shaderpacks', 'download', e.detail.item)}
+              on:remove={e => handleAssetAction('shaderpacks', 'remove', e.detail.item)}
               on:install-asset-version={handleInstallAssetVersion}
             />
           </div>
@@ -1265,7 +1355,7 @@
               mode="client"
               title="Client Downloaded Shaders"
               items={extraShaders}
-                on:delete={(e) => { const { item } = e.detail; pendingAssetDelete = { type: 'shaderpacks', fileName: item.fileName }; showAssetDeleteConfirm = true; }}
+                on:delete={(e) => { const { item } = e.detail; pendingAssetDelete = { type: 'shaderpacks', fileName: item.fileName, scope: captureRead() }; showAssetDeleteConfirm = true; }}
               on:install-asset-version={handleInstallAssetVersion}
             />
           </div>
@@ -1283,8 +1373,8 @@
               description="These resource packs are managed by the server. Items marked To Remove will be deleted."
               items={requiredResourcePackItemsExtended}
               installedItems={resourcePackAssets}
-              on:download={(async (e) => { const it = e.detail.item; await window.electron.invoke('minecraft-download-assets', { clientPath: instance.path, type: 'resourcepacks', requiredItems: [it], serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }}); await refreshAssets(); notifyAssetsChanged(); dispatch('asset-changed', { type: 'resourcepacks', action: 'download', fileName: it.fileName }); })}
-              on:remove={(async (e) => { const it = e.detail.item; await window.electron.invoke('delete-client-asset', { clientPath: instance.path, type: 'resourcepacks', fileName: it.fileName }); await refreshAssets(); notifyAssetsChanged(); dispatch('asset-changed', { type: 'resourcepacks', action: 'remove', fileName: it.fileName }); })}
+              on:download={e => handleAssetAction('resourcepacks', 'download', e.detail.item)}
+              on:remove={e => handleAssetAction('resourcepacks', 'remove', e.detail.item)}
               on:install-asset-version={handleInstallAssetVersion}
             />
           </div>
@@ -1295,7 +1385,7 @@
               mode="client"
               title="Client Downloaded Resource Packs"
               items={extraRps}
-                on:delete={(e) => { const { item } = e.detail; pendingAssetDelete = { type: 'resourcepacks', fileName: item.fileName }; showAssetDeleteConfirm = true; }}
+                on:delete={(e) => { const { item } = e.detail; pendingAssetDelete = { type: 'resourcepacks', fileName: item.fileName, scope: captureRead() }; showAssetDeleteConfirm = true; }}
               on:install-asset-version={handleInstallAssetVersion}
             />
           </div>
@@ -1332,17 +1422,23 @@
   cancelText="Cancel"
   on:confirm={async () => {
     if (!pendingAssetDelete) return;
+    const { scope, type, fileName } = pendingAssetDelete;
+    if (!scope.isCurrent()) return;
     try {
       await window.electron.invoke('delete-client-asset', {
-        clientPath: instance.path,
-        type: pendingAssetDelete.type,
-        fileName: pendingAssetDelete.fileName
+        clientPath: scope.selected.path,
+        type,
+        fileName
       });
-      await refreshAssets();
+      if (!scope.isCurrent()) return;
+      await refreshAssets(scope);
+      if (!scope.isCurrent()) return;
       notifyAssetsChanged();
     } finally {
-      pendingAssetDelete = null;
-      showAssetDeleteConfirm = false;
+      if (scope.isCurrent()) {
+        pendingAssetDelete = null;
+        showAssetDeleteConfirm = false;
+      }
     }
   }}
   on:cancel={() => { pendingAssetDelete = null; showAssetDeleteConfirm = false; }}

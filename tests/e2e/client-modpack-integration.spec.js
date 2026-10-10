@@ -12,15 +12,25 @@ test.beforeAll(async()=>{
     import Settings from './src/components/client/SettingsTab.svelte';
     import Setup from './src/components/client/ClientSetupWizard.svelte';
     import ModpackPage from './src/routes/ModpackPage.svelte';
+    import Manager from './src/components/client/ClientModManager.svelte';
     import {clientState,setActiveTab} from './src/stores/clientStore.js';
+    import {requiredMods as managedRequiredMods,modSyncStatus,installedModsInfo} from './src/stores/clientModManager.js';
+    import {downloadSingleOptionalMod} from './src/utils/clientMods.js';
     let kind='interface'; let props={};
     let instance={id:'registered-a',path:'C:/fixture/client-a',name:'Fixture client',type:'client',serverIp:'server.test',serverPort:'8080',serverProtocol:'https',sessionToken:'fixture-only',clientId:'management-a'};
     export function show(nextKind,nextProps={}) {kind=nextKind;props=nextProps;}
     export function switchInstance(id) {instance={...instance,id,path:'C:/fixture/'+id};}
+    export function authority(host) {instance={...instance,serverIp:host};}
+    export function currentInstance() {return {...instance};}
+    export function status() {return $clientState.minecraftServerStatus;}
+    export function requiredNames() {return $managedRequiredMods.map(item=>item.fileName);}
+    export function seedDownload() {managedRequiredMods.set([{fileName:'fixture.jar',name:'Fixture mod',required:true,downloadUrl:'/api/mods/download/fixture.jar'}]);modSyncStatus.set({synchronized:false,missingMods:['fixture.jar'],needsDownload:1});}
+    export function installedNames() {return $installedModsInfo.map(item=>item.fileName);}
+    export function downloadMod() {return downloadSingleOptionalMod(instance,{fileName:'fixture.jar',downloadUrl:'/api/mods/download/fixture.jar'});}
     export function tab(value){setActiveTab(value);}
   </script>
-  {#if kind==='interface'}<Interface {instance}/>{:else if kind==='setup'}<Setup/>{:else if kind==='server'}<ModpackPage currentInstance={{id:'server-fixture',type:'server'}}/>{:else}<Settings {instance} {...props}/>{/if}`;
-  const result=await build({absWorkingDir:root,stdin:{resolveDir:root,contents:`import Fixture from 'integration-fixture';import {mount,flushSync} from 'svelte';const fixture=mount(Fixture,{target:document.querySelector('#fixture')});window.fixture={show:(...args)=>flushSync(()=>fixture.show(...args)),switchInstance:id=>flushSync(()=>fixture.switchInstance(id)),tab:value=>flushSync(()=>fixture.tab(value))};`},bundle:true,write:false,platform:'browser',format:'iife',conditions:['browser','svelte'],loader:{'.svg':'dataurl','.png':'dataurl'},plugins:[{name:'real-client-integration',setup(builder){
+  {#if kind==='interface'}<Interface {instance}/>{:else if kind==='manager'}<Manager {instance}/>{:else if kind==='setup'}<Setup/>{:else if kind==='server'}<ModpackPage currentInstance={{id:'server-fixture',type:'server'}}/>{:else}<Settings {instance} {...props}/>{/if}`;
+  const result=await build({absWorkingDir:root,stdin:{resolveDir:root,contents:`import Fixture from 'integration-fixture';import {mount,flushSync} from 'svelte';const fixture=mount(Fixture,{target:document.querySelector('#fixture')});window.fixture={show:(...args)=>flushSync(()=>fixture.show(...args)),switchInstance:id=>flushSync(()=>fixture.switchInstance(id)),authority:host=>flushSync(()=>fixture.authority(host)),currentInstance:()=>fixture.currentInstance(),status:()=>fixture.status(),requiredNames:()=>fixture.requiredNames(),seedDownload:()=>flushSync(()=>fixture.seedDownload()),installedNames:()=>fixture.installedNames(),downloadMod:()=>fixture.downloadMod(),tab:value=>flushSync(()=>fixture.tab(value))};`},bundle:true,write:false,platform:'browser',format:'iife',conditions:['browser','svelte'],loader:{'.svg':'dataurl','.png':'dataurl'},plugins:[{name:'real-client-integration',setup(builder){
     builder.onResolve({filter:/^integration-fixture$/},()=>({path:'IntegrationFixture.svelte',namespace:'fixture'}));
     builder.onLoad({filter:/./,namespace:'fixture'},()=>({contents:compile(fixture,{filename:path.join(root,'IntegrationFixture.svelte'),generate:'client',css:'injected'}).js.code,resolveDir:root}));
     builder.onLoad({filter:/\.svelte$/},async({path:filename})=>({contents:compile(await fs.readFile(filename,'utf8'),{filename,generate:'client',css:'injected'}).js.code,resolveDir:path.dirname(filename)}));
@@ -36,13 +46,25 @@ async function start(page,status='unpaired',authenticated=true,options={}){
     window.pendingAuth=[];window.deferAuth=false;
     window.serverManaged=true;window.serverProvider='github';
     window.legacyClientNeeded=options.legacyClientNeeded===true;
-    window.fetch=async url=>{
+    window.fetches=[];window.sessionRevision=4;window.pendingSessions=[];window.deferSessions=false;window.running=false;
+    window.rejectOnce=new Set(options.rejectOnce||[]);
+    window.deferredInfo=()=>{let cancelled=false;return new Response(new ReadableStream({start(controller){window.pendingInfo.push(payload=>{if(!cancelled){controller.enqueue(new TextEncoder().encode(JSON.stringify(payload)));controller.close();}});},cancel(){cancelled=true;}}));};
+    window.fetch=async(url,request={})=>{
       const pathname=new URL(url).pathname;
-      const payload=pathname==='/api/app/version'?{success:true,appVersion:'26.6.1'}:pathname==='/api/server/info'?{success:true,instanceId:'server-fixture',minecraftVersion:'1.20.1',loaderType:'forge',loaderVersion:'47.3.12',requiredMods:[],allClientMods:[],minecraftServerStatus:'stopped'}:pathname==='/api/server/status'?{success:true,isRunning:false}:pathname==='/api/mods/list'?{success:true,mods:{client:[]}}:{success:true};
+      window.fetches.push({url,pathname,headers:{...request.headers},redirect:request.redirect});
+      if(window.rejectOnce.delete(pathname))return new Response('{}',{status:401});
+      const payload=pathname==='/api/app/version'?{success:true,appVersion:'26.6.1'}:pathname==='/api/server/info'?{success:true,instanceId:'server-fixture',minecraftVersion:'1.20.1',loaderType:'forge',loaderVersion:'47.3.12',requiredMods:[],allClientMods:[],minecraftServerStatus:window.running?'running':'stopped'}:pathname==='/api/server/status'?{success:true,isRunning:window.running}:pathname==='/api/mods/list'?{success:true,mods:{client:[],server:[]}}:{success:true,items:[]};
       return new Response(JSON.stringify(payload),{status:200,headers:{'Content-Type':'application/json'}});
     };
     window.electron={on:(channel,fn)=>{if(!window.listeners.has(channel))window.listeners.set(channel,new Set());window.listeners.get(channel).add(fn);},removeListener:(channel,fn)=>window.listeners.get(channel)?.delete(fn),removeAllListeners:channel=>window.listeners.delete(channel),invoke:async(channel,...args)=>{
       window.calls.push({channel,args});
+      if(channel==='management-session:acquire'){
+        const request=args[0];
+        if(request.reason!=='reuse')window.sessionRevision++;
+        const result={ok:true,value:{sessionToken:`memory-${window.sessionRevision}`,baseOrigin:'https://server.test:8080',bindingGeneration:`binding-${request.clientInstanceId||'path'}`,revision:window.sessionRevision,registrationAttempted:false}};
+        if(window.deferSessions)return new Promise(resolve=>window.pendingSessions.push({resolve,result}));
+        return result;
+      }
       if(channel==='client-packs:get-state'){
         const value={clientId:args[0].clientId,status:window.classification,verified:window.classification==='ready',descriptor:null};
         if(window.deferState)return new Promise(resolve=>window.pendingStates.push({resolve,value}));
@@ -50,6 +72,7 @@ async function start(page,status='unpaired',authenticated=true,options={}){
       }
       if(channel==='modpacks:get-state')return {ok:true,value:{modpackManaged:window.serverManaged,lifecycleMode:window.serverManaged?'managed':'unmanaged',source:{provider:window.serverProvider,title:'Fixture server pack',version:'0.13.4',releaseId:'2'},runtime:{minecraftVersion:'1.20.1',loaderFamily:'forge',loaderVersion:'47.3.12',javaMajor:17,os:'win32',architecture:'x64'}}};
       if(channel==='modpacks:list-history')return {ok:true,value:{items:[],nextCursor:null}};
+      if(channel==='modpacks:get-active-jobs')return {ok:true,value:{serverId:args[0].serverId,items:[]}};
       if(channel==='modpacks:list-recovery')return {ok:true,value:[]};
       if(channel==='modpacks:list-notifications')return {ok:true,value:[]};
       if(channel==='client-packs:get-companion')return {ok:true,value:{schemaVersion:1,status:'unpaired',serverFingerprint:'f'.repeat(64),serverVersion:'0.13.4',source:null,runtime:null,artifactSha256:null}};
@@ -74,6 +97,119 @@ async function start(page,status='unpaired',authenticated=true,options={}){
   await page.addScriptTag({content:bundle});
 }
 const forbidden=['minecraft-check-mods','minecraft-check-client','minecraft-download-client','minecraft-download-mods','minecraft-download-assets','minecraft-clear-client','minecraft-clear-client-full','load-expected-mod-state','get-client-installed-mod-info'];
+test('session recovery: public probes omit tokens and protected readers pair broker origin/token with blocked redirects',async({page})=>{
+  await start(page,'unmanaged');
+  await expect.poll(()=>page.evaluate(()=>window.fetches.some(item=>item.pathname==='/api/mods/list'))).toBe(true);
+  await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
+  await expect.poll(()=>page.evaluate(()=>window.fetches.some(item=>item.pathname==='/api/server/status'))).toBe(true);
+  const requests=await page.evaluate(()=>window.fetches);
+  expect(requests.filter(item=>item.pathname==='/api/test').every(item=>!item.headers['X-Session-Token'])).toBe(true);
+  const protectedReads=requests.filter(item=>item.pathname!=='/api/test');
+  expect(protectedReads.length).toBeGreaterThan(3);
+  expect(protectedReads.every(item=>item.headers['X-Session-Token']==='memory-4'&&item.redirect==='error'&&new URL(item.url).origin==='https://server.test:8080')).toBe(true);
+  expect(await page.evaluate(()=>window.fixture.currentInstance().sessionToken)).toBe('fixture-only');
+  expect(await page.evaluate(()=>window.calls.filter(item=>['save-client-config','save-instances'].includes(item.channel)))).toEqual([]);
+});
+test('session recovery: renderer one-shot content IPC carries no mounted management credentials',async({page})=>{
+  await start(page,'unmanaged');
+  await page.evaluate(()=>window.fixture.show('settings'));
+  await page.evaluate(()=>window.fixture.downloadMod());
+  const dispatches=await page.evaluate(()=>window.calls.filter(item=>item.channel==='minecraft-download-mods'));
+  expect(dispatches).toHaveLength(1);
+  expect(dispatches[0].args[0]).not.toHaveProperty('serverInfo');
+});
+test('session recovery: protected immediate status recovers after idle and renders running without sidebar reconnect',async({page})=>{
+  await start(page,'unpaired');
+  await expect(page.getByText('A Minecraft Server',{exact:true})).toBeVisible();
+  await page.evaluate(()=>{window.fetches=[];window.running=true;window.rejectOnce.add('/api/server/status');document.dispatchEvent(new Event('visibilitychange'));});
+  await expect.poll(()=>page.evaluate(()=>window.fixture.status())).toBe('running');
+  const status=await page.evaluate(()=>window.fetches.filter(item=>item.pathname==='/api/server/status'));
+  expect(status.length).toBeGreaterThanOrEqual(2);
+  expect(status[0].headers['X-Session-Token']).toBe('memory-4');
+  expect(status[1].headers['X-Session-Token']).toBe('memory-5');
+  const recovery=await page.evaluate(()=>window.calls.filter(item=>item.channel==='management-session:acquire'&&item.args[0].reason==='authorization-rejected'));
+  expect(recovery).toHaveLength(1);
+  expect(recovery[0].args[0]).toEqual({clientInstanceId:'registered-a',reason:'authorization-rejected',observedBindingGeneration:'binding-registered-a',observedRevision:4});
+  expect(await page.evaluate(list=>window.calls.filter(item=>list.includes(item.channel)),forbidden)).toEqual([]);
+});
+test('session recovery: optional mod and both asset lists independently recover without content dispatch',async({page})=>{
+  await start(page,'unmanaged',true,{rejectOnce:['/api/mods/list','/api/assets/list/shaderpacks','/api/assets/list/resourcepacks']});
+  for(const pathname of ['/api/mods/list','/api/assets/list/shaderpacks','/api/assets/list/resourcepacks']){
+    await expect.poll(()=>page.evaluate(pathname=>window.fetches.filter(item=>item.pathname===pathname).length,pathname)).toBeGreaterThanOrEqual(2);
+  }
+  expect(await page.evaluate(()=>window.calls.filter(item=>['minecraft-download-mods','minecraft-download-assets'].includes(item.channel)))).toEqual([]);
+  expect(await page.evaluate(()=>window.fetches.filter(item=>item.pathname!=='/api/test').every(item=>item.redirect==='error'))).toBe(true);
+});
+test('session recovery: selection change discards delayed acquire before dispatch',async({page})=>{
+  await start(page,'unpaired');
+  await expect(page.getByText('A Minecraft Server',{exact:true})).toBeVisible();
+  await page.evaluate(()=>{window.deferSessions=true;document.dispatchEvent(new Event('visibilitychange'));});
+  await expect.poll(()=>page.evaluate(()=>window.pendingSessions.length)).toBeGreaterThan(0);
+  await page.evaluate(()=>{window.deferSessions=false;window.fixture.switchInstance('registered-b');});
+  await expect.poll(()=>page.evaluate(()=>window.calls.some(item=>item.channel==='management-session:acquire'&&item.args[0].clientInstanceId==='registered-b'))).toBe(true);
+  await page.evaluate(()=>{for(const pending of window.pendingSessions)pending.resolve({...pending.result,value:{...pending.result.value,sessionToken:'retired-a'}});});
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(()=>window.fetches.some(item=>['fixture-only','retired-a'].includes(item.headers['X-Session-Token'])))).toBe(false);
+  expect(await page.evaluate(()=>window.calls.filter(item=>item.channel==='save-client-config'))).toEqual([]);
+  expect(await page.evaluate(()=>window.fixture.currentInstance().id)).toBe('registered-b');
+});
+test('session recovery: mounted Mods manager reads use the current broker session and block redirects',async({page})=>{
+  await start(page,'unmanaged');
+  await expect.poll(()=>page.evaluate(()=>window.calls.some(item=>item.channel==='minecraft-check-client'))).toBe(true);
+  await page.evaluate(()=>window.fetches=[]);
+  await page.getByRole('button',{name:'🧩 Mods',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.fetches.some(item=>item.pathname==='/api/mods/list'))).toBe(true);
+  const requests=await page.evaluate(()=>window.fetches);
+  expect(requests.filter(item=>item.pathname==='/api/test').every(item=>!item.headers['X-Session-Token'])).toBe(true);
+  expect(requests.filter(item=>item.pathname!=='/api/test').every(item=>item.headers['X-Session-Token']==='memory-4'&&item.redirect==='error')).toBe(true);
+});
+test('session recovery: destroyed Mods manager cannot paint delayed server lists into another client',async({page})=>{
+  await start(page,'unmanaged');
+  await expect.poll(()=>page.evaluate(()=>window.calls.some(item=>item.channel==='minecraft-check-client'))).toBe(true);
+  await page.getByRole('button',{name:'🧩 Mods',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.fetches.filter(item=>item.pathname==='/api/mods/list').length)).toBeGreaterThan(1);
+  await page.evaluate(()=>{
+    const original=window.fetch;window.pendingInfo=[];
+    window.fetch=async(...args)=>new URL(args[0]).pathname==='/api/server/info'?window.deferredInfo():original(...args);
+  });
+  await page.getByRole('button',{name:'🔄 Refresh',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.pendingInfo.length)).toBe(1);
+  await page.evaluate(()=>window.fixture.switchInstance('registered-b'));
+  await page.evaluate(()=>window.pendingInfo[0]({success:true,minecraftVersion:'1.19.2',requiredMods:[{fileName:'obsolete-a.jar'}],allClientMods:[]}));
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(()=>window.fixture.requiredNames())).not.toContain('obsolete-a.jar');
+});
+for(const mode of ['delayed-completion','retired-timer','same-client'])test(`session recovery: Manager download ${mode} owns its continuations`,async({page})=>{
+  await start(page,'unmanaged');
+  await page.evaluate(()=>{
+    const fetch=window.fetch;window.fetch=async(...args)=>{
+      const response=await fetch(...args);
+      if(new URL(args[0]).pathname!=='/api/server/info')return response;
+      return new Response(JSON.stringify({...await response.json(),requiredMods:[{fileName:'fixture.jar',name:'Fixture mod',required:true,downloadUrl:'/api/mods/download/fixture.jar'}]}));
+    };
+    window.fixture.seedDownload();window.fixture.show('manager');
+  });
+  await expect.poll(()=>page.evaluate(()=>window.fetches.filter(item=>item.pathname==='/api/mods/list').length)).toBeGreaterThan(1);
+  await page.evaluate(()=>{
+    window.downloadTimers=[];window.finishDownload=null;
+    const originalTimer=window.setTimeout;window.setTimeout=(fn,delay,...args)=>delay===1500?(window.downloadTimers.push(fn),0):originalTimer(fn,delay,...args);
+    const invoke=window.electron.invoke;window.electron.invoke=async(channel,...args)=>{
+      if(channel==='minecraft-download-mods'){window.calls.push({channel,args});return new Promise(resolve=>{window.finishDownload=()=>resolve({success:true,downloaded:1,removedMods:['obsolete-a.jar']});});}
+      return invoke(channel,...args);
+    };
+    window.fixture.seedDownload();
+  });
+  await page.getByRole('button',{name:'📥 Download',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>!!window.finishDownload)).toBe(true);
+  if(mode==='delayed-completion')await page.evaluate(()=>window.fixture.switchInstance('registered-b'));
+  await page.evaluate(()=>window.finishDownload());
+  if(mode!=='delayed-completion')await expect.poll(()=>page.evaluate(()=>window.downloadTimers.length)).toBe(1);
+  if(mode==='retired-timer')await page.evaluate(()=>window.fixture.switchInstance('registered-b'));
+  await page.waitForTimeout(100);
+  await page.evaluate(()=>{window.calls=[];window.downloadTimers.forEach(fn=>fn());});
+  if(mode==='same-client')await expect.poll(()=>page.evaluate(()=>window.calls.some(item=>item.channel==='get-client-installed-mod-info'))).toBe(true);
+  else {await page.waitForTimeout(100);expect(await page.evaluate(()=>window.calls.filter(item=>['get-client-installed-mod-info','minecraft-check-mods'].includes(item.channel)))).toEqual([]);}
+});
 for(const status of ['unpaired','future-state'])test(`${status} blocks actual automatic legacy checks and Mods content`,async({page})=>{
   await start(page,status);
   await expect.poll(()=>page.evaluate(()=>window.calls.filter(x=>x.channel==='client-packs:get-state').length)).toBeGreaterThan(0);
@@ -144,7 +280,7 @@ test('delayed server-info JSON from A cannot overwrite current B metadata',async
     const oldFetch=window.fetch;window.pendingInfo=[];let defer=true;
     window.fetch=async(...args)=>{
       if(new URL(args[0]).pathname==='/api/server/info'){
-        if(defer){defer=false;return {ok:true,json:()=>new Promise(resolve=>window.pendingInfo.push(resolve))};}
+        if(defer){defer=false;return window.deferredInfo();}
         return new Response(JSON.stringify({success:true,instanceId:'server-b',minecraftVersion:'1.20.1',serverInfo:{name:'Current B'},minecraftServerStatus:'stopped'}),{status:200});
       }
       return oldFetch(...args);
@@ -198,7 +334,7 @@ test('same-client server-info requests keep the newest response',async({page})=>
   await expect(page.getByText('A Minecraft Server',{exact:true})).toBeVisible();
   await page.evaluate(()=>{
     const oldFetch=window.fetch;window.pendingInfo=[];
-    window.fetch=async(...args)=>new URL(args[0]).pathname==='/api/server/info'?{ok:true,json:()=>new Promise(resolve=>window.pendingInfo.push(resolve))}:oldFetch(...args);
+    window.fetch=async(...args)=>new URL(args[0]).pathname==='/api/server/info'?window.deferredInfo():oldFetch(...args);
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await expect.poll(()=>page.evaluate(()=>window.pendingInfo.length)).toBe(1);

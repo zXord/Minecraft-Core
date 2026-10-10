@@ -15,14 +15,15 @@ function validate(input) {
   } else if (!['authorization-rejected', 'explicit-reconnect'].includes(input.reason) ||
       !identifier(input.observedBindingGeneration) || !Number.isSafeInteger(input.observedRevision) || input.observedRevision < 0) throw fail();
 }
-function project(snapshot) {
+function project({ snapshot, registrationAttempted } = {}) {
+  if (typeof registrationAttempted !== 'boolean') throw fail('CLIENT_PACK_UNAVAILABLE');
   if (!snapshot || typeof snapshot.token !== 'string' || !snapshot.token || snapshot.token.length > 16384 || /[\u0000-\u001f\u007f]/u.test(snapshot.token) ||
       !identifier(snapshot.bindingGeneration) || snapshot.binding?.generation !== snapshot.bindingGeneration ||
       !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0 || typeof snapshot.baseOrigin !== 'string') throw fail('CLIENT_PACK_UNAVAILABLE');
   let origin;
   try { origin = new URL(snapshot.baseOrigin); } catch { throw fail('CLIENT_PACK_UNAVAILABLE'); }
   if (!['http:', 'https:'].includes(origin.protocol) || origin.origin !== snapshot.baseOrigin || origin.username || origin.password) throw fail('CLIENT_PACK_UNAVAILABLE');
-  return deepFreeze({ sessionToken: snapshot.token, baseOrigin: snapshot.baseOrigin, bindingGeneration: snapshot.bindingGeneration, revision: snapshot.revision });
+  return deepFreeze({ sessionToken: snapshot.token, baseOrigin: snapshot.baseOrigin, bindingGeneration: snapshot.bindingGeneration, revision: snapshot.revision, registrationAttempted });
 }
 function publicError(error) {
   const code = error instanceof ModpackError && ['INVALID_REQUEST', 'PLAN_STALE', 'CANCELLED', 'CLIENT_PACK_UNAVAILABLE'].includes(error.code)
@@ -41,7 +42,7 @@ function waitOwned(work, signal) {
   });
 }
 function createManagementSessionHandlers({ win, broker, resolveClientByPath } = {}) {
-  if (!win?.webContents || typeof broker?.acquire !== 'function' || typeof resolveClientByPath !== 'function') throw fail();
+  if (!win?.webContents || typeof broker?.acquireWithProvenance !== 'function' || typeof resolveClientByPath !== 'function') throw fail();
   const owner = win.webContents; const pending = new Set(); let closed = false; let disposal;
   function trusted(event) {
     return !closed && !win.isDestroyed?.() && !owner.isDestroyed?.() && event?.sender === owner &&
@@ -57,7 +58,7 @@ function createManagementSessionHandlers({ win, broker, resolveClientByPath } = 
         (await waitOwned(() => resolveClientByPath(input.clientPath), record.controller.signal))?.clientId;
       if (!trusted(event) || record.controller.signal.aborted) throw fail('CANCELLED');
       if (!identifier(clientId)) throw fail();
-      const snapshot = await broker.acquire(clientId, { signal: record.controller.signal, reason: input.reason,
+      const snapshot = await broker.acquireWithProvenance(clientId, { signal: record.controller.signal, reason: input.reason,
         ...(input.reason === 'reuse' ? {} : { observedBindingGeneration: input.observedBindingGeneration, observedRevision: input.observedRevision }) });
       if (!trusted(event) || record.controller.signal.aborted) throw fail('CANCELLED');
       return deepFreeze({ ok: true, value: project(snapshot) });

@@ -84,84 +84,138 @@ export function buildAuthHeaders(instance, extraHeaders = {}) {
   return headers;
 }
 
-/**
- * Ensure a session token is registered and stored for the instance.
- * @param {ManagementInstance | null | undefined} instance
- * @param {boolean} [force=false]
- * @returns {Promise<string|null>}
- */
-export async function ensureSessionToken(instance, force = false) {
-  if (!instance || !instance.serverIp || !instance.serverPort) return null;
+const identifier = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+const unavailable = () => new Error('The management session could not be acquired.');
+const attemptDeadlines = new WeakMap();
+const checkAttemptSignal = signal => {
+  const end = attemptDeadlines.get(signal);
+  if (signal.aborted || !Number.isFinite(end) || Date.now() >= end) throw unavailable();
+};
+const stale = () => Object.assign(new Error('The client connection changed.'), { stale: true });
+const authorityKey = instance => JSON.stringify([instance?.id, instance?.path, instance?.serverIp, instance?.serverPort,
+  instance?.serverProtocol, instance?.clientId, instance?.clientName, instance?.name, instance?.inviteSecret, instance?.managementCertFingerprint]);
 
-  const existingToken = getSessionToken(instance);
-  if (existingToken && !force) return existingToken;
-
-  const clientId = instance.clientId || `client-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  const clientName = instance.clientName || instance.name || 'Minecraft Client';
-  const registerUrl = resolveManagementUrl(instance, '/api/client/register');
-  if (!registerUrl) return null;
-
-  try {
-    const inviteSecret = typeof instance.inviteSecret === 'string' ? instance.inviteSecret.trim() : '';
-    const response = await fetch(registerUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientId, name: clientName, secret: inviteSecret || undefined })
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const data = await response.json();
-    const token = data && data.token ? String(data.token) : '';
-    if (!token) return null;
-
-    instance.sessionToken = token;
-    instance.clientId = clientId;
-    instance.clientName = clientName;
-
-    if (instance.path && window?.electron?.invoke) {
-      try {
-        await window.electron.invoke('save-client-config', {
-          path: instance.path,
-          serverIp: instance.serverIp,
-          serverPort: instance.serverPort,
-          clientId,
-          clientName,
-          sessionToken: token,
-          initializeMultiplayer: false
-        });
-      } catch {
-        // ignore persistence errors
-      }
-    }
-
-    return token;
-  } catch {
-    return null;
-  }
+function sessionOperation(instance, { isCurrent = () => true, signal, deadline } = {}) {
+  const key = authorityKey(instance);
+  let origin;
+  try { origin = new URL(getManagementBaseUrl(instance)).origin; } catch { throw unavailable(); }
+  const selector = instance?.id ? { clientInstanceId: instance.id } : { clientPath: instance?.path };
+  if (selector.clientInstanceId ? !identifier(selector.clientInstanceId) : !selector.clientPath) throw unavailable();
+  const end = Math.min(deadline ?? Infinity, Date.now() + 30000);
+  let registrationAttempted = false;
+  const check = () => {
+    if (!isCurrent() || key !== authorityKey(instance)) throw stale();
+    if (signal?.aborted || !Number.isFinite(end) || Date.now() >= end) throw unavailable();
+  };
+  // IPC has an exact schema: cancellation/deadlines are local to this waiter.
+  const wait = async work => {
+    check();
+    let timer, abort;
+    try {
+      const result = await Promise.race([
+        Promise.resolve().then(() => { check(); return work(); }),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(unavailable()), Math.max(0, end - Date.now()));
+          abort = () => reject(unavailable());
+          signal?.addEventListener('abort', abort, { once: true });
+        })
+      ]);
+      check(); return result;
+    } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+  };
+  const acquire = async (reason = 'reuse', observed) => {
+    let result;
+    try {
+      result = await wait(() => globalThis.window?.electron?.invoke('management-session:acquire', {
+        ...selector, reason,
+        ...(observed ? { observedBindingGeneration: observed.bindingGeneration, observedRevision: observed.revision } : {})
+      }));
+    } catch (error) { if (error?.stale) throw error; throw unavailable(); }
+    if (result?.ok !== true) throw unavailable();
+    const value = result.value;
+    if (!value || typeof value.sessionToken !== 'string' || !value.sessionToken || value.sessionToken.length > 16384 ||
+        /[\u0000-\u001f\u007f]/u.test(value.sessionToken) || !identifier(value.bindingGeneration) ||
+        !Number.isSafeInteger(value.revision) || value.revision < 0 || typeof value.baseOrigin !== 'string' || typeof value.registrationAttempted !== 'boolean') throw unavailable();
+    let parsed;
+    try { parsed = new URL(value.baseOrigin); } catch { throw unavailable(); }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== value.baseOrigin || parsed.username || parsed.password) throw unavailable();
+    if (value.baseOrigin !== origin || (observed && value.bindingGeneration !== observed.bindingGeneration)) throw stale();
+    registrationAttempted ||= value.registrationAttempted;
+    return Object.freeze({ sessionToken: value.sessionToken, baseOrigin: value.baseOrigin, bindingGeneration: value.bindingGeneration, revision: value.revision });
+  };
+  const attempt = async (work, timeoutMs = 10000) => {
+    check();
+    const controller = new AbortController();
+    const attemptEnd = Math.min(end, Date.now() + Math.max(0, Math.min(10000, timeoutMs)));
+    attemptDeadlines.set(controller.signal, attemptEnd);
+    const abort = () => controller.abort();
+    const timer = setTimeout(abort, Math.max(0, attemptEnd - Date.now()));
+    if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
+    try {
+      checkAttemptSignal(controller.signal);
+      const result = await wait(() => new Promise((resolve, reject) => {
+        const stopped = () => reject(unavailable());
+        controller.signal.addEventListener('abort', stopped, { once: true });
+        if (controller.signal.aborted) stopped();
+        else Promise.resolve().then(() => { check(); checkAttemptSignal(controller.signal); return work(controller.signal); })
+          .then(resolve, reject).finally(() => controller.signal.removeEventListener('abort', stopped));
+      }));
+      checkAttemptSignal(controller.signal);
+      return result;
+    } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); controller.abort(); attemptDeadlines.delete(controller.signal); }
+  };
+  return { acquire, wait, attempt, spent: () => registrationAttempted };
 }
 
-/**
- * Make an authenticated request while preserving a valid mounted session.
- * Registration occurs only when no token exists, reconnect is explicit, or
- * the server rejects the existing token with an authorization status.
- * @param {ManagementInstance | null | undefined} instance
- * @param {(headers: Record<string, string>) => Promise<any>} request
- * @param {{forceRegistration?: boolean}} [options]
- * @returns {Promise<any>}
- */
-export async function requestWithSessionRecovery(instance, request, { forceRegistration = false } = {}) {
+/** Compatibility helper for registered clients; never registers or saves in renderer. */
+export async function ensureSessionToken(instance, force = false, options = {}) {
+  const operation = sessionOperation(instance, options);
+  let session = await operation.acquire();
+  if (force && !operation.spent()) session = await operation.acquire('explicit-reconnect', session);
+  return session.sessionToken;
+}
+
+/** Safe-read recovery only. URLs must be built from the callback's snapshot, with redirects blocked. */
+export async function requestWithSessionRecovery(instance, request, options = {}) {
   if (typeof request !== 'function') throw new TypeError('Authenticated request must be a function');
-  const hadToken = Boolean(getSessionToken(instance));
-  const registrationAttempted = forceRegistration || !hadToken;
-  await ensureSessionToken(instance, forceRegistration);
+  const operation = sessionOperation(instance, options);
+  let session = await operation.acquire();
+  if (options.forceRegistration && !operation.spent()) session = await operation.acquire('explicit-reconnect', session);
+  const dispatch = current => operation.attempt(signal => request(Object.freeze({ [TOKEN_HEADER]: current.sessionToken }), current, { signal }), options.timeoutMs);
+  const response = await dispatch(session);
+  if (response?.status !== 401 || options.forceRegistration || operation.spent()) return response;
+  session = await operation.acquire('authorization-rejected', session);
+  return dispatch(session);
+}
 
-  const response = await request(buildAuthHeaders(instance));
-  if (![401, 403].includes(response?.status) || registrationAttempted) return response;
-
-  const refreshedToken = await ensureSessionToken(instance, true);
-  if (!refreshedToken) return response;
-  return request(buildAuthHeaders(instance));
+/** Registered JSON reads retain cancellation and deadlines through streaming and parsing. */
+export async function readManagementJson(instance, path, options = {}) {
+  if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) throw unavailable();
+  return requestWithSessionRecovery(instance, async (headers, session, { signal }) => {
+    const response = await fetch(`${session.baseOrigin}${path}`, { method: 'GET', headers, redirect: 'error', signal });
+    if (!response.ok) { await response.body?.cancel(); checkAttemptSignal(signal); return { ok: false, status: response.status, data: null }; }
+    const maxBytes = path.split('?')[0] === '/api/server/info' ? 262144 : Infinity;
+    const reader = response.body?.getReader();
+    if (!reader) throw unavailable();
+    const cancel = () => { void reader.cancel().catch(() => {}); };
+    signal.addEventListener('abort', cancel, { once: true });
+    try {
+      checkAttemptSignal(signal);
+      if (Number(response.headers.get('Content-Length')) > maxBytes) throw unavailable();
+      let size = 0; const chunks = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        checkAttemptSignal(signal);
+        if (done) break;
+        if (!(value instanceof Uint8Array) || value.byteLength > maxBytes - size) throw unavailable();
+        size += value.byteLength; chunks.push(value);
+      }
+      const bytes = new Uint8Array(size); let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      let data;
+      try { data = JSON.parse(new TextDecoder().decode(bytes)); } catch { throw unavailable(); }
+      checkAttemptSignal(signal);
+      return { ok: true, status: response.status, data };
+    } finally { signal.removeEventListener('abort', cancel); cancel(); reader.releaseLock(); }
+  }, options);
 }

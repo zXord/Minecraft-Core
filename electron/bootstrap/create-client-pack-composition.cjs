@@ -98,6 +98,15 @@ function createClientPackComposition(input) {
     readClientConfig: input.readClientConfig || (value => require('../utils/config-manager.cjs').readClientConfig(value)),
     getPinnedHttpsAgent: input.getPinnedHttpsAgent || ((...args) => require('../utils/tls-utils.cjs').getPinnedHttpsAgent(...args)),
     requestJson: input.managementSessionRequestJson, randomUUID, clock: sessionClock });
+  const acquireLegacyManagementContext = async (clientPath, options = {}) => {
+    const deadline = Math.min(options.deadline ?? Infinity, sessionClock() + 30000);
+    const target = await resolveClientByPath(clientPath);
+    const context = await managementSessionBroker.acquireLegacyContext(target.clientId, { ...options, deadline });
+    const current = await resolveClientByPath(clientPath);
+    if (current.clientId !== target.clientId || key(current.clientPath) !== key(target.clientPath)) throw new ModpackError('PLAN_STALE', 'The client connection changed');
+    await context.assertCurrent({ ...options, deadline });
+    return context;
+  };
   const managementClient = new ManagementPackClient({ sessionBroker: managementSessionBroker, clock: sessionClock });
   const clientPackService = new ClientPackService({ resolveClient, managementClient, candidatePreparer: clientCandidatePreparer,
     sourceResolver, artifactAcquisition, archiveInspector, processGuard, transaction, stateStore, runtimeInstaller,
@@ -113,7 +122,7 @@ function createClientPackComposition(input) {
       } catch { /* Retain unproven/running work; never block a healthy server. */ }
     }
   }
-  return Object.freeze({ companionService, clientPackService, clientPackIntegration, managementSessionBroker, resolveClientByPath,
+  return Object.freeze({ companionService, clientPackService, clientPackIntegration, managementSessionBroker, resolveClientByPath, acquireLegacyManagementContext,
     async initialize() {
       if (initialized) return;
       try { await companionStore.initialize(); } catch { /* Corruption remains explicit in companion requests; never reset. */ }

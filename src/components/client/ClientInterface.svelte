@@ -13,10 +13,7 @@
   import SettingsTab from './SettingsTab.svelte';
   import logger from '../../utils/logger.js';
   import {
-    buildAuthHeaders,
-    ensureSessionToken,
-    getManagementBaseUrl,
-    requestWithSessionRecovery,
+    readManagementJson,
     resolveManagementUrl
   } from '../../utils/managementAuth.js';
 import {
@@ -184,10 +181,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   let launchRequestSequence = 0;
   let launcherStatusRequestSequence = 0;
   let launcherListenerRemovers = [];
-  $: instanceKey = `${instance?.id || ''}:${instance?.path || ''}`;
+  $: instanceKey = JSON.stringify([instance?.id, instance?.path, instance?.serverIp, instance?.serverPort,
+    instance?.serverProtocol, instance?.clientId, instance?.clientName, instance?.inviteSecret, instance?.managementCertFingerprint]);
   $: if (interfaceMounted && instanceKey !== activeClientKey) activateClientInstance();
   function legacyContentAllowed() {
-    return activeClientKey === `${instance?.id || ''}:${instance?.path || ''}`
+    return activeClientKey === instanceKey
       && packState?.clientId === instance?.id && allowsLegacyClient(packState);
   }
   function scopedLegacyContentInvoker() {
@@ -235,7 +233,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
   }
   function activateClientInstance() {
-    activeClientKey = `${instance?.id || ''}:${instance?.path || ''}`;
+    activeClientKey = instanceKey;
     invalidateAsyncScope();
     clearPlayTabSyncSchedule(); clearAutoCompatibilitySchedule(); clearPostDownloadVerificationSchedule();
     packState = null; serverInfo = null; requiredMods = []; modSyncStatus = null;
@@ -478,9 +476,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const response = await fetchWithScope(managementUrl, {
         method: 'GET',
         headers: {
-          ...buildAuthHeaders(instance),
           'Content-Type': 'application/json'
-        }
+        },
+        redirect: 'error'
       }, 5000, scope);
       if (!isCurrentAsyncScope(scope)) return;
         if (!response.ok) {
@@ -533,15 +531,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const clientVersion = clientVersionResult?.success ? clientVersionResult.version : '1.0.0';
 
       // Get server app version
-      const appVersionUrl = resolveManagementUrl(instance, '/api/app/version');
-      const response = await requestWithSessionRecovery(instance, headers => fetchWithScope(appVersionUrl, {
-        method: 'GET',
-        headers
-      }, 5000, scope), { forceRegistration });
+      const response = await fetchManagementRead('/api/app/version', 5000, scope, { forceRegistration });
       if (!isCurrentAsyncScope(scope)) return;
 
       if (response.ok) {
-        const versionData = await response.json();
+        const versionData = response.data;
         if (!isCurrentAsyncScope(scope)) return;
         if (versionData.success) {
           const serverVersion = versionData.appVersion || versionData.version;
@@ -582,7 +576,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       const managementUrl = resolveManagementUrl(instance, '/api/test');
       const managementResponse = await fetchWithScope(managementUrl, {
         method: 'GET',
-        headers: buildAuthHeaders(instance)
+        redirect: 'error'
       }, 3000, scope);
       if (!isCurrentAsyncScope(scope)) return;
       
@@ -624,15 +618,9 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     const current = () => isCurrentAsyncScope(scope) && request === serverInfoRequestSequence;
     try {
       if (!current()) return;
-      await ensureSessionToken(instance);
-      if (!current()) return;
-      const serverInfoUrl = resolveManagementUrl(instance, '/api/server/info');
-      const response = await fetchWithScope(serverInfoUrl, {
-        method: 'GET',
-        headers: buildAuthHeaders(instance)
-      }, 5000, scope);
+      const response = await fetchManagementRead('/api/server/info', 5000, scope, { isCurrent: current });
       
-      if (response.ok) {        const nextServerInfo = await response.json();
+      if (response.ok) {        const nextServerInfo = response.data;
         if (!current()) return;
         serverInfo = nextServerInfo;
         if (serverInfo.success) {
@@ -647,14 +635,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           
           // **FIX**: Also fetch complete mod list from server to get optional mods info
           try {
-            const modsUrl = resolveManagementUrl(instance, '/api/mods/list');
-            const modsResponse = await fetchWithScope(modsUrl, {
-              method: 'GET',
-              headers: buildAuthHeaders(instance)
-            }, 5000, scope);
+            const modsResponse = await fetchManagementRead('/api/mods/list', 5000, scope, { isCurrent: current });
               if (!current()) return;
               if (modsResponse.ok) {
-              const modsData = await modsResponse.json();              if (!current()) return; if (modsData.success) {                // Only set serverInfo.allClientMods if it doesn't already exist with proper data
+              const modsData = modsResponse.data;              if (!current()) return; if (modsData.success) {                // Only set serverInfo.allClientMods if it doesn't already exist with proper data
                 // (ClientModManager sets it with required property, we don't want to overwrite that)
                 if (!serverInfo.allClientMods || serverInfo.allClientMods.length === 0 || 
                     !serverInfo.allClientMods.some(mod => mod.hasOwnProperty('required'))) {
@@ -726,27 +710,20 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   // Asset synchronization checks (shaders/resource packs)
   async function checkAssetSynchronization() {
     if (!legacyContentAllowed()) return {skipped:true,reason:'matching-pack'};
+    const scope = getAsyncScope();
+    const current = () => isCurrentAsyncScope(scope) && legacyContentAllowed();
     const invokeLegacyContent = scopedLegacyContentInvoker();
     if (!instance?.path || !$clientState.connectionStatus || $clientState.connectionStatus !== 'connected') return;
     try {
-      await ensureSessionToken(instance);
-      const base = getManagementBaseUrl(instance);
-      if (!base) return;
       // Fetch server items
       const [srvShadersRes, srvRpsRes] = await Promise.all([
-        fetch(`${base}/api/assets/list/shaderpacks`, {
-          method: 'GET',
-          headers: buildAuthHeaders(instance),
-          signal: AbortSignal.timeout(10000)
-        }).catch(() => null),
-        fetch(`${base}/api/assets/list/resourcepacks`, {
-          method: 'GET',
-          headers: buildAuthHeaders(instance),
-          signal: AbortSignal.timeout(10000)
-        }).catch(() => null)
+        fetchManagementRead('/api/assets/list/shaderpacks', 10000, scope).catch(() => null),
+        fetchManagementRead('/api/assets/list/resourcepacks', 10000, scope).catch(() => null)
       ]);
-      const srvShaders = srvShadersRes && srvShadersRes.ok ? await srvShadersRes.json() : null;
-      const srvRps = srvRpsRes && srvRpsRes.ok ? await srvRpsRes.json() : null;
+      if (!current()) return;
+      const srvShaders = srvShadersRes && srvShadersRes.ok ? srvShadersRes.data : null;
+      const srvRps = srvRpsRes && srvRpsRes.ok ? srvRpsRes.data : null;
+      if (!current()) return;
       const shaderListLoaded = !!srvShaders?.success;
       const resourcePackListLoaded = !!srvRps?.success;
       const previousShaderItems = assetsWork?.shaders?.serverItems || [];
@@ -759,6 +736,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         invokeLegacyContent('list-client-assets', { clientPath: instance.path, type: 'shaderpacks' }).catch(() => ({})),
         invokeLegacyContent('list-client-assets', { clientPath: instance.path, type: 'resourcepacks' }).catch(() => ({}))
       ]);
+      if (!current()) return;
   const shaderAssets = localShaders?.success ? (localShaders.items || []) : [];
   const resourcePackAssets = localRps?.success ? (localRps.items || []) : [];
 
@@ -829,7 +807,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'shaderpacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
       });
   await checkAssetSynchronization();
       successMessage.set(`Downloaded ${items.length} shader${items.length > 1 ? 's' : ''}`);
@@ -854,7 +831,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'shaderpacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
       });
       await checkAssetSynchronization();
       const n = items.length;
@@ -880,7 +856,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'resourcepacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
       });
   await checkAssetSynchronization();
       successMessage.set(`Downloaded ${items.length} resource pack${items.length > 1 ? 's' : ''}`);
@@ -905,7 +880,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         clientPath: instance.path,
         type: 'resourcepacks',
         requiredItems: items,
-        serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint }
       });
       await checkAssetSynchronization();
       const n = items.length;
@@ -1719,6 +1693,17 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     }
   }
 
+  async function fetchManagementRead(path, timeoutMs, scope = getAsyncScope(), options = {}) {
+    const selected = instance, selectedKey = instanceKey;
+    const controller = new AbortController();
+    activeFetchControllers.add(controller);
+    try {
+      return await readManagementJson(selected, path, { ...options, timeoutMs, signal: controller.signal,
+        isCurrent: () => isCurrentAsyncScope(scope) && instance === selected
+          && instanceKey === selectedKey && (!options.isCurrent || options.isCurrent()) });
+    } finally { activeFetchControllers.delete(controller); controller.abort(); }
+  }
+
   function markConnectionHealthy() {
     connectionFailureCount = 0;
   }
@@ -2410,13 +2395,6 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
           requiredMods: serverMods,
           optionalMods: serverOptionalMods,
           allClientMods: allClientModsParam,
-          serverInfo: {
-            serverIp: instance.serverIp,
-            serverPort: instance.serverPort,
-            serverProtocol: instance.serverProtocol,
-            sessionToken: instance.sessionToken,
-            managementCertFingerprint: instance.managementCertFingerprint
-          },
           downloadSourceOverride
         });
         
@@ -3138,15 +3116,10 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
       let lastMapped = null;
       for (const p of panelPortsToTry) {
         try {
-          const protocol = instance.serverProtocol === 'http' ? 'http' : 'https';
-          const statusUrl = `${protocol}://${instance.serverIp}:${p}/api/server/status`;
-          const res = await fetchWithScope(statusUrl, {
-            method: 'GET',
-            headers: buildAuthHeaders(instance)
-          }, 2200, scope);
+          const res = await fetchManagementRead('/api/server/status', 2200, scope);
           if (res.status === 404) continue; // skip to next port
           if (res.ok) {
-            const data = await res.json();
+            const data = res.data;
             if (!isCurrentAsyncScope(scope)) return null;
             if (data && typeof data.isRunning === 'boolean') {
               sawDefinite = true;
@@ -3238,7 +3211,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   
   onMount(() => {
     interfaceMounted = true;
-    activeClientKey = `${instance?.id || ''}:${instance?.path || ''}`;
+    activeClientKey = instanceKey;
     logger.info('ClientInterface component mounted', {
       category: 'ui',
       data: {

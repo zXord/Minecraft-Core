@@ -161,20 +161,45 @@ class ManagementSessionBroker {
         !Number.isSafeInteger(options.observedRevision) || options.observedRevision < 0)) throw fail('INVALID_REQUEST');
     return reason;
   }
-  async _acquire(clientId, options, budget) {
+  async _acquireResult(clientId, options, budget) {
     const reason = this._validate(clientId, options);
     const entry = await this._binding(clientId, budget, options.expectedBinding);
+    let registrationAttempted = false;
+    const register = () => { registrationAttempted = true; return this._registration(entry); };
     if (reason !== 'reuse') {
       if (options.observedBindingGeneration !== entry.binding.generation) throw fail('PLAN_STALE');
       if (options.observedRevision > entry.revision) throw fail('INVALID_REQUEST');
       if (options.observedRevision === entry.revision) await this._wait(() =>
-        options.observedRevision === entry.revision ? this._registration(entry) : undefined, budget);
-    } else if (!entry.token) await this._wait(() => entry.token ? undefined : this._registration(entry), budget);
-    await this._assert(entry, budget); return this._snapshot(entry);
+        options.observedRevision === entry.revision ? register() : undefined, budget);
+    } else if (!entry.token) await this._wait(() => entry.token ? undefined : register(), budget);
+    await this._assert(entry, budget); return Object.freeze({ snapshot: this._snapshot(entry), registrationAttempted });
+  }
+  async _acquire(clientId, options, budget) {
+    return (await this._acquireResult(clientId, options, budget)).snapshot;
+  }
+  async acquireWithProvenance(clientId, options = {}) {
+    this._validate(clientId, options); const budget = this._budget(clientId, options);
+    try { return await this._acquireResult(clientId, options, budget); } finally { budget.close(); }
   }
   async acquire(clientId, options = {}) {
     this._validate(clientId, options); const budget = this._budget(clientId, options);
     try { return await this._acquire(clientId, options, budget); } finally { budget.close(); }
+  }
+  // Main-only one-shot consumers need a pin from exactly the entry that supplied
+  // the token/origin. The assertion never acquires/rotates a token or replays work.
+  async acquireLegacyContext(clientId, options = {}) {
+    this._validate(clientId, { reason: 'reuse' }); const budget = this._budget(clientId, options);
+    try {
+      const entry = await this._binding(clientId, budget, options.expectedBinding);
+      const session = await this._acquire(clientId, { reason: 'reuse', expectedBinding: entry.binding }, budget);
+      return Object.freeze({ baseOrigin: session.baseOrigin, sessionToken: session.token,
+        managementCertFingerprint: entry.authority.pin, binding: session.binding,
+        bindingGeneration: session.bindingGeneration, revision: session.revision,
+        assertCurrent: async (checkOptions = {}) => {
+          const checkBudget = this._budget(clientId, checkOptions);
+          try { await this._assert(entry, checkBudget); } finally { checkBudget.close(); }
+        } });
+    } finally { budget.close(); }
   }
   async readServerInfo(clientId, options = {}) {
     this._validate(clientId, { reason: 'reuse' }); const budget = this._budget(clientId, options);

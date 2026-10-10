@@ -13,7 +13,7 @@ const { net, session } = require('electron');
 const { readModMetadataFromJar } = require('./mod-utils/mod-file-manager.cjs');
 const modAnalysisUtils = require('./mod-utils/mod-analysis-utils.cjs');
 const { ensureServersDat } = require('../utils/servers-dat.cjs');
-const { getManagementHttpsAgent, getPinnedHttpsAgent, fetchPeerFingerprint } = require('../utils/tls-utils.cjs');
+const { getPinnedHttpsAgent } = require('../utils/tls-utils.cjs');
 const { getAuthErrorMessage } = require('../services/minecraft-launcher/auth-launch-utils.cjs');
 const {
   packAuthDataForDisk,
@@ -30,6 +30,9 @@ const { markCurrentServerMutationDirty } = require('../services/server-mutation-
 
 // In-memory lock to prevent race conditions during state operations
 let stateLockPromise = Promise.resolve();
+// Only contexts composed in main may confer management authority. IPC objects
+// cannot acquire this association by copying fields or adding a marker.
+const registeredManagementContexts = new WeakMap();
 
 function getIpcErrorMessage(error) {
   return getAuthErrorMessage(error);
@@ -124,7 +127,7 @@ function shouldUseElectronNet(url, serverInfo) {
 }
 
 function createGetRequest(url, options, serverInfo, onResponse) {
-  if (shouldUseElectronNet(url, serverInfo) && net && session && session.defaultSession) {
+  if (!registeredManagementContexts.has(serverInfo) && shouldUseElectronNet(url, serverInfo) && net && session && session.defaultSession) {
     const request = net.request({ method: 'GET', url, session: session.defaultSession });
     const headers = options && options.headers ? options.headers : null;
     if (headers) {
@@ -198,44 +201,6 @@ function getManagementBaseUrl(serverInfo) {
   return `${protocol}://${serverInfo.serverIp}:${serverInfo.serverPort}`;
 }
 
-function getStoredManagementFingerprint(serverInfo) {
-  if (!serverInfo || !serverInfo.serverIp || !serverInfo.serverPort) return '';
-  try {
-    const instances = appStore.get('instances') || [];
-    const targetPort = String(serverInfo.serverPort);
-    const targetHost = normalizeHost(serverInfo.serverIp);
-    const match = instances.find((inst) =>
-      inst &&
-      inst.type === 'client' &&
-      normalizeHost(inst.serverIp || '') === targetHost &&
-      String(inst.serverPort || '') === targetPort
-    );
-    return typeof match?.managementCertFingerprint === 'string' ? match.managementCertFingerprint.trim() : '';
-  } catch {
-    return '';
-  }
-}
-
-function storeManagementFingerprint(serverInfo, fingerprint) {
-  if (!serverInfo || !fingerprint) return;
-  try {
-    const instances = appStore.get('instances') || [];
-    const targetPort = String(serverInfo.serverPort || '');
-    const targetHost = normalizeHost(serverInfo.serverIp);
-    const idx = instances.findIndex((inst) =>
-      inst &&
-      inst.type === 'client' &&
-      normalizeHost(inst.serverIp || '') === targetHost &&
-      String(inst.serverPort || '') === targetPort
-    );
-    if (idx === -1) return;
-    instances[idx] = { ...instances[idx], managementCertFingerprint: fingerprint };
-    appStore.set('instances', instances);
-  } catch {
-    // ignore persistence failures
-  }
-}
-
 function resolveDownloadUrl(url, serverInfo) {
   if (!url || typeof url !== 'string') return '';
   if (url.startsWith('http://') || url.startsWith('https://')) return url;
@@ -245,75 +210,29 @@ function resolveDownloadUrl(url, serverInfo) {
 }
 
 async function buildManagementRequestOptions(url, serverInfo) {
+  const registered = registeredManagementContexts.get(serverInfo);
   const options = {};
   const headers = getServerDownloadHeaders(url, serverInfo);
   if (headers) {
     options.headers = headers;
   }
-  try {
-    const resolved = resolveDownloadUrl(url, serverInfo);
-    if (resolved) {
-      const resolvedUrl = new URL(resolved);
-      const isHttps = resolvedUrl.protocol === 'https:';
-      if (isHttps) {
-        const targetHost = normalizeHost(resolvedUrl.hostname);
-        const targetPort = getUrlPort(resolvedUrl);
-        const baseHost = normalizeHost(serverInfo?.serverIp || '');
-        const basePort = serverInfo?.serverPort ? String(serverInfo.serverPort) : '';
-        const isManagementTarget = baseHost && targetHost === baseHost && (!basePort || basePort === targetPort);
-        const isManagementPath = isManagementRequestPath(resolvedUrl.pathname);
-        const shouldPin = isManagementTarget && isManagementPath;
-
-        if (shouldPin) {
-          let fingerprint =
-            (typeof serverInfo?.managementCertFingerprint === 'string'
-              ? serverInfo.managementCertFingerprint.trim()
-              : '') || getStoredManagementFingerprint(serverInfo);
-
-          if (!fingerprint) {
-            fingerprint = await fetchPeerFingerprint(resolvedUrl.hostname, targetPort);
-            if (fingerprint) {
-              storeManagementFingerprint(serverInfo, fingerprint);
-              try {
-                serverInfo.managementCertFingerprint = fingerprint;
-              } catch {
-                // ignore assignment failures
-              }
-            }
-          }
-
-          if (fingerprint) {
-            try {
-              const pinnedAgent = await getPinnedHttpsAgent(resolvedUrl.hostname, targetPort, fingerprint);
-              if (pinnedAgent) {
-                options.agent = pinnedAgent;
-                return options;
-              }
-            } catch {
-              // fall back to default agent
-            }
-          }
-
-          if (isLoopbackHost(resolvedUrl.hostname)) {
-            options.agent = await getManagementHttpsAgent();
-          }
-        }
-      }
-    }
-  } catch {
-    // ignore agent setup errors
+  if (registered) {
+    if (isSameManagementOrigin(url, serverInfo)) options.agent = registered.agent;
+    // Revalidate after all awaited preparation, immediately before dispatch.
+    await registered.context.assertCurrent();
   }
   return options;
 }
 
 function getServerDownloadHeaders(url, serverInfo) {
   const resolvedUrl = resolveDownloadUrl(url, serverInfo);
-  if (!serverInfo || !serverInfo.sessionToken || !resolvedUrl) return null;
+  const registered = registeredManagementContexts.get(serverInfo);
+  if (!registered || !resolvedUrl) return null;
   try {
     const parsed = new URL(resolvedUrl);
     const pathname = parsed.pathname || '';
     if (isSameManagementOrigin(resolvedUrl, serverInfo) && (pathname.startsWith('/api/mods/download/') || pathname.startsWith('/api/assets/download/'))) {
-      return { 'X-Session-Token': serverInfo.sessionToken };
+      return { 'X-Session-Token': registered.context.sessionToken };
     }
   } catch {
     return null;
@@ -989,6 +908,35 @@ async function getModrinthDownloadUrl(projectId, versionId, minecraftVersion, lo
 
 function createMinecraftLauncherHandlers(win, mainOptions = {}) {
   const launcher = getMinecraftLauncher(mainOptions.beginManagedLaunch ? { beginManagedLaunch: mainOptions.beginManagedLaunch } : undefined);
+  async function acquireLegacyServerInfo(clientPath, metadata, readBudget) {
+    if (typeof mainOptions.acquireLegacyManagementContext !== 'function') throw new Error('Registered management authority is unavailable');
+    const wait = async (work, deadline = readBudget?.deadline) => {
+      if (!readBudget) return work();
+      let timer;
+      try {
+        if (Date.now() >= deadline) throw new Error('Registered management read is unavailable');
+        const result = await Promise.race([Promise.resolve().then(work), new Promise((_, reject) => {
+          timer = setTimeout(() => { readBudget.controller.abort(); reject(new Error('Registered management read is unavailable')); }, Math.max(0, deadline - Date.now()));
+        })]);
+        if (readBudget.controller.signal.aborted || Date.now() >= deadline) throw new Error('Registered management read is unavailable');
+        return result;
+      } finally { clearTimeout(timer); }
+    };
+    const context = await wait(() => mainOptions.acquireLegacyManagementContext(clientPath, readBudget ? { deadline: readBudget.deadline, signal: readBudget.controller.signal } : undefined));
+    const attemptDeadline = readBudget ? Math.min(readBudget.deadline, Date.now() + 10000) : undefined;
+    const origin = new URL(context.baseOrigin);
+    const agent = origin.protocol === 'https:'
+      ? await wait(() => getPinnedHttpsAgent(normalizeHost(origin.hostname), getUrlPort(origin), context.managementCertFingerprint), attemptDeadline)
+      : undefined;
+    if (origin.protocol === 'https:' && !agent) throw new Error('Registered management TLS pin is unavailable');
+    await wait(() => context.assertCurrent(readBudget ? { deadline: attemptDeadline, signal: readBudget.controller.signal } : undefined), attemptDeadline);
+    const info = Object.freeze({
+      minecraftVersion: metadata?.minecraftVersion, loaderType: metadata?.loaderType,
+      serverIp: origin.hostname, serverPort: getUrlPort(origin), serverProtocol: origin.protocol.slice(0, -1)
+    });
+    registeredManagementContexts.set(info, { context, agent, ...(readBudget ? { deadline: readBudget.deadline, attemptDeadline, signal: readBudget.controller.signal } : {}) });
+    return info;
+  }
   
   launcher.on('auth-success', (data) => {
     if (!win.isDestroyed()) {
@@ -1387,6 +1335,15 @@ function createMinecraftLauncherHandlers(win, mainOptions = {}) {
           return { success: true, downloaded: 0, failures: [], message: 'No mods to download' };
         }
 
+        // Capture source selection once before filesystem/content work. A
+        // metadata-only Modrinth operation does not consume management auth.
+        const configManager = require('../utils/config-manager.cjs');
+        const preferences = await configManager.getInstanceConfig(clientPath, 'downloadPreferences');
+        const selectedSource = normalizeDownloadSource(downloadSourceOverride) || normalizeDownloadSource(preferences?.primarySource) || 'modrinth';
+        if (selectedSource === 'server' && allModsToDownloadFinal.some(mod => hasDownloadSource(mod, 'server'))) {
+          serverInfo = await acquireLegacyServerInfo(clientPath, serverInfo);
+        }
+
         const modsDir = path.join(clientPath, 'mods');
         const manifestDir = path.join(clientPath, 'minecraft-core-manifests');
         const manualModsAnalysis = { found: [], willUpdate: [], willDisable: [], willKeep: [] };
@@ -1461,8 +1418,6 @@ function createMinecraftLauncherHandlers(win, mainOptions = {}) {
             }
             
             // Get download preferences to determine source priority
-            const configManager = require('../utils/config-manager.cjs');
-            const preferences = await configManager.getInstanceConfig(clientPath, 'downloadPreferences');
             const primarySource = normalizeDownloadSource(preferences?.primarySource) || 'modrinth';
             let fallbackSource = normalizeDownloadSource(preferences?.fallbackSource) || getAlternateDownloadSource(primarySource);
             if (fallbackSource === primarySource) {
@@ -2269,12 +2224,19 @@ function createMinecraftLauncherHandlers(win, mainOptions = {}) {
     // Download shaders or resource packs to client from management server (serverInfo)
     'minecraft-download-assets': async (_e, { clientPath, type, requiredItems = [], serverInfo }) => {
       try {
-        if (!clientPath || !type || !serverInfo) {
+        if (!clientPath || !type) {
           return { success: false, error: 'Invalid parameters' };
         }
 
         const safeClientPath = assertKnownClientPath(clientPath);
         const subdir = normalizeAssetType(type);
+        if (requiredItems.some(item => !item.downloadUrl || !/^https?:\/\//i.test(item.downloadUrl) || isManagementRequestPath(new URL(item.downloadUrl).pathname))) {
+          serverInfo = await acquireLegacyServerInfo(safeClientPath, serverInfo);
+        } else {
+          // Ordinary external content must not inherit an IPC-supplied origin
+          // exemption, token, or TLS configuration.
+          serverInfo = null;
+        }
         const installDir = path.join(safeClientPath, subdir);
         const manifestDir = path.join(safeClientPath, 'minecraft-core-manifests');
         markCurrentServerMutationDirty(safeClientPath);
@@ -2545,19 +2507,32 @@ function createMinecraftLauncherHandlers(win, mainOptions = {}) {
         // After that, never touch servers.dat or options.txt again so user modifications are preserved
         const serversInitializedFile = path.join(safeClientPath, '.servers-initialized');
         if (!fs.existsSync(serversInitializedFile)) {
-          markCurrentServerMutationDirty(safeClientPath);
           // First time launch - add server entry
-        await ensureServersDat(
-          safeClientPath,
-          serverIp,
-          managementPort,
-          clientName || 'Minecraft Server',
-          serverPort,
-            false, // Don't preserve - we want to add our server on first launch
-            serverInfo?.sessionToken || null,
-            serverInfo?.serverProtocol || 'https',
-            serverInfo?.managementCertFingerprint || null
-          );
+          let prepared;
+          let managementInfo;
+          const readController = new AbortController();
+          try {
+            if (!serverPort && managementPort) {
+              managementInfo = await acquireLegacyServerInfo(safeClientPath, serverInfo, { deadline: Date.now() + 30000, controller: readController });
+              const registered = registeredManagementContexts.get(managementInfo);
+              prepared = { agent: registered.agent, assertCurrent: registered.context.assertCurrent,
+                deadline: registered.deadline, attemptDeadline: registered.attemptDeadline, signal: registered.signal };
+            }
+            markCurrentServerMutationDirty(safeClientPath);
+            const serversResult = await ensureServersDat(
+              safeClientPath,
+              managementInfo?.serverIp || serverIp,
+              managementInfo?.serverPort || managementPort,
+              clientName || 'Minecraft Server',
+              serverPort,
+              false, // Don't preserve - we want to add our server on first launch
+              prepared ? registeredManagementContexts.get(managementInfo).context.sessionToken : null,
+              managementInfo?.serverProtocol || 'https',
+              prepared ? registeredManagementContexts.get(managementInfo).context.managementCertFingerprint : null,
+              prepared
+            );
+            if (!serversResult.success) throw new Error(serversResult.error || 'Failed to prepare server list');
+          } finally { readController.abort(); }
           
           // Create flag file to indicate servers.dat has been initialized
           fs.writeFileSync(serversInitializedFile, JSON.stringify({

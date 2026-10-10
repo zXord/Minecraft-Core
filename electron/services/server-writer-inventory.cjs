@@ -58,7 +58,9 @@ const SERVER_WRITER_WRITE_SITE_DIGESTS = Object.freeze({
   'electron/ipc/file-handlers.cjs': 'be918d651aed580a58ed756f1cb2f39dc69ab9a20cb46974da62fb6240028707',
   'electron/ipc/install-handlers.cjs': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
   'electron/ipc/management-server-handlers.cjs': 'cf28bfc4ae27930e34673299f97b144b204e8b131f9d9cf552cf8f5a9ab187cd',
-  'electron/ipc/minecraft-launcher-handlers.cjs': 'ba99f7b69ae92a82f4e2cdf201a8bcebf584b4a1c342cd3b8a4b1784bebb7e58',
+  // Reviewed: the same ensureServersDat write site now captures its result so a
+  // failed registered info read stops marker creation/launch. All 56 sites remain.
+  'electron/ipc/minecraft-launcher-handlers.cjs': '853ca8611ee4f127c0a95ce32b5027b86a96f2126fb7517ebc330abbd6d5f870',
   'electron/ipc/mod-availability-handlers.cjs': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
   'electron/ipc/mod-handlers.cjs': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',
   'electron/ipc/mod-handlers/client-mod-handlers.cjs': 'a024e7d4979e6c98946f9ac1f57d0c582aa9ba9d586df81fcc4ed0597a9cf97d',

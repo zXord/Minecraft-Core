@@ -518,8 +518,12 @@ test('startup recovery composes and initializes the complete modpack IPC graph b
   };
   const composition = fakeModpackComposition({
     providers: composedProviders,
-    managementSessionBroker: { async acquire() { return { token: 'synthetic' }; } },
+    managementSessionBroker: { async acquire() { return { token: 'synthetic' }; }, async acquireWithProvenance() { return { snapshot: { token: 'synthetic' }, registrationAttempted: false }; } },
     async resolveClientByPath() { return { clientId: 'local' }; },
+    async acquireLegacyManagementContext(value, options) {
+      assert.equal(value, 'synthetic-client'); assert.deepEqual(options, { deadline: 123 });
+      return { sessionToken: 'legacy-token', baseOrigin: 'https://saved.test', assertCurrent: async () => {} };
+    },
     async initialize() { order.push('modpacks:initialize'); },
     releaseMonitor: {
       async checkAll() {}, async checkOne() {},
@@ -557,6 +561,8 @@ test('startup recovery composes and initializes the complete modpack IPC graph b
   assert.equal(graph.modpacks.lifecycleService, composition.lifecycleService);
   assert.equal((await graph.modpacks.managementSessionBroker.acquire('local')).token, 'synthetic');
   assert.equal((await graph.modpacks.resolveClientByPath('synthetic')).clientId, 'local');
+  const legacy = await graph.clientPackLaunchOptions.acquireLegacyManagementContext('synthetic-client', { deadline: 123 });
+  assert.equal(legacy.sessionToken, 'legacy-token'); assert.equal(legacy.baseOrigin, 'https://saved.test');
   assert.equal(graph.modpacks.providers, composedProviders);
   assert.equal(graph.modpacks.localArtifactSource, composition.localArtifactSource);
   assert.equal(graph.modpacks.destinationReservationService, composition.destinationReservationService);
@@ -1025,7 +1031,7 @@ test('IPC setup consumes the graph store, filesystem, and mutation policy', asyn
     const win = new EventEmitter(); win.webContents = sender;
     const managementSessionBroker = { invalidate: id => invalidated.push(id), async acquire(id) {
       assert.equal(id, 'local'); return { token: 'synthetic-token', baseOrigin: 'https://saved.example:25566', bindingGeneration: 'generation', binding: { generation: 'generation' }, revision: 0 };
-    } };
+    }, async acquireWithProvenance(id) { return { snapshot: await this.acquire(id), registrationAttempted: false }; } };
     setupIpcHandlers(win, {
       store: graphStore,
       filesystem: { sync: graphFs },

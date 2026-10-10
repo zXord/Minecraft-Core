@@ -200,6 +200,7 @@ test('production composition exposes guarded client services and unavailable pai
   assert.equal(typeof composition.companionService?.getStatus, 'function');
   await assert.rejects(composition.managementSessionBroker.acquire('unregistered'), { code: 'INVALID_REQUEST' });
   await assert.rejects(composition.resolveClientByPath(path.join(f.input.userDataPath, 'unregistered')), { code: 'INVALID_REQUEST' });
+  await assert.rejects(composition.acquireLegacyManagementContext(path.join(f.input.userDataPath, 'unregistered')), { code: 'INVALID_REQUEST' });
   assert.equal(fs.readFileSync(path.join(registryRoot, 'companions.json'), 'utf8'), '{bad registry');
   const unregisteredPath = path.join(f.input.userDataPath, 'unregistered-client');
   fs.mkdirSync(unregisteredPath);

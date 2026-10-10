@@ -664,6 +664,10 @@ function createModpackServiceGraph(deps = {}) {
     if (!modpackServices?.clientPackIntegration) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client services are not ready');
     return modpackServices.clientPackIntegration.beginManagedLaunch(request);
   };
+  const acquireLegacyManagementContext = (clientPath, options) => {
+    if (!modpackServices?.acquireLegacyManagementContext) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client services are not ready');
+    return modpackServices.acquireLegacyManagementContext(clientPath, options);
+  };
   const serverMutationPolicy = deps.serverMutationPolicy || createServerMutationPolicy({
     coordinator,
     getClientPackIntegration: () => modpackServices?.clientPackIntegration || null,
@@ -785,6 +789,7 @@ function createModpackServiceGraph(deps = {}) {
     clientPackIntegration: { enumerable: true, get: () => modpackServices?.clientPackIntegration || null },
     managementSessionBroker: { enumerable: true, get: () => modpackServices?.managementSessionBroker || null },
     resolveClientByPath: { enumerable: true, get: () => modpackServices?.resolveClientByPath || null },
+    acquireLegacyManagementContext: { enumerable: true, get: () => modpackServices?.acquireLegacyManagementContext || null },
     providers: { enumerable: true, get: () => modpackServices?.providers || providers },
     localArtifactSource: { enumerable: true, get: () => modpackServices?.localArtifactSource || null },
     destinationReservationService: { enumerable: true, get: () => modpackServices?.destinationReservationService || null },
@@ -898,7 +903,7 @@ function createModpackServiceGraph(deps = {}) {
     artifacts: Object.freeze({ cache: artifactCache, downloader: artifactDownloader, selections: selectionRegistry }),
     coordinator,
     serverMutationPolicy,
-    clientPackLaunchOptions: Object.freeze({ beginManagedLaunch }),
+    clientPackLaunchOptions: Object.freeze({ beginManagedLaunch, acquireLegacyManagementContext }),
     registerClientPackIpcDisposer(disposeIpc) {
       if (typeof disposeIpc !== 'function') throw new TypeError('Client IPC disposer is invalid');
       clientPackIpcDisposers.add(disposeIpc);

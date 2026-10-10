@@ -4,6 +4,24 @@ const { fetch } = require('./fetch.cjs');
 const nbt = require('prismarine-nbt');
 const zlib = require('zlib');
 const { getManagementHttpsAgent, getPinnedHttpsAgent } = require('./tls-utils.cjs');
+const { requestManagementJson } = require('../services/management-session-transport.cjs');
+
+async function withinDeadline(work, deadline, signal) {
+  let timer, abort;
+  const check = () => { if (signal?.aborted || Date.now() >= deadline) throw new Error('Registered management read is unavailable'); };
+  try {
+    check();
+    const result = await Promise.race([
+      Promise.resolve().then(() => { check(); return work(); }),
+      new Promise((_, reject) => {
+        abort = () => reject(new Error('Registered management read is unavailable'));
+        timer = setTimeout(abort, Math.max(0, deadline - Date.now()));
+        signal?.addEventListener('abort', abort, { once: true });
+      })
+    ]);
+    check(); return result;
+  } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+}
 
 /**
  * Create or update the servers.dat and options.txt files so the given server
@@ -31,15 +49,26 @@ async function ensureServersDat(
   preserveExistingServers = false,
   sessionToken = null,
   managementProtocol = 'https',
-  managementCertFingerprint = null
+  managementCertFingerprint = null,
+  preparedManagement = null
 ) {
+  const controller = preparedManagement ? new AbortController() : null;
+  const abort = () => controller?.abort();
+  if (preparedManagement?.signal?.aborted) abort(); else preparedManagement?.signal?.addEventListener('abort', abort, { once: true });
+  const deadline = preparedManagement ? Math.min(preparedManagement.deadline ?? Infinity, Date.now() + 30000) : null;
+  const attemptDeadline = preparedManagement ? Math.min(deadline, preparedManagement.attemptDeadline ?? Date.now() + 10000) : null;
+  const assertRegistered = (end = deadline) => withinDeadline(() => preparedManagement.assertCurrent({ signal: controller.signal, deadline: end }), end, controller.signal);
   try {
     let minecraftPort = minecraftPortOverride || 25565;
 
     if (!minecraftPortOverride && managementPort) {
       const protocol = managementProtocol === 'http' ? 'http' : 'https';
       let agent;
-      if (protocol === 'https') {
+      if (preparedManagement) {
+        agent = await withinDeadline(() => preparedManagement.agent, attemptDeadline, controller.signal);
+        if (protocol === 'https' && !agent) throw new Error('Registered management TLS pin is unavailable');
+        await assertRegistered(attemptDeadline);
+      } else if (protocol === 'https') {
         try {
           if (managementCertFingerprint) {
             agent = await getPinnedHttpsAgent(serverIp, managementPort, managementCertFingerprint);
@@ -51,22 +80,33 @@ async function ensureServersDat(
           agent = await getManagementHttpsAgent();
         }
       }
-      const infoRes = await fetch(
-        `${protocol}://${serverIp}:${managementPort}/api/server/info`,
-        {
-          timeout: 5000,
-          headers: sessionToken ? { 'X-Session-Token': sessionToken } : undefined,
-          agent
-        }
-      ).catch(() => null);
-      if (infoRes?.ok) {
-        const info = await infoRes.json();
+      let info;
+      if (preparedManagement) {
+        const result = await withinDeadline(() => requestManagementJson(`${protocol}://${serverIp}:${managementPort}/api/server/info`, {
+          method: 'GET', agent, headers: { 'X-Session-Token': sessionToken }, signal: controller.signal,
+          timeoutMs: Math.max(1, Math.min(10000, Math.ceil(attemptDeadline - Date.now()))), maxBytes: 262144
+        }), attemptDeadline, controller.signal);
+        if (result.statusCode !== 200) throw new Error('Registered management read is unavailable');
+        info = result.body;
+        await assertRegistered(attemptDeadline);
+      } else {
+        const infoRes = await fetch(
+          `${protocol}://${serverIp}:${managementPort}/api/server/info`,
+          { timeout: 5000, headers: sessionToken ? { 'X-Session-Token': sessionToken } : undefined, agent }
+        ).catch(() => null);
+        if (infoRes?.ok) info = await infoRes.json();
+      }
+      if (info) {
         if (info.minecraftPort) {
           const portNum = parseInt(info.minecraftPort, 10);
           if (!Number.isNaN(portNum)) minecraftPort = portNum;
         }
       }
     }
+
+    // The response and JSON parsing are asynchronous; never write a retired
+    // registered binding's server list. Setup retains its existing behavior.
+    if (preparedManagement) await assertRegistered();
 
     if (!fs.existsSync(clientDir)) {
       fs.mkdirSync(clientDir, { recursive: true });
@@ -92,12 +132,13 @@ async function ensureServersDat(
       try {
         const buf = fs.readFileSync(serversDatPath);
         const uncompressed = zlib.gunzipSync(buf);
-        const parsed = await nbt.parse(uncompressed);
+        const parsed = await (preparedManagement ? withinDeadline(() => nbt.parse(uncompressed), deadline, controller.signal) : nbt.parse(uncompressed));
         const list = (parsed.parsed.value.servers?.value || []);
         
         // If there are any existing servers, don't modify servers.dat
         // This preserves user modifications including changed ports
         if (Array.isArray(list) && list.length > 0) {
+          if (preparedManagement) await assertRegistered();
           return { success: true, preserved: true };
         }
       } catch {
@@ -111,7 +152,7 @@ async function ensureServersDat(
       try {
         const buf = fs.readFileSync(serversDatPath);
         const uncompressed = zlib.gunzipSync(buf);
-        const parsed = await nbt.parse(uncompressed);
+        const parsed = await (preparedManagement ? withinDeadline(() => nbt.parse(uncompressed), deadline, controller.signal) : nbt.parse(uncompressed));
         const list = (parsed.parsed.value.servers?.value || []);
         existingServers = /** @type {any[]} */(list).map(entry =>
           entry.value
@@ -147,10 +188,14 @@ async function ensureServersDat(
       servers: nbt.list(nbt.comp(nbtServers))
     });
     const raw = nbt.writeUncompressed(/** @type {any} */(nbtData));
+    if (preparedManagement) await assertRegistered();
     fs.writeFileSync(serversDatPath, raw);
     return { success: true };
   } catch (err) {
-    return { success: false, error: err.message };
+    return { success: false, error: preparedManagement ? 'Registered management read is unavailable' : err.message };
+  } finally {
+    controller?.abort();
+    preparedManagement?.signal?.removeEventListener('abort', abort);
   }
 }
 

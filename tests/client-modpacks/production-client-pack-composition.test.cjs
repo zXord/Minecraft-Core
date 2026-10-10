@@ -13,7 +13,7 @@ const { createClientPackComposition } = require('../../electron/bootstrap/create
 const fingerprint = 'a483152d67a62ce78f4bfb9fd2ee9846469060a21b9dc02a4111d31b88067585';
 const unexpected = () => assert.fail('Status and asset listing must not acquire or prepare artifacts');
 
-async function fixture(t, { managed = true, missing = false, managedJar = false } = {}) {
+async function fixture(t, { managed = true, missing = false, managedJar = false, client = false, readClientConfig } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-client-composition-'));
   const serverPath = path.join(root, 'registered-server');
   fs.mkdirSync(serverPath);
@@ -47,9 +47,13 @@ async function fixture(t, { managed = true, missing = false, managedJar = false 
   // The legacy summary is not an authority for managed status or release identity.
   fs.writeFileSync(path.join(serverPath, '.minecraft-core.json'), JSON.stringify({ modpackManaged: true, modpackVersion: 'wrong-summary-version', modpackReleaseId: '999' }));
   const workspaceRegistry = { createStagingOutput: unexpected, resolveOwnedWorkspace: unexpected, releaseOwner: unexpected };
+  const instances = [{ id: 'server-one', type: 'server', path: serverPath }];
+  const clientPath = path.join(root, 'registered-client');
+  if (client) { fs.mkdirSync(clientPath); instances.push({ id: 'local-client', type: 'client', path: clientPath }); }
   composition = createClientPackComposition({
     userDataPath: path.join(root, 'app-data'),
-    store: { get(key) { assert.equal(key, 'instances'); return [{ id: 'server-one', type: 'server', path: serverPath }]; } },
+    store: { get(key) { assert.equal(key, 'instances'); return instances; } },
+    readClientConfig,
     clientDurableFsFactory: durableFsFactory,
     clientWorkerDurableConfig: { workerPath: path.join(root, 'ArchiveWorker.exe'), workerManifestPath: path.join(root, 'manifest.json'), appOwnedRoot: root },
     stateRepository: repository,
@@ -77,8 +81,20 @@ async function fixture(t, { managed = true, missing = false, managedJar = false 
     reparseInspector: { async isReparsePoint() { return false; } }, randomUUID: crypto.randomUUID, clock: { now: () => 0 }
   });
   await composition.initialize();
-  return { service: composition.companionService, repositoryFs, serverPath };
+  return { service: composition.companionService, composition, instances, clientPath, repositoryFs, serverPath };
 }
+
+test('legacy composition hook resolves only the registered path and refuses replacement before dispatch', async t => {
+  const config = { serverProtocol: 'https', serverIp: 'saved.test', serverPort: '8443', managementCertFingerprint: 'a'.repeat(64),
+    clientId: 'remote-client', clientName: 'Synthetic', inviteSecret: 'private', sessionToken: 'saved-token' };
+  const f = await fixture(t, { client: true, readClientConfig: async () => ({ ...config }) });
+  const context = await f.composition.acquireLegacyManagementContext(f.clientPath);
+  assert.equal(context.baseOrigin, 'https://saved.test:8443'); assert.equal(context.sessionToken, 'saved-token');
+  assert.equal(context.managementCertFingerprint, 'a'.repeat(64)); assert.equal(Object.isFrozen(context), true);
+  await assert.rejects(f.composition.acquireLegacyManagementContext(path.join(f.clientPath, 'unregistered')), { code: 'INVALID_REQUEST' });
+  f.instances.find(item => item.id === 'local-client').path = path.join(f.clientPath, 'replacement');
+  await assert.rejects(context.assertCurrent(), { code: 'PLAN_STALE' });
+});
 
 test('production composition exposes an unpaired descriptor from the managed repository envelope', async t => {
   const { service } = await fixture(t);

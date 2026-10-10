@@ -21,6 +21,48 @@ function fixture(t, overrides = {}) {
 }
 const rotate = snapshot => ({ reason: 'authorization-rejected', observedBindingGeneration: snapshot.bindingGeneration, observedRevision: snapshot.revision });
 
+test('legacy context projects saved pin with current memory token and has read-only binding assertion', async t => {
+  const f = fixture(t, { getPinnedHttpsAgent: async () => ({}) }); f.config.serverProtocol = 'https'; f.config.managementCertFingerprint = 'AA:'.repeat(31) + 'AA';
+  const first = await f.broker.acquire('local');
+  const context = await f.broker.acquireLegacyContext('local');
+  assert.equal(Object.isFrozen(context), true); assert.equal(context.sessionToken, SEED);
+  assert.equal(context.baseOrigin, 'https://saved.example:25566'); assert.equal(context.managementCertFingerprint, 'a'.repeat(64));
+  assert.equal(context.binding, first.binding); assert.equal(typeof context.assertCurrent, 'function');
+  assert.deepEqual(Object.keys(first).sort(), ['baseOrigin', 'binding', 'bindingGeneration', 'revision', 'token']);
+  const later = await f.broker.acquire('local', rotate(first));
+  await context.assertCurrent();
+  assert.equal(context.sessionToken, SEED); assert.equal(later.token, ROTATED); assert.equal(f.calls.length, 1);
+  assert.equal(f.writes(), 0);
+});
+for (const change of ['pin', 'origin', 'path', 'invalidation', 'disposal']) test(`legacy retained context refuses ${change} without registration`, async t => {
+  const f = fixture(t); f.config.serverProtocol = 'https'; f.config.managementCertFingerprint = 'a'.repeat(64);
+  const context = await f.broker.acquireLegacyContext('local');
+  if (change === 'pin') f.config.managementCertFingerprint = 'b'.repeat(64);
+  if (change === 'origin') f.config.serverIp = 'replacement.example';
+  if (change === 'path') f.target.clientPath = path.resolve('replacement-client');
+  if (change === 'invalidation') f.broker.invalidate('local');
+  if (change === 'disposal') f.broker.dispose();
+  await assert.rejects(context.assertCurrent(), { code: change === 'disposal' ? 'CANCELLED' : 'PLAN_STALE' });
+  assert.equal(f.calls.length, 0);
+});
+test('legacy context refuses saved pin drift during acquisition without projecting a mixed pair', async t => {
+  let reads = 0;
+  const f = fixture(t, { readClientConfig: async () => {
+    if (++reads === 3) f.config.managementCertFingerprint = 'b'.repeat(64);
+    return { ...f.config };
+  } });
+  f.config.serverProtocol = 'https'; f.config.managementCertFingerprint = 'a'.repeat(64);
+  await assert.rejects(f.broker.acquireLegacyContext('local'), { code: 'PLAN_STALE' });
+  assert.equal(f.calls.length, 0);
+});
+test('legacy assertion is bounded and cancellation does not rotate its token', async t => {
+  const f = fixture(t); const context = await f.broker.acquireLegacyContext('local');
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(context.assertCurrent({ signal: controller.signal }), { code: 'CANCELLED' });
+  await assert.rejects(context.assertCurrent({ deadline: Date.now() - 1 }), { code: 'CLIENT_PACK_UNAVAILABLE' });
+  assert.equal(f.calls.length, 0);
+});
+
 test('saved token is seeded once; recovery advances revision without changing binding or config', async t => {
   const f = fixture(t); const before = JSON.stringify(f.config); const first = await f.broker.acquire('local');
   assert.equal(first.token, SEED); assert.equal(first.baseOrigin, 'http://saved.example:25566');

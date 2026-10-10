@@ -23,10 +23,11 @@ import {
 } from '../stores/clientModManager.js';
 import { minecraftVersion } from '../stores/modStore.js';
 import { safeInvoke } from './ipcUtils.js';
-import { buildAuthHeaders, ensureSessionToken, getManagementBaseUrl, resolveManagementUrl } from './managementAuth.js';
+import { readManagementJson, getManagementBaseUrl, resolveManagementUrl } from './managementAuth.js';
 import logger from './logger.js';
 
 interface Instance {
+  id?: string;
   serverIp?: string;
   serverPort?: string;
   serverProtocol?: string;
@@ -38,8 +39,18 @@ interface Instance {
   managementCertFingerprint?: string;
 }
 
-interface DownloadOptions {
+interface DownloadOptions extends ReadOptions {
   downloadSourceOverride?: string | null;
+}
+
+interface ReadOptions {
+  isCurrent?: () => boolean;
+  signal?: AbortSignal;
+}
+
+function readScope(instance: Instance, options: ReadOptions) {
+  const authority = JSON.stringify(instance);
+  return () => !options.signal?.aborted && (!options.isCurrent || options.isCurrent()) && JSON.stringify(instance) === authority;
 }
 
 function getDownloadSourceLabel(source?: string | null) {
@@ -55,9 +66,12 @@ function appendManualFallbackHint(message: string, result: any) {
   return `${message}. ${getDownloadSourceLabel(result.attemptedSource)} stopped; retry later or switch to ${getDownloadSourceLabel(result.fallbackSource)} manually.`;
 }
 
-export async function loadInstalledInfo(instance: Instance) {
+export async function loadInstalledInfo(instance: Instance, options: ReadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   try {
     const info = await window.electron.invoke('get-client-installed-mod-info', instance.path);
+    if (!current()) return;
     if (Array.isArray(info)) {
       installedModsInfo.set(info);
       const reqMods = get(requiredMods);
@@ -86,7 +100,9 @@ export async function loadInstalledInfo(instance: Instance) {
   }
 }
 
-export async function loadModsFromServer(instance: Instance) {
+export async function loadModsFromServer(instance: Instance, options: ReadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   const baseUrl = getManagementBaseUrl(instance);
   if (!instance || !baseUrl) {
     serverManagedFiles.set(new SvelteSet());
@@ -97,24 +113,21 @@ export async function loadModsFromServer(instance: Instance) {
     const testUrl = resolveManagementUrl(instance, '/api/test');
     const testResponse = await fetch(testUrl, {
       method: 'GET',
-      headers: buildAuthHeaders(instance),
+      redirect: 'error',
       signal: AbortSignal.timeout(10000)
     }); // Increased timeout
+    if (!current()) return;
     if (!testResponse.ok) {
       connectionStatus.set('disconnected');
       serverManagedFiles.set(new SvelteSet());
       return;
     }
     connectionStatus.set('connected');
-    await ensureSessionToken(instance);
-    const serverInfoUrl = resolveManagementUrl(instance, '/api/server/info');
-    const serverInfoResponse = await fetch(serverInfoUrl, {
-      method: 'GET',
-      headers: buildAuthHeaders(instance),
-      signal: AbortSignal.timeout(10000)
-    }); // Increased timeout
+    const serverInfoResponse = await readManagementJson(instance, '/api/server/info', { ...options, isCurrent: current });
+    if (!current()) return;
     if (serverInfoResponse.ok) {
-      const serverInfo = await serverInfoResponse.json();
+      const serverInfo = serverInfoResponse.data;
+      if (!current()) return;
       if (serverInfo.success) {
         if (serverInfo.minecraftVersion) {
           minecraftVersion.set(serverInfo.minecraftVersion);
@@ -122,10 +135,11 @@ export async function loadModsFromServer(instance: Instance) {
         requiredMods.set(serverInfo.requiredMods || []);
         allClientMods.set(serverInfo.allClientMods || []);
         const currentServerMods = new Set([
-          ...serverInfo.requiredMods.map((m: any) => m.fileName.toLowerCase()),
+          ...(serverInfo.requiredMods || []).map((m: any) => m.fileName.toLowerCase()),
           ...(serverInfo.allClientMods || []).map((m: any) => m.fileName.toLowerCase())
         ]);
         try {        const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
+        if (!current()) return;
         if (state.success && Array.isArray(state.acknowledgedDeps)) {
           // Merge with existing acknowledged deps instead of overwriting
           acknowledgedDeps.update(currentSet => {
@@ -139,45 +153,46 @@ export async function loadModsFromServer(instance: Instance) {
         } catch {
           // ignore
         }
+        if (!current()) return;
         serverManagedFiles.update((existing: SvelteSet<string>) => {
           const combined = new SvelteSet(existing);
           for (const mod of currentServerMods) combined.add(mod);
           return combined;
         });
-        await loadInstalledInfo(instance);
-        const modsUrl = resolveManagementUrl(instance, '/api/mods/list');
-        const modsResponse = await fetch(modsUrl, {
-          method: 'GET',
-          headers: buildAuthHeaders(instance),
-          signal: AbortSignal.timeout(5000)
-        });
+        await loadInstalledInfo(instance, { ...options, isCurrent: current });
+        if (!current()) return;
+        const modsResponse = await readManagementJson(instance, '/api/mods/list', { ...options, isCurrent: current, timeoutMs: 5000 });
+        if (!current()) return;
         if (modsResponse.ok) {
-          const modsData = await modsResponse.json();
+          const modsData = modsResponse.data;
+          if (!current()) return;
           if (modsData.success) {
             serverMods.set(modsData.mods.server || []);
             optionalMods.set(get(allClientMods).filter(mod => !get(requiredMods).some(r => r.fileName === mod.fileName)));
           }
         }
         if (instance.path) {
-          await checkModSynchronization(instance);
+          await checkModSynchronization(instance, { ...options, isCurrent: current });
           // Intentionally do NOT auto-download shaders/resource packs here.
           // Asset synchronization is now user-initiated from the Play tab, similar to mods.
         }
       }
     }
-    lastModCheck.set(new Date());
+    if (current()) lastModCheck.set(new Date());
   } catch (err: any) {
+    if (!current()) return;
     connectionStatus.set('disconnected');
     serverManagedFiles.set(new SvelteSet());
     errorMessage.set('Failed to connect to server: ' + err.message);
-    setTimeout(() => errorMessage.set(''), 5000);
+    setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
   } finally {
-    isLoadingMods.set(false);
+    if (current()) isLoadingMods.set(false);
   }
 }
 
-export async function checkModSynchronization(instance: Instance) {
-  if (!instance?.path) return;
+export async function checkModSynchronization(instance: Instance, options: ReadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!instance?.path || !current()) return;
   try {
     const managedFiles = get(serverManagedFiles);
     const ackSet = get(acknowledgedDeps);
@@ -193,10 +208,13 @@ export async function checkModSynchronization(instance: Instance) {
       allClientMods: filteredAll,
       serverManagedFiles: Array.from(managedFiles)
     });
+    if (!current()) return;
     if (result.success) {
       modSyncStatus.set(result);
       try {
-        const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });        if (state.success && Array.isArray(state.acknowledgedDeps)) {
+        const state = await window.electron.invoke('load-expected-mod-state', { clientPath: instance.path });
+        if (!current()) return;
+        if (state.success && Array.isArray(state.acknowledgedDeps)) {
           // Merge with existing acknowledged deps instead of overwriting
           acknowledgedDeps.update(currentSet => {
             const newSet = new Set(currentSet);
@@ -216,26 +234,30 @@ export async function checkModSynchronization(instance: Instance) {
           }
         });
       }
+      if (!current()) return;
       if (result.successfullyRemovedMods && result.successfullyRemovedMods.length > 0) {
         updateServerManagedFiles('remove', result.successfullyRemovedMods);
       }
     } else {
       errorMessage.set(result.error || 'Failed to check mod synchronization.');
-      setTimeout(() => errorMessage.set(''), 5000);
+      setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
     }
   } catch {
+    if (!current()) return;
     errorMessage.set('Failed to check mod synchronization.');
-    setTimeout(() => errorMessage.set(''), 5000);
+    setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
   }
 }
 
-export async function refreshInstalledMods(instance: Instance) {
+export async function refreshInstalledMods(instance: Instance, options: ReadOptions = {}) {
   if (!instance?.path) return;
-  await loadInstalledInfo(instance);
-  await checkModSynchronization(instance);
+  await loadInstalledInfo(instance, options);
+  await checkModSynchronization(instance, options);
 }
 
 export async function downloadRequiredMods(instance: Instance, options: DownloadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   const reqMods = get(requiredMods);
   if (!instance.path || !reqMods.length) return;
   
@@ -251,7 +273,7 @@ export async function downloadRequiredMods(instance: Instance, options: Download
   
   if (modsToDownload.length === 0) {
     successMessage.set('All required mods are already up to date');
-    setTimeout(() => successMessage.set(''), 3000);
+    setTimeout(() => { if (current()) successMessage.set(''); }, 3000);
     return;
   }
   
@@ -260,17 +282,17 @@ export async function downloadRequiredMods(instance: Instance, options: Download
       clientPath: instance.path,
       requiredMods: modsToDownload,
       allClientMods: get(allClientMods),
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint },
       downloadSourceOverride: options.downloadSourceOverride || null
     });
+    if (!current()) return result;
     if (result.success) {
       successMessage.set(`Successfully downloaded ${result.downloaded} required mods`);
-      setTimeout(() => successMessage.set(''), 5000);
+      setTimeout(() => { if (current()) successMessage.set(''); }, 5000);
       if (result.downloadedFiles?.length) updateServerManagedFiles('add', result.downloadedFiles);
       if (result.removedMods?.length) updateServerManagedFiles('remove', result.removedMods);
       setTimeout(async () => {
-        await checkModSynchronization(instance);
-        await refreshInstalledMods(instance);
+        await checkModSynchronization(instance, { ...options, isCurrent: current });
+        await refreshInstalledMods(instance, { ...options, isCurrent: current });
       }, 1500);
     } else {
       // Enhanced error message with more details
@@ -281,18 +303,21 @@ export async function downloadRequiredMods(instance: Instance, options: Download
       }
       detailedError = appendManualFallbackHint(detailedError, result);
       errorMessage.set(detailedError);
-      setTimeout(() => errorMessage.set(''), 8000);
+      setTimeout(() => { if (current()) errorMessage.set(''); }, 8000);
     }
     return result;
   } catch (err: any) {
+    if (!current()) return;
     errorMessage.set('Error downloading mods: ' + err.message);
-    setTimeout(() => errorMessage.set(''), 5000);
+    setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
     return { success: false, error: err.message };
   }
 }
 
 
-export async function acknowledgeAllDependencies(instance: Instance) {
+export async function acknowledgeAllDependencies(instance: Instance, options: ReadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   const status = get(modSyncStatus);
   if (!instance?.path || !status?.acknowledgments) return;
   const acknowledgments = status.acknowledgments || [];
@@ -303,6 +328,7 @@ export async function acknowledgeAllDependencies(instance: Instance) {
         clientPath: instance.path,
         modFileName: acknowledgment.fileName
       });
+      if (!current()) return result;
       if (result.success) {
         acknowledgedDeps.update(set => new SvelteSet(set).add(acknowledgment.fileName.toLowerCase()));
         removeServerManagedFiles([acknowledgment.fileName]);
@@ -311,17 +337,20 @@ export async function acknowledgeAllDependencies(instance: Instance) {
       }
     }
     successMessage.set(`Successfully acknowledged ${acknowledgments.length} dependenc${acknowledgments.length > 1 ? 'ies' : 'y'}`);
-    setTimeout(() => successMessage.set(''), 5000);
+    setTimeout(() => { if (current()) successMessage.set(''); }, 5000);
     setTimeout(async () => {
-      await checkModSynchronization(instance);
+      await checkModSynchronization(instance, { ...options, isCurrent: current });
     }, 3500); // Slightly longer than the 3-second optimistic update timeout
   } catch (err: any) {
+    if (!current()) return;
     errorMessage.set('Error acknowledging dependencies: ' + err.message);
-    setTimeout(() => errorMessage.set(''), 5000);
+    setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
   }
 }
 
 export async function downloadOptionalMods(instance: Instance, options: DownloadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   const allMods = get(allClientMods);
   if (!instance.path || !allMods.length) return;
   
@@ -338,7 +367,7 @@ export async function downloadOptionalMods(instance: Instance, options: Download
   
   if (modsToDownload.length === 0) {
     successMessage.set('All optional mods are already up to date');
-    setTimeout(() => successMessage.set(''), 3000);
+    setTimeout(() => { if (current()) successMessage.set(''); }, 3000);
     return;
   }
   
@@ -348,30 +377,33 @@ export async function downloadOptionalMods(instance: Instance, options: Download
       requiredMods: [],
       optionalMods: modsToDownload,
       allClientMods: allMods,
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint },
       downloadSourceOverride: options.downloadSourceOverride || null
     });
+    if (!current()) return result;
     if (result.success) {
       successMessage.set(`Successfully downloaded ${result.downloaded} optional mods`);
-      setTimeout(() => successMessage.set(''), 5000);
+      setTimeout(() => { if (current()) successMessage.set(''); }, 5000);
       if (result.removedMods?.length) removeServerManagedFiles(result.removedMods);
       setTimeout(async () => {
-        await checkModSynchronization(instance);
-        await refreshInstalledMods(instance);
+        await checkModSynchronization(instance, { ...options, isCurrent: current });
+        await refreshInstalledMods(instance, { ...options, isCurrent: current });
       }, 1500);
     } else {
       errorMessage.set(appendManualFallbackHint(`Failed to download optional mods: ${result.error || 'Unknown error'}`, result));
-      setTimeout(() => errorMessage.set(''), 5000);
+      setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
     }
     return result;
   } catch (err: any) {
+    if (!current()) return;
     errorMessage.set('Error downloading optional mods: ' + err.message);
-    setTimeout(() => errorMessage.set(''), 5000);
+    setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
     return { success: false, error: err.message };
   }
 }
 
 export async function downloadSingleOptionalMod(instance: Instance, mod: any, options: DownloadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   if (!instance.path) return;
   try {
     const result = await window.electron.invoke('minecraft-download-mods', {
@@ -379,29 +411,32 @@ export async function downloadSingleOptionalMod(instance: Instance, mod: any, op
       requiredMods: mod.required ? [mod] : [],
       optionalMods: mod.required ? [] : [mod],
       allClientMods: get(allClientMods),
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint },
       downloadSourceOverride: options.downloadSourceOverride || null
     });
+    if (!current()) return result;
     if (result.success) {
       // Avoid duplicate success toasts; the downloads UI already shows completion
       if (result.removedMods?.length) removeServerManagedFiles(result.removedMods);
       setTimeout(async () => {
-        await checkModSynchronization(instance);
-        await refreshInstalledMods(instance);
+        await checkModSynchronization(instance, { ...options, isCurrent: current });
+        await refreshInstalledMods(instance, { ...options, isCurrent: current });
       }, 1500);
     } else {
       errorMessage.set(appendManualFallbackHint(`Failed to download ${mod.fileName}: ${result.error || 'Unknown error'}`, result));
-      setTimeout(() => errorMessage.set(''), 5000);
+      setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
     }
     return result;
   } catch (err: any) {
+    if (!current()) return;
     errorMessage.set(`Error downloading ${mod.fileName}: ${err.message}`);
-    setTimeout(() => errorMessage.set(''), 5000);
+    setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
     return { success: false, error: err.message };
   }
 }
 
 export async function downloadSingleRequiredMod(instance: Instance, mod: any, options: DownloadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   if (!instance.path) return;
   try {
     const result = await window.electron.invoke('minecraft-download-mods', {
@@ -409,56 +444,64 @@ export async function downloadSingleRequiredMod(instance: Instance, mod: any, op
       requiredMods: [mod],
       optionalMods: [],
       allClientMods: get(allClientMods),
-      serverInfo: { serverIp: instance.serverIp, serverPort: instance.serverPort, serverProtocol: instance.serverProtocol, sessionToken: instance.sessionToken, managementCertFingerprint: instance.managementCertFingerprint },
       downloadSourceOverride: options.downloadSourceOverride || null
     });
+    if (!current()) return result;
     if (result.success) {
       // Avoid duplicate success toasts; the downloads UI already shows completion
       if (result.removedMods?.length) removeServerManagedFiles(result.removedMods);
       setTimeout(async () => {
-        await checkModSynchronization(instance);
-        await refreshInstalledMods(instance);
+        await checkModSynchronization(instance, { ...options, isCurrent: current });
+        await refreshInstalledMods(instance, { ...options, isCurrent: current });
       }, 1500);
     } else {
       errorMessage.set(appendManualFallbackHint(`Failed to download ${mod.fileName}: ${result.error || 'Unknown error'}`, result));
-      setTimeout(() => errorMessage.set(''), 5000);
+      setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
     }
     return result;
   } catch (err: any) {
+    if (!current()) return;
     errorMessage.set(`Error downloading ${mod.fileName}: ${err.message}`);
-    setTimeout(() => errorMessage.set(''), 5000);
+    setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
     return { success: false, error: err.message };
   }
 }
 
-export async function handleModToggle(instance: Instance, modFileName: string, enabled: boolean) {
+export async function handleModToggle(instance: Instance, modFileName: string, enabled: boolean, options: ReadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   if (!instance.path) return;
   
   try {
     const result = await window.electron.invoke('toggle-client-mod', { clientPath: instance.path, modFileName, enabled });
+    if (!current()) return result;
     
     if (result.success) {
       successMessage.set(`Mod ${enabled ? 'enabled' : 'disabled'}: ${modFileName}`);
-      setTimeout(() => successMessage.set(''), 3000);
+      setTimeout(() => { if (current()) successMessage.set(''); }, 3000);
     } else {
       errorMessage.set(`Failed to ${enabled ? 'enable' : 'disable'} mod: ${result.error}`);
-      setTimeout(() => errorMessage.set(''), 5000);
+      setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
       throw new Error(result.error || 'Toggle failed');
     }
   } catch (err: any) {
+    if (!current()) return;
     errorMessage.set('Error toggling mod: ' + err.message);
-    setTimeout(() => errorMessage.set(''), 5000);
+    setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
     throw err; // Re-throw to let the wrapper handle it
   }
 }
 
-export async function handleModDelete(instance: Instance, modFileName: string) {
+export async function handleModDelete(instance: Instance, modFileName: string, options: ReadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   if (!instance.path) return;
   try {
     const result = await window.electron.invoke('delete-client-mod', { clientPath: instance.path, modFileName });
+    if (!current()) return result;
     if (result.success) {
       successMessage.set(`Deleted mod: ${modFileName}`);
-      setTimeout(() => successMessage.set(''), 3000);
+      setTimeout(() => { if (current()) successMessage.set(''); }, 3000);
       installedModInfo.update((info: any[]) => {
         const updated = info.filter((m: any) => m.fileName !== modFileName);
         const removed = info.find((m: any) => m.fileName === modFileName);
@@ -470,86 +513,101 @@ export async function handleModDelete(instance: Instance, modFileName: string) {
         }
         return updated;
       });
-      checkModSynchronization(instance);
+      checkModSynchronization(instance, { ...options, isCurrent: current });
     } else {
       errorMessage.set(`Failed to delete mod: ${result.error}`);
-      setTimeout(() => errorMessage.set(''), 5000);
+      setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
     }
   } catch (err: any) {
+    if (!current()) return;
     errorMessage.set('Error deleting mod: ' + err.message);
-    setTimeout(() => errorMessage.set(''), 5000);
+    setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
   }
 }
 
-export async function handleServerModRemoval(instance: Instance, modFileName: string) {
+export async function handleServerModRemoval(instance: Instance, modFileName: string, options: ReadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   if (!instance.path) return;
   try {
     const result = await window.electron.invoke('minecraft-remove-server-managed-mods', {
       clientPath: instance.path,
       modsToRemove: [modFileName]
     });
+    if (!current()) return result;
     if (result.success) {
       successMessage.set(`Successfully removed ${result.count} mod${result.count !== 1 ? 's' : ''}`);
-      setTimeout(() => successMessage.set(''), 3000);
-      await checkModSynchronization(instance);
-      await refreshInstalledMods(instance);
+      setTimeout(() => { if (current()) successMessage.set(''); }, 3000);
+      await checkModSynchronization(instance, { ...options, isCurrent: current });
+      await refreshInstalledMods(instance, { ...options, isCurrent: current });
     } else {
       errorMessage.set(`Failed to remove mod: ${result.error || 'Unknown error'}`);
-      setTimeout(() => errorMessage.set(''), 5000);
+      setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
     }
   } catch (err: any) {
+    if (!current()) return;
     errorMessage.set('Error removing mod: ' + err.message);
-    setTimeout(() => errorMessage.set(''), 5000);
+    setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
   }
 }
 
-export async function handleBulkServerModRemoval(instance: Instance, modFileNames: string[]) {
+export async function handleBulkServerModRemoval(instance: Instance, modFileNames: string[], options: ReadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   if (!instance.path || !modFileNames.length) return;
   try {
     const result = await window.electron.invoke('minecraft-remove-server-managed-mods', {
       clientPath: instance.path,
       modsToRemove: modFileNames
     });
+    if (!current()) return result;
     if (result.success) {
       successMessage.set(`Successfully removed ${result.count} mod${result.count !== 1 ? 's' : ''}`);
-      setTimeout(() => successMessage.set(''), 3000);
-      await checkModSynchronization(instance);
-      await refreshInstalledMods(instance);
+      setTimeout(() => { if (current()) successMessage.set(''); }, 3000);
+      await checkModSynchronization(instance, { ...options, isCurrent: current });
+      await refreshInstalledMods(instance, { ...options, isCurrent: current });
     } else {
       errorMessage.set(`Failed to remove mods: ${result.error || 'Unknown error'}`);
-      setTimeout(() => errorMessage.set(''), 5000);
+      setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
     }
   } catch (err: any) {
+    if (!current()) return;
     errorMessage.set('Error removing mods: ' + err.message);
-    setTimeout(() => errorMessage.set(''), 5000);
+    setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
   }
 }
 
-export async function handleDependencyAcknowledgment(instance: Instance, modFileName: string) {
+export async function handleDependencyAcknowledgment(instance: Instance, modFileName: string, options: ReadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   const lower = modFileName.toLowerCase();
   try {
     const result = await window.electron.invoke('minecraft-acknowledge-dependency', {
       clientPath: instance.path,
       modFileName
     });
+    if (!current()) return result;
     if (result.success) {
       successMessage.set(`Acknowledged dependency: ${modFileName}`);
-      setTimeout(() => successMessage.set(''), 2000);
+      setTimeout(() => { if (current()) successMessage.set(''); }, 2000);
       acknowledgedDeps.update(set => new SvelteSet(set).add(lower));
       removeServerManagedFiles([modFileName]);
       setTimeout(async () => {
-        await checkModSynchronization(instance);
+        await checkModSynchronization(instance, { ...options, isCurrent: current });
       }, 200);
     } else {
       throw new Error(result.error || 'Failed to acknowledge dependency in backend');
     }
   } catch (err: any) {
+    if (!current()) return;
     errorMessage.set(`Failed to acknowledge dependency: ${err.message}`);
-    setTimeout(() => errorMessage.set(''), 5000);
+    setTimeout(() => { if (current()) errorMessage.set(''); }, 5000);
   }
 }
 
-export async function updateServerMod(instance: Instance, event: any) {
+export async function updateServerMod(instance: Instance, event: any, options: ReadOptions = {}) {
+  const current = readScope(instance, options);
+  if (!current()) return;
   const { fileName, name, currentVersion, newVersion, mod } = event.detail;
   try {
     let targetMod = null;
@@ -569,8 +627,8 @@ export async function updateServerMod(instance: Instance, event: any) {
       requiredMods: modRequiredMods,
       optionalMods: modOptionalMods,
       allClientMods: allMods,
-      serverInfo: { serverIp: instance?.serverIp, serverPort: instance?.serverPort, serverProtocol: instance?.serverProtocol, sessionToken: instance?.sessionToken, managementCertFingerprint: instance?.managementCertFingerprint }
     });
+    if (!current()) return result;
     if (result?.success) {
       successMessage.set(`Successfully updated ${name} from v${currentVersion} to v${newVersion}`);
       installedModsInfo.update((info: any[]) => {
@@ -583,12 +641,13 @@ export async function updateServerMod(instance: Instance, event: any) {
         return info;
       });
       setTimeout(async () => {
-        await checkModSynchronization(instance);
+        await checkModSynchronization(instance, { ...options, isCurrent: current });
       }, 500);
     } else {
       errorMessage.set(`Failed to update ${name}: ${result?.error || 'Unknown error'}`);
     }
   } catch (err: any) {
+    if (!current()) return;
     errorMessage.set(`Error updating ${name}: ${err.message}`);
   }
 }

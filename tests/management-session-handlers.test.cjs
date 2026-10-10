@@ -20,9 +20,9 @@ function fixture(t) {
   const f = { broker, sender, calls, configs, ipc, call: (input, event = { sender, senderFrame: sender.mainFrame }) => ipc.handlers['management-session:acquire'](event, input) };
   t.after(async () => { await ipc.dispose(); broker.dispose(); }); return f;
 }
-test('session IPC projects only four scoped privileged fields for registered ID and path', async t => {
+test('session IPC projects only five scoped privileged fields for registered ID and path', async t => {
   const f = fixture(t); const one = await f.call({ clientInstanceId: 'one', reason: 'reuse' });
-  assert.equal(one.ok, true); assert.deepEqual(Object.keys(one.value).sort(), ['baseOrigin', 'bindingGeneration', 'revision', 'sessionToken']);
+  assert.equal(one.ok, true); assert.deepEqual(Object.keys(one.value).sort(), ['baseOrigin', 'bindingGeneration', 'registrationAttempted', 'revision', 'sessionToken']); assert.equal(one.value.registrationAttempted, false);
   assert.equal(one.value.sessionToken, 'a'.repeat(64)); assert.equal(one.value.baseOrigin, 'http://saved-one.example:25566');
   const two = await f.call({ clientPath: path.resolve('synthetic-two'), reason: 'reuse' });
   assert.equal(two.value.sessionToken, 'c'.repeat(64)); assert.equal(two.value.baseOrigin, 'http://saved-two.example:25566');
@@ -38,6 +38,7 @@ for (const kind of ['other-sender', 'subframe', 'no-frame', 'no-sender', 'destro
   assert.equal((await f.call({ clientInstanceId: 'one', reason: 'reuse' }, event)).ok, false); assert.equal(f.broker.entries.size, 0);
 });
 const malformed = [null, {}, { clientInstanceId: 'one' }, { clientInstanceId: 'one', clientPath: 'anything', reason: 'reuse' },
+  { clientInstanceId: 'one', reason: 'reuse', registrationAttempted: true },
   { clientInstanceId: 'one', reason: 'reuse', token: 'secret' }, { clientInstanceId: 'one', reason: 'reuse', observedBindingGeneration: 'generation', observedRevision: 0 },
   { clientInstanceId: 'one', reason: 'authorization-rejected' }, { clientInstanceId: 'one', reason: 'explicit-reconnect', observedBindingGeneration: 'generation' },
   ...[-1, 0.5, Number.MAX_SAFE_INTEGER + 1].map(observedRevision => ({ clientInstanceId: 'one', reason: 'authorization-rejected', observedBindingGeneration: 'generation', observedRevision })),
@@ -62,9 +63,9 @@ test('destroying IPC owner cancels its waiter without cancelling main shared reg
   await f.ipc.dispose(); assert.equal(f.sender.listenerCount('destroyed'), 0);
 });
 test('IPC sanitizes arbitrary broker failure and invalid session response', async t => {
-  const f = fixture(t); f.broker.acquire = async () => { throw new Error('private token=secret'); };
+  const f = fixture(t); f.broker.acquireWithProvenance = async () => { throw new Error('private token=secret'); };
   const failure = await f.call({ clientInstanceId: 'one', reason: 'reuse' }); assert.equal(failure.ok, false); assert.equal(JSON.stringify(failure).includes('secret'), false);
-  f.broker.acquire = async () => ({ token: 'secret', baseOrigin: 'http://saved.example', binding: { generation: 'other' }, bindingGeneration: 'g', revision: 0 });
+  f.broker.acquireWithProvenance = async () => ({ token: 'secret', baseOrigin: 'http://saved.example', binding: { generation: 'other' }, bindingGeneration: 'g', revision: 0 });
   assert.equal((await f.call({ clientInstanceId: 'one', reason: 'reuse' })).ok, false);
 });
 test('session IPC refuses symbols, accessors, inherited shapes and excess arguments before acquisition', async t => {
@@ -77,13 +78,13 @@ test('session IPC refuses symbols, accessors, inherited shapes and excess argume
 });
 test('a frame replacement while acquiring discards privileged completion', async t => {
   const f = fixture(t); let finish; const gate = new Promise(resolve => { finish = resolve; });
-  const acquire = f.broker.acquire.bind(f.broker); f.broker.acquire = async (...args) => { const result = await acquire(...args); await gate; return result; };
+  const acquire = f.broker.acquireWithProvenance.bind(f.broker); f.broker.acquireWithProvenance = async (...args) => { const result = await acquire(...args); await gate; return result; };
   const pending = f.call({ clientInstanceId: 'one', reason: 'reuse' }); await new Promise(resolve => setImmediate(resolve));
   f.sender.mainFrame = {}; finish(); assert.equal((await pending).error.code, 'CANCELLED');
 });
 test('session disposal aborts its acquired waiter and is idempotent', async t => {
   const f = fixture(t); let enter; const ready = new Promise(resolve => { enter = resolve; });
-  f.broker.acquire = (_id, { signal }) => new Promise((_resolve, reject) => { enter(); signal.addEventListener('abort', () => reject(signal.reason), { once: true }); });
+  f.broker.acquireWithProvenance = (_id, { signal }) => new Promise((_resolve, reject) => { enter(); signal.addEventListener('abort', () => reject(signal.reason), { once: true }); });
   const pending = f.call({ clientInstanceId: 'one', reason: 'reuse' }); await ready;
   const disposal = f.ipc.dispose(); assert.equal(f.ipc.dispose(), disposal); await disposal;
   assert.equal((await pending).error.code, 'CANCELLED'); assert.equal(f.sender.listenerCount('destroyed'), 0);
