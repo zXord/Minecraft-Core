@@ -533,7 +533,7 @@ test('a Modrinth notification opens its exact immutable version without starting
   }
 });
 
-test('a GitHub notification opens the exact release assets without substituting another release', async () => {
+test('a GitHub notification opens its exact assets once and allows returning to release history', async () => {
   const fixture = await harness.launchModpackApp({
     profile: 'managed',
     managedGithub: true,
@@ -580,6 +580,32 @@ test('a GitHub notification opens the exact release assets without substituting 
       expect.objectContaining({ provider: 'github', method: 'loadUploadedAssets', releaseId: '2001' })
     ]));
     expect(evidence.lifecycleCalls.some(call => call.method === 'inspectSource')).toBe(false);
+
+    // A consumed notification must not replay when the release picker remounts.
+    // Deliberately opening the same now-read notification must still work.
+    for (let visit = 0; visit < 2; visit += 1) {
+      const assetsBeforeBack = fixture.readState().providerCalls
+        .filter(call => call.method === 'loadUploadedAssets').length;
+      await page.getByRole('button', { name: 'Choose another release' }).click();
+      await expect(page.getByRole('heading', { name: 'Choose an exact release' })).toBeVisible();
+      await page.getByRole('button', { name: 'Load releases', exact: true }).click();
+      await expect(page.getByRole('region', { name: 'GitHub release history' })).toBeVisible();
+      await expect(page.getByRole('button', { name: /Fixture Release v2/u })).toBeDisabled();
+      await expect(page.getByRole('button', { name: /Fixture Backport Release/u })).toBeEnabled();
+      expect(fixture.readState().providerCalls.filter(call => call.method === 'loadUploadedAssets'))
+        .toHaveLength(assetsBeforeBack);
+      await expect(page.getByRole('heading', { name: 'Fixture Backport Release' })).toHaveCount(0);
+
+      if (visit === 0) {
+        await page.getByRole('button', { name: /Modpack notifications, 0 unread/u }).click();
+        await page.getByRole('button', { name: /Exact GitHub backport available/u }).click();
+        await expect(page.getByRole('heading', { name: 'Fixture Backport Release' })).toBeVisible();
+      }
+    }
+    const afterNavigation = fixture.readState();
+    expect(afterNavigation.state).toEqual(evidence.state);
+    expect(afterNavigation.lifecycleCalls.filter(call =>
+      ['inspectSource', 'createPlan', 'startOperation'].includes(call.method))).toEqual([]);
   } finally {
     await fixture.close();
   }

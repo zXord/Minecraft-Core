@@ -604,6 +604,8 @@
     approvedLinkedModrinthProjectId = event.detail.linkedModrinthProjectId || null;
     managedGithubChronologicalOperation = event.detail.operationKind || null;
     if (event.detail.operationKind && operationKind !== 'repair') operationKind = event.detail.operationKind;
+    // The exact notification target is one-shot, including across picker remounts.
+    clearRequestedReleaseTargets();
     flow = 'github-assets';
   }
 
