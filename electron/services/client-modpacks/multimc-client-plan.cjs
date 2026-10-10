@@ -111,10 +111,12 @@ function selectNormalized(entries) {
   let payload = false;
   for (const entry of entries) {
     const segments = entry.key.split('/');
+    // Retained launcher metadata is inert, not a second download source or game payload.
+    const retainedSidecar = entry.key === 'flame/manifest.json' && entry.type === 'file';
     if (segments[0] === '.minecraft') {
       if (segments.length === 1 && entry.type !== 'directory') throw ambiguous();
       if (segments.length > 1 && entry.type === 'file') payload = true;
-    } else if (DOWNLOAD_MARKERS.has(segments.at(-1)) || segments.some(segment => CUSTOM_RUNTIME.has(segment))) throw ambiguous();
+    } else if (DOWNLOAD_MARKERS.has(segments.at(-1)) && !retainedSidecar || segments.some(segment => CUSTOM_RUNTIME.has(segment))) throw ambiguous();
   }
   if (!payload) throw ambiguous();
   return { format: 'multimc', metadataPath: metadata.original };

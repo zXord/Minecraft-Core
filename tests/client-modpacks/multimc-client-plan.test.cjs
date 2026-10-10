@@ -110,7 +110,22 @@ test('MultiMC ordinary game-content download-marker basenames do not change form
   assert.deepEqual(selectClientArchiveFormat(inventory(entries)), { format: 'multimc', metadataPath: 'mmc-pack.json' });
   assert.deepEqual(project(entries).finalOverrides.map(e => e.targetPath), ['config/a.toml', 'config/manifest.json', 'config/modrinth.index.json', 'config/pack.toml']);
 });
-for (const [name, entries] of [
+// Blanket marker rejection breaks retained sidecars; interpreting or projecting them changes this literal plan.
+for (const sidecarPath of ['flame/manifest.json', 'flame\\manifest.json', 'FLAME/MANIFEST.JSON']) {
+  for (const explicitDirectory of [false, true]) {
+    test(`retained sidecar ${sidecarPath} with explicit directory ${explicitDirectory} is inert`, () => {
+      const base = [...layout(), directory('.minecraft/empty')];
+      const entries = [...base, ...(explicitDirectory ? [directory('flame/')] : []), file(sidecarPath, 77)];
+      assert.deepEqual(selectClientArchiveFormat(inventory(entries)), { format: 'multimc', metadataPath: 'mmc-pack.json' });
+      const result = project(entries);
+      assert.deepEqual(result, { runtime: runtime(), runtimeConstraints: { lwjglVersion: '3.3.1' }, downloads: [],
+        finalOverrides: [{ archivePath: '.minecraft/config/a.toml', targetPath: 'config/a.toml', size: '6' }],
+        finalDirectories: [{ targetPath: 'empty' }] });
+      assert.deepEqual(result, project(base));
+    });
+  }
+}
+for (const [name, entries, code = 'PACK_ROOT_AMBIGUOUS'] of [
   ['missing cfg', layout().filter(e => e.path !== 'instance.cfg')], ['missing manifest', layout().slice(1)],
   ['no payload', layout().slice(0, 2)], ['empty game directory', [...layout().slice(0, 2), directory('.minecraft')]],
   ['marker directory', [directory('mmc-pack.json'), ...layout().slice(1)]],
@@ -121,13 +136,34 @@ for (const [name, entries] of [
   ['nested MRPACK', [file('wrapped/modrinth.index.json')]],
   ['MRPACK plus launcher marker', [file('modrinth.index.json'), file('instance.cfg')]],
   ['root download manifest', [...layout(), file('manifest.json')]],
-  ['flame manifest', [...layout(), file('flame/manifest.json')]],
+  ['other manifest', [...layout(), file('meta/manifest.json')]],
+  ['nested flame manifest', [...layout(), file('flame/nested/manifest.json')]],
+  ['wrapped flame manifest', [...layout(), file('wrapper/flame/manifest.json')]],
+  ['flame pack.toml', [...layout(), file('flame/pack.toml')]],
+  ['flame Modrinth index', [...layout(), file('flame/modrinth.index.json')]],
   ['nested pack.toml', [...layout(), file('meta/pack.toml')]],
   ...['patches', 'libraries', 'jarmods'].map(p => [`custom ${p}`, [...layout(), file(`${p}/runtime.json`)]]),
-  ['game root file', [...layout(), file('.minecraft')]]
-]) test(`format/projector refuses ${name}`, () => {
-  assert.throws(() => selectClientArchiveFormat(inventory(entries)));
-  assert.throws(() => project(entries));
+  ['game root file', [...layout(), file('.minecraft')], 'ARCHIVE_ENTRY_COLLISION']
+]) test(`format/projector refuses ${name} with and without retained sidecar`, () => {
+  for (const candidate of [entries, [...entries, file('flame/manifest.json')]]) {
+    assert.throws(() => selectClientArchiveFormat(inventory(candidate)), { code });
+    assert.throws(() => project(candidate), { code });
+  }
+});
+// Exempting the flame subtree or bypassing normalization would accept these non-regular or colliding sidecars.
+for (const [name, additions, code] of [
+  ['directory sidecar', [directory('flame/manifest.json')], 'PACK_ROOT_AMBIGUOUS'],
+  ['duplicate sidecar', [file('flame/manifest.json'), file('flame/manifest.json')], 'ARCHIVE_ENTRY_COLLISION'],
+  ['case alias sidecar', [file('flame/manifest.json'), file('FLAME/MANIFEST.JSON')], 'ARCHIVE_ENTRY_COLLISION'],
+  ['slash alias sidecar', [file('flame/manifest.json'), file('flame\\manifest.json')], 'ARCHIVE_ENTRY_COLLISION'],
+  ['sidecar directory collision', [file('flame/manifest.json'), directory('flame/manifest.json')], 'ARCHIVE_ENTRY_COLLISION'],
+  ['file ancestor sidecar', [file('flame'), file('flame/manifest.json')], 'ARCHIVE_ENTRY_COLLISION'],
+  ['sidecar file ancestor', [file('flame/manifest.json'), file('flame/manifest.json/child')], 'ARCHIVE_ENTRY_COLLISION'],
+  ['malformed sidecar type', [{ path: 'flame/manifest.json', type: 'symlink', size: 1 }], 'UNSAFE_ARCHIVE_ENTRY']
+]) test(`retained sidecar exception refuses ${name}`, () => {
+  const entries = [...layout(), ...additions];
+  assert.throws(() => selectClientArchiveFormat(inventory(entries)), { code });
+  assert.throws(() => project(entries), { code });
 });
 test('projector strips one prefix, retains exact source spelling, decimal sizes and directories', () => {
   const result = project([...layout().slice(0, 2), file('.minecraft/config/cafe\u0301.toml', '6'),

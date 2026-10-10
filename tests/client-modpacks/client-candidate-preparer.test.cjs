@@ -338,6 +338,43 @@ for (const realZip of [false, true]) test(`MultiMC ${realZip ? 'actual ZIP worke
   await f.registry.releaseOwner(f.inspectionId);
 });
 
+// Blanket rejection prevents this real ZIP import; trusting sidecar JSON changes runtime/downloads or installed bytes.
+for (const [name, contents] of [
+  ['malformed JSON', '{not JSON'],
+  ['conflicting metadata', JSON.stringify({ minecraft: { version: '1.12.2', modLoaders: [{ id: 'forge-14.23.5.2860' }] },
+    files: [{ projectID: 1, fileID: 2, required: true }], dependencies: { minecraft: '1.12.2' }, lwjglVersion: '2.9.4' })]
+]) test(`MultiMC actual ZIP retained sidecar ${name} never controls preparation`, {
+  skip: process.platform !== 'win32' || process.arch !== 'x64', timeout: 120_000
+}, async t => {
+  const f = await fixture(t, { multimc: true, realZip: true, extra: { 'flame/manifest.json': Buffer.from(contents) },
+    downloader: async () => assert.fail('Retained launcher metadata must not cause external pack downloads') });
+  const inspected = await f.preparer.inspect({ inspectionId: f.inspectionId });
+  const result = await f.preparer.prepare({ inspectionId: f.inspectionId, optionalFileIds: [] });
+  for (const value of [inspected, result]) {
+    assert.deepEqual(value.runtime, { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.4.13',
+      javaMajor: 17, os: 'win32', architecture: 'x64' });
+    assert.deepEqual(value.runtimeConstraints, { lwjglVersion: '3.3.1' });
+    assert.equal(value.contentFormat, 'multimc');
+    assert.deepEqual(value.optionalFileIds ?? value.optionalFiles, []);
+  }
+  assert.equal(inspected.downloadBytes, '0');
+  assert.equal(await fs.readFile(path.join(result.path, 'config/common.toml'), 'utf8'), 'client');
+  assert.equal(await fs.readFile(path.join(result.path, 'options.txt'), 'utf8'), 'setting');
+  assert.deepEqual(result.manifest.entries, [
+    { path: 'config/common.toml', pathKey: 'config/common.toml', sha256: digest('sha256', Buffer.from('client')), size: '6', policy: 'managed' },
+    { path: 'options.txt', pathKey: 'options.txt', sha256: digest('sha256', Buffer.from('setting')), size: '7', policy: 'preserve-after-seed' }
+  ]);
+  assert.deepEqual((await fs.readdir(result.path)).sort(), ['config', 'empty', 'options.txt']);
+  for (const relative of ['flame', 'flame/manifest.json', 'mmc-pack.json', 'instance.cfg', '.minecraft', 'icon.png']) {
+    await assert.rejects(fs.access(path.join(result.path, relative)), { code: 'ENOENT' });
+  }
+  assert.equal(result.totalBytes, '13');
+  assert.equal(f.downloads.length, 0);
+  await f.preparer.release(result.ownerId);
+  f.preparer.forgetInspection(f.inspectionId);
+  await f.registry.releaseOwner(f.inspectionId);
+});
+
 test('MRPACK preparation omits both private MultiMC fields', async t => {
   const f = await fixture(t);
   const inspected = await f.preparer.inspect({ inspectionId: f.inspectionId });
