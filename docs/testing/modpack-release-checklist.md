@@ -2,7 +2,7 @@
 
 Updated 10 October 2026 after the successful normal Repair retry, Asia/Riyadh. **Not release ready.** This is the restart checklist for normal, visible app testing. Automated tests support these checks; they do not replace installing the real pack, running Minecraft, and joining the server.
 
-## Current working summary — 10 October, 14:30
+## Current working summary — 10 October, 15:19
 
 The disposable b1 app has been closed normally since12:56. Its invite was already created with approval; do not recreate it. Real profiles/instances and a1 recovery evidence remain excluded.
 
@@ -11,14 +11,16 @@ The disposable b1 app has been closed normally since12:56. Its invite was alread
 | Exact0.13.4 ServerPack | Normal Repair completed; Start → Stop → Start passed. Do not repeat merely because the session resumed. |
 | Browsing / update notice | Exact notification navigation and Modrinth cross-runtime browsing/inspection passed; no version update installed. |
 | Matching MRPACK client | Registered through normal UI; preview failed before install. Required resourcepack URL currently404; no missing-file skip or cache injection. |
-| Idle-session recovery fix | Main integration committed; renderer integration has four review corrections in progress. First combined run:4359pass/3inventory failures/8platform skips; rendered76pass/2fixture failures; build passed. Not an accepted final gate. |
+| Idle-session recovery fix | Reviewed and committed73cd00e after two focused correction rounds. Final frozen gates:4402/4410Node passed,0fail,8 explicit Windows privilege/retention skips;81/81UI; build413modules18.84s. Normal-app idle/restart/install acceptance remains pending; earlier failed full runs remain recorded below. |
 | Complete client alternative | Same-release MultiMC ZIP support designed/reviewed and tasks prepared, not implemented. Pairing must be an explicit native selection after source gates. |
 | Client acceptance | Install, Verify, reopen, idle/restart recovery, Microsoft authentication and actual world join remain unpassed. |
 | Remaining release checks | Upgrade/downgrade/rollback, drift/conflicts and server-mod/client reactions; real local formats; cleanup/failed-target reuse; notification controls; packaged startup/icon; remaining UI/recovery/backup-retirement gaps. |
 
-Next source sequence: finish the bounded session review corrections and fresh gates, then MRPACK exact-GitHub redirect correction and MultiMC support. Startup partition instrumentation is prepared only, not an optimization or completed speed fix. Return to the normal b1 app only with coherent reviewed source. Detailed evidence and historical attempts follow below.
+Next source sequence: MRPACK exact-GitHub redirect correction, then sequential MultiMC support. Session source prerequisite is complete, not native acceptance. Startup partition instrumentation is prepared only, not an optimization or completed speed fix. Return to the normal b1 app only with coherent reviewed source. Detailed evidence and historical attempts follow below.
 
 ## Pause and resume
+
+**Source checkpoint73cd00e,10October15:19:** session-recovery source integration and independent review are complete, with the final frozen Node/UI/build gates recorded above. The earlier failed combined runs were corrected, not ignored. Continue the queued redirect compatibility and MultiMC tasks before reopening b1; normal-app session recovery and client installation/join are not yet passed.
 
 Read this section newest-first; dated entries below are historical evidence, not simultaneous instructions. The latest source checkpoint supersedes earlier statements that a correction is unimplemented or a native job is still running. The user's firewall-prompt dismissal has already been handled for Repair573; it is not a pending handoff.
 
@@ -128,7 +130,7 @@ Preserve the older **a1** interrupted operation `op2-bbb18ef48d2efa541c9569569b4
 - [x] **Recovery loading and completion refresh:** native03:22–03:27 recovery and managed state appeared together, normal recovery completed, the warning cleared, and Dashboard Start became enabled. Independent controlled checks and commit `f865902` precede this native result. A separate live-job navigation defect remains open below.
 - [x] **Stopped-original recovery after interrupted, never-published renames:** commit `f6cfe8e` passed the normal03:27 recovery retry without booting the malformed stopped original. Original bytes and historical authority were preserved. This does not certify the distinct post-publication rollback branch now under investigation.
 - [x] **Stopped-original recovery after publication and rollback:** commit `c66a584` passed native06:15 recovery of573 without launching Java. The recovery warning cleared; original config bytes and both historical authority records were preserved. Subsequent Repair/restart remain separate unchecked acceptance.
-- [ ] **Completed Verify result across navigation:** native06:18 reproduction: Verify settles while Dashboard is open; returning to Modpack loses its result and leaves Repair disabled. A second Verify staying on-page enables Repair. Persist/reconcile the latest eligible result without fabricating current health or replaying operations, then retest normally.
+- [ ] **Completed Verify result across navigation:** native06:18 reproduction: Verify settles while Dashboard is open; returning to Modpack loses its result and leaves Repair disabled. Bounded correction prepared, not implemented: retain only per-server job references in renderer-session memory, reload/display historical observations independently, and offer Review repair under current managed/readiness/ownership gates with a fresh source/file review. No result-authority cache, automatic Verify, or reload/restart-persistence claim. Retest the actual route change normally after implementation.
 
 - [ ] **Stale terminal status text — cancellation native retest pending:** presentation fix and independent review passed; 41 rendered tests include nine new regressions. Settled outcomes now use bounded terminal wording, with genuine cleanup-pending precedence, instead of stale live progress. Completed Verify passed normal UI testing at19:55; terminal Failed and “Operation failed. Review the result below.” passed at20:27. Cancellation wording still needs native coverage.
 - [x] **Copy progress overhead:** controlled real-helper probe confirmed five tiny updates reread 338,783,295 executable bytes and took 5.366 seconds. Reviewed ten-second counter checkpoint fix passed 309 focused tests and 18 identity tests. Normal Repair at20:13:34–20:14:35 advanced842→4520files in60.345seconds; all8,010files were copied and directory flushing/copy verification reached by20:15:52. This sampled copy improvement does not certify all Repair latency or publication. Initial/completion/substages and all safety/cancellation boundaries remain immediate; no executable verification was removed.
