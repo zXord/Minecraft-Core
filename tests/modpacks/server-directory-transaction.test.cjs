@@ -1667,6 +1667,7 @@ test('unmanaged adoption accepts an inactive lifecycle record without treating i
 
 test('unmanaged adoption restores the exact original nonempty server after committed live health fails', async (t) => {
   const { ModpackRecoveryService } = require('../../electron/services/modpack-lifecycle/modpack-recovery-service.cjs');
+  const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
   const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
   const healthFailure = Object.assign(new Error('adopted candidate failed live health'), {
     code: 'HEALTH_CHECK_FAILED'
@@ -1692,8 +1693,15 @@ test('unmanaged adoption restores the exact original nonempty server after commi
     async adoptValidatedHandoff() { return { adopted: true }; },
     async restoreAutoRestart() { return { restored: true }; }
   };
+  // Stopped retention requires an authentic nested no-launch reservation. A
+  // shape-only lifecycle lease cannot supply that coordinator exclusion.
+  const coordinator = new ServerMutationCoordinator({ readContentRevision: () => 0,
+    bumpContentRevision() { assert.fail('stopped rollback must not publish a content revision'); } });
+  const selector = { instanceId: fixture.context.stableInstanceId, serverPath: fixture.targetPath };
+  coordinator.installRecoveryBlocks([{ selector, operationId: fixture.context.jobId }]);
+  coordinator.completeStartupRecovery([{ selector, resolved: false }]);
   const recoveryService = new ModpackRecoveryService({
-    coordinator: { async runRecoveryMutation() { throw new Error('the held lifecycle lease must be reused'); } },
+    coordinator,
     recoveryRegistry: fixture.recoveryRegistry,
     runtimeWriterAuthority: { async assertRecoveryAllowed(record) { return record; } },
     contextFactory: async ({ mutationLease }) => ({
@@ -1704,11 +1712,8 @@ test('unmanaged adoption restores the exact original nonempty server after commi
     runtimePolicy
   });
   const record = await fixture.recoveryRegistry.load(fixture.context.jobId);
-  const recovered = await recoveryService.rollbackWithLease(
-    record,
-    fixture.context.mutationLease,
-    'adoption-live-health-failed'
-  );
+  const recovered = await coordinator.runRecoveryMutation(selector, { operationId: record.jobId }, lease =>
+    recoveryService.rollbackWithLease(record, lease, 'adoption-live-health-failed'));
 
   assert.equal(recovered.resolved, true);
   assert.equal(recovered.action, 'rollback-restored');
@@ -2563,6 +2568,81 @@ test('rename and split registry-journal failures remain reconstructable without 
   });
 });
 
+test('live boundary diagnostics request bounded boot evidence on the real live validation call', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await existingFixture(t);
+  await transaction.buildExistingCandidate(fixture.context);
+  await transaction.swapExistingCandidate(fixture.context);
+  const result = await transaction.markCommittedHealthy(fixture.context);
+  assert.equal(result.phase, 'committed-healthy');
+  assert.equal(fixture.liveHealthRequests.length, 1);
+  assert.equal(fixture.liveHealthRequests[0].captureBootDiagnostic, true);
+});
+
+test('live boundary diagnostics tag raw health and healthy-publication failures without losing exact close proof', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const { retainRuntimeWorkerQuiescence, waitForRuntimeWorkerQuiescence } = require('../../electron/services/runtime-worker-quiescence.cjs');
+  for (const stage of ['live-health-call', 'live-health-publication']) await t.test(stage, async subtest => {
+    const failure = new Error('private C:\\server\\publication failure');
+    let close;
+    retainRuntimeWorkerQuiescence(failure, new Promise(resolve => { close = resolve; }));
+    const fixture = await existingFixture(subtest, stage === 'live-health-call' ? { liveHealthError: failure } : {});
+    await transaction.buildExistingCandidate(fixture.context);
+    await transaction.swapExistingCandidate(fixture.context);
+    if (stage === 'live-health-publication') {
+      const transition = fixture.recoveryRegistry.transition.bind(fixture.recoveryRegistry);
+      fixture.recoveryRegistry.transition = async (jobId, request) => {
+        if (request.expectedPhase === 'validating-live' && request.nextPhase === 'committed-healthy') throw failure;
+        return transition(jobId, request);
+      };
+    }
+    await assert.rejects(transaction.markCommittedHealthy(fixture.context), error => {
+      assert.equal(error, failure);
+      assert.deepEqual(error.runtimeDiagnostic, { stage, reason: 'unknown' });
+      return true;
+    });
+    let settled = false;
+    const proof = waitForRuntimeWorkerQuiescence(failure).then(() => { settled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false);
+    close(true);
+    await proof;
+    assert.equal(fixture.liveHealthRequests[0].captureBootDiagnostic, true);
+    assert.equal((await fixture.recoveryRegistry.load(fixture.context.jobId)).phase, 'validating-live');
+    assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'server.jar'), 'utf8'), 'new-server');
+    assert.equal(fs.readFileSync(path.join(fixture.paths.rollbackPath, 'server.jar'), 'utf8'), 'old-server');
+  });
+});
+
+test('live boundary diagnostics preserve exact snapshot identity metadata through properties cleanup', async t => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await existingFixture(t);
+  await transaction.buildExistingCandidate(fixture.context);
+  await transaction.swapExistingCandidate(fixture.context);
+  const fsPromises = Object.create(fs.promises);
+  fsPromises.open = async (filePath, ...args) => {
+    const handle = await fs.promises.open(filePath, ...args);
+    if (!fixture.liveHealthRequests.length || filePath !== path.join(fixture.targetPath, 'server.properties')) return handle;
+    let stats = 0;
+    return new Proxy(handle, { get(target, key) {
+      if (key === 'stat') return async (...statArgs) => {
+        const stat = await target.stat(...statArgs);
+        return ++stats === 2 ? snapshotStatDouble(stat, { mtimeNs: stat.mtimeNs + 1n }) : stat;
+      };
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+  };
+  fixture.context.fsPromises = fsPromises;
+  await assert.rejects(transaction.markCommittedHealthy(fixture.context), error => {
+    assert.deepEqual(error.runtimeDiagnostic, {
+      stage: 'exact-snapshot-post-handle-identity', reason: 'identity-changed', changedIdentityFields: 32
+    });
+    return true;
+  });
+  assert.equal((await fixture.recoveryRegistry.load(fixture.context.jobId)).phase, 'validating-live');
+});
+
 test('prior running policy adopts the exact validated handoff before healthy commit', async (t) => {
   const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
   const fixture = await existingFixture(t, { priorRunning: true });
@@ -2597,7 +2677,11 @@ test('existing running update stops its exact retained health process when hando
   await transaction.buildExistingCandidate(fixture.context);
   await transaction.swapExistingCandidate(fixture.context);
 
-  await assert.rejects(transaction.markCommittedHealthy(fixture.context), error => error === adoptionError);
+  await assert.rejects(transaction.markCommittedHealthy(fixture.context), error => {
+    assert.equal(error, adoptionError);
+    assert.deepEqual(error.runtimeDiagnostic, { stage: 'live-handoff', reason: 'unknown' });
+    return true;
+  });
 
   assert.equal(stopCalls, 1);
   assert.equal(live, false);
@@ -2678,7 +2762,10 @@ for (const closes of [true, false]) {
 
     assert.equal(stopCalls, 1, 'the exact unadopted health process must receive one cleanup attempt');
     assert.equal(live, !closes);
-    if (closes) assert.equal(validationError, inspectionError);
+    if (closes) {
+      assert.equal(validationError, inspectionError);
+      assert.deepEqual(validationError.runtimeDiagnostic, { stage: 'exact-snapshot-open', reason: 'unknown' });
+    }
     else {
       assert.equal(validationError.code, 'HEALTH_CHECK_FAILED');
       assert.equal(isUnprovenHealthProcessError(validationError), true,

@@ -559,6 +559,162 @@ test('managed verification failure releases the start gate and never enters laun
   });
 });
 
+async function withRetainedLifecycleHandoff(options, work) {
+  const fixture = coordinatorFixture();
+  const initialPath = options.initialPath || SERVER_PATH;
+  const bound = await fixture.coordinator.acquireStart(
+    { instanceId: INSTANCE_ID, serverPath: initialPath },
+    { operation: 'bind-handoff-root', operationId: 'bind-handoff-root', parentMutationLease: null }
+  );
+  bound.release();
+  await withServerManager({ fixture: options.managerFixture || fixture }, async harness => {
+    const policyPath = path.resolve(__dirname, '../electron/services/auto-restart.cjs');
+    delete require.cache[policyPath];
+    const { createRecoveryRuntimePolicy } = require(policyPath);
+    const policy = createRecoveryRuntimePolicy({ runtimeController: {
+      async ensureStopped() { assert.fail('adoption must not stop a process'); },
+      adoptValidatedHandoff: request => harness.serverManager.adoptValidatedLifecycleProcess(request)
+    } });
+    const child = new FakeChild(8383);
+    const closed = deferred();
+    child.once('close', (exitCode, signal) => closed.resolve({ exitCode, signal }));
+    let startLease;
+    try {
+      if (options.beforeMutation) await options.beforeMutation(harness);
+      await fixture.coordinator.runMutation(
+        { instanceId: INSTANCE_ID, serverPath: SERVER_PATH },
+        { operation: 'handoff-test', operationId: 'handoff-test', revisionMode: 'none', quiesce: null },
+        async mutationLease => {
+          startLease = await fixture.coordinator.acquireStart(
+            { instanceId: INSTANCE_ID, serverPath: SERVER_PATH },
+            { operation: options.operation || 'server-health-live', operationId: 'health-handoff-test', parentMutationLease: mutationLease }
+          );
+          const processHandle = Object.freeze({
+            child, closed: closed.promise, pid: child.pid,
+            operationId: 'health-handoff-test', publishEvents: false,
+            supervisionReady: Promise.resolve({}),
+            launchPlan: Object.freeze({
+              type: 'jar', loader: 'vanilla', jar: `${SERVER_PATH}\\server.jar`, cwd: SERVER_PATH,
+              readyMarkers: ['Done ('], fatalMarkers: ['fatal'],
+              runtime: { minecraftVersion: '1.20.1', loaderFamily: 'vanilla', loaderVersion: '1.20.1', javaMajor: 17 }
+            }),
+            isLive: () => child.exitCode === null && child.signalCode === null && !child.killed
+          });
+          const request = {
+            eventId: 'modpack-runtime-handoff:handoff-test', jobId: 'handoff-test',
+            instanceId: INSTANCE_ID, serverPath: SERVER_PATH,
+            handoff: { processHandle, startLease }
+          };
+          await work({ ...harness, child, coordinator: fixture.coordinator, mutationLease, policy, request });
+        }
+      );
+    } finally {
+      child.exit(0, null);
+      child.close();
+      await new Promise(resolve => setImmediate(resolve));
+      startLease?.release();
+      delete require.cache[policyPath];
+    }
+  });
+}
+
+for (const [label, initialPath] of [['same spelling', SERVER_PATH], ['case-only alias', 'c:\\minecraft\\startgate']]) {
+  test(`real retained lifecycle handoff adopts ${label} and releases ownership only after close`, async () => {
+    await withRetainedLifecycleHandoff({ initialPath }, async ({ child, coordinator, eventBus, mutationLease, policy, request, serverManager }) => {
+      assert.equal(request.handoff.startLease.serverPath, label === 'same spelling' ? SERVER_PATH : 'C:\\minecraft\\startgate');
+      const events = [];
+      eventBus.on('server-process-owned', event => events.push(['owned', event.pid]));
+      eventBus.on('server-started', event => events.push(['started', event.pid]));
+      assert.deepEqual(await policy.adoptValidatedHandoff(request), { adopted: true, instanceId: INSTANCE_ID, pid: 8383 });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(events, [['owned', 8383], ['started', 8383]]);
+      assert.equal(serverManager.getServerState({ instanceId: INSTANCE_ID }).serverProcess, child);
+      assert.equal(serverManager.getServerState({ instanceId: INSTANCE_ID }).status, 'running');
+      const acquireNext = () => coordinator.acquireStart(
+        { instanceId: INSTANCE_ID, serverPath: SERVER_PATH },
+        { operation: 'next-start', operationId: 'next-start', parentMutationLease: mutationLease }
+      );
+      await assert.rejects(acquireNext, code('OPERATION_IN_PROGRESS'));
+      child.exit(0, null);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(serverManager.getServerState({ instanceId: INSTANCE_ID }).status, 'stopping');
+      await assert.rejects(acquireNext, code('OPERATION_IN_PROGRESS'));
+      child.close();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(serverManager.getServerState({ instanceId: INSTANCE_ID }).serverProcess, null);
+      assert.equal(serverManager.getServerState({ instanceId: INSTANCE_ID }).status, 'stopped');
+      const next = await acquireNext();
+      next.release();
+    });
+  });
+}
+
+test('validated lifecycle adoption repeats the same event across case-only root aliases without duplicate ownership', async () => {
+  await withRetainedLifecycleHandoff({}, async ({ eventBus, request, serverManager }) => {
+    let owned = 0;
+    eventBus.on('server-process-owned', () => { owned += 1; });
+    const first = serverManager.adoptValidatedLifecycleProcess(request);
+    const second = serverManager.adoptValidatedLifecycleProcess({ ...request, serverPath: 'c:\\minecraft\\startgate' });
+    assert.equal(first, second);
+    assert.equal(owned, 1);
+    for (const serverPath of ['C:\\Other\\StartGate', 'C:\\Minecraft\\StartGateSibling', `${SERVER_PATH}\\child`, 'relative', `${SERVER_PATH}\\..\\StartGate`, '\\\\?\\C:\\Minecraft\\StartGate', 'C:\\', '', null, undefined]) {
+      assert.throws(() => serverManager.adoptValidatedLifecycleProcess({ ...request, serverPath }), /handoff|directory/i);
+    }
+    request.handoff.processHandle.child.exit(0, null);
+    assert.throws(() => serverManager.adoptValidatedLifecycleProcess(request), /stale/i);
+  });
+});
+
+test('validated lifecycle adoption rejects non-exact and unsafe roots before taking ownership', async () => {
+  await withRetainedLifecycleHandoff({}, async ({ request, serverManager }) => {
+    for (const serverPath of ['C:\\Other\\StartGate', 'C:\\Minecraft\\StartGateSibling', `${SERVER_PATH}\\child`, 'relative', `${SERVER_PATH}\\..\\StartGate`, '\\\\?\\C:\\Minecraft\\StartGate', 'C:\\', `${SERVER_PATH}\0`, '', null, undefined]) {
+      assert.throws(() => serverManager.adoptValidatedLifecycleProcess({ ...request, serverPath }), /handoff|directory/i);
+      assert.equal(serverManager.getServerState({ instanceId: INSTANCE_ID }).serverProcess, null);
+    }
+    assert.throws(() => serverManager.adoptValidatedLifecycleProcess({ ...request, instanceId: 'wrong-instance' }), /handoff/i);
+    assert.throws(() => serverManager.adoptValidatedLifecycleProcess({ ...request, jobId: 'wrong-job' }), /handoff/i);
+    assert.throws(() => serverManager.adoptValidatedLifecycleProcess({
+      ...request,
+      handoff: { ...request.handoff, processHandle: { ...request.handoff.processHandle, operationId: 'wrong-operation-id' } }
+    }), /cannot be proven/i);
+    assert.throws(() => serverManager.adoptValidatedLifecycleProcess({
+      ...request,
+      handoff: { ...request.handoff, startLease: {
+        ...request.handoff.startLease,
+        assertOwnedPath() { throw new Error('ownership assertion failed'); }
+      } }
+    }), /ownership assertion failed/);
+    assert.equal(serverManager.getServerState({ instanceId: INSTANCE_ID }).serverProcess, null);
+  });
+});
+
+test('validated lifecycle adoption rejects the wrong retained lease operation', async () => {
+  await withRetainedLifecycleHandoff({ operation: 'server-start' }, async ({ request, serverManager }) => {
+    assert.throws(() => serverManager.adoptValidatedLifecycleProcess(request), /cannot be proven/i);
+    assert.equal(serverManager.getServerState({ instanceId: INSTANCE_ID }).serverProcess, null);
+  });
+});
+
+test('validated lifecycle adoption excludes a managed owner under a different instance and case-only root alias', async () => {
+  // Independent real lease fixture isolates the manager's collision defense from
+  // the coordinator's earlier alias/instance rejection. No real child is spawned.
+  await withRetainedLifecycleHandoff({
+    managerFixture: coordinatorFixture(),
+    async beforeMutation({ serverManager }) {
+      const started = await serverManager.startMinecraftServer({ instanceId: 'existing-owner', targetPath: SERVER_PATH });
+      assert.equal(started.success, true);
+    }
+  }, async ({ child, request, serverManager }) => {
+    const existing = serverManager.getServerState({ instanceId: 'existing-owner' }).serverProcess;
+    assert.ok(existing);
+    assert.throws(() => serverManager.adoptValidatedLifecycleProcess({ ...request, serverPath: 'c:\\minecraft\\startgate' }), /different managed process/i);
+    assert.equal(serverManager.getServerState({ instanceId: INSTANCE_ID }).serverProcess, null);
+    assert.equal(serverManager.getServerState({ instanceId: 'existing-owner' }).serverProcess, existing);
+    assert.equal(serverManager.getServerState({ instanceId: 'existing-owner' }).status, 'starting');
+    assert.notEqual(existing, child);
+  });
+});
+
 test('validated lifecycle handoff is identity-bound, idempotent, and becomes the normal managed process', async () => {
   const child = new FakeChild(8181);
   const closeGate = deferred();

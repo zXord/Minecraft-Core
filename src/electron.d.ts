@@ -5,7 +5,7 @@ type ModpackInvokeChannel =
   | 'modpacks:reserve-server-destination' | 'modpacks:release-server-destination'
   | 'modpacks:inspect' | 'modpacks:cancel-inspection' | 'modpacks:preflight' | 'modpacks:preflight-management'
   | 'modpacks:start-operation' | 'modpacks:cancel-job'
-  | 'modpacks:get-job' | 'modpacks:get-state' | 'modpacks:list-history' | 'modpacks:list-rollback-options' | 'modpacks:list-recovery'
+  | 'modpacks:get-job' | 'modpacks:get-active-jobs' | 'modpacks:get-state' | 'modpacks:list-history' | 'modpacks:list-rollback-options' | 'modpacks:list-recovery'
   | 'modpacks:recover' | 'modpacks:list-notifications' | 'modpacks:ack-notification'
   | 'modpacks:check-updates' | 'modpacks:update-tracking' | 'modpacks:verify'
   | 'modpacks:perform-safe-action';

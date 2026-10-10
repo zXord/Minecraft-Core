@@ -20,6 +20,7 @@ function record(overrides = {}) {
 
 function fixture(records = [record()], {
   canExposePendingNewServer = () => true,
+  hasActiveJob = () => false,
   onResolved = null
 } = {}) {
   const calls = [];
@@ -49,11 +50,49 @@ function fixture(records = [record()], {
       recoveryRegistry,
       recoveryService,
       canExposePendingNewServer,
+      hasActiveJob,
       onResolved: onResolved || (async jobId => { reconciliations.push(jobId); return true; })
     }),
     setActive(value) { active = value; }
   };
 }
+
+test('owned running and settling records never expose recovery and stale Retry cannot reach raw recovery', async () => {
+  let owned = false;
+  const context = fixture(undefined, { hasActiveJob: () => owned });
+  const staleRecord = (await context.facade.listRecovery()).items[0];
+  owned = true;
+  assert.deepEqual(await context.facade.listRecovery(), { items: [] });
+  await assert.rejects(context.facade.recover({ recoveryId: staleRecord.recoveryId, actionId: 'retry-cleanup' }), error => error.code === 'PLAN_STALE');
+  assert.deepEqual(context.calls, []);
+  owned = false;
+  assert.equal((await context.facade.listRecovery()).items.length, 1);
+  await context.facade.recover({ recoveryId: staleRecord.recoveryId, actionId: 'retry-cleanup' });
+  assert.equal(context.calls.length, 1);
+});
+
+test('unknown or failing ownership lookup leaves recovery unavailable', async () => {
+  for (const hasActiveJob of [() => { throw new Error('uninitialized'); }, () => undefined, () => Promise.resolve(false)]) {
+    const context = fixture(undefined, { hasActiveJob });
+    await assert.rejects(context.facade.listRecovery());
+    assert.deepEqual(context.calls, []);
+  }
+});
+
+test('owned pending terminal publication cannot expose or dispatch bookkeeping Retry', async () => {
+  let owned = false;
+  let calls = 0;
+  const facade = new ModpackRecoveryFacade({
+    recoveryRegistry: { async initialize() { return { records: [], pendingTerminalPublications: [record()] }; } },
+    recoveryService: { async recover() {}, async rollback() {}, async retryCommittedCleanup() {}, async retryTerminalPublication() { calls++; return { resolved: true }; } },
+    canExposePendingNewServer: () => true, hasActiveJob: () => owned
+  });
+  const listed = (await facade.listRecovery()).items[0];
+  owned = true;
+  assert.deepEqual(await facade.listRecovery(), { items: [] });
+  await assert.rejects(facade.recover({ recoveryId: listed.recoveryId, actionId: 'retry-history-publication' }));
+  assert.equal(calls, 0);
+});
 
 test('lists authority-free recovery DTOs with deterministic opaque IDs and closed actions', async () => {
   const { facade } = fixture();

@@ -300,7 +300,7 @@ function createModpackHandlers({
   requireMethods(localArtifactSource, ['selectWithNativeDialog']);
   requireMethods(destinationReservationService, ['reserveWithNativeDialog', 'release']);
   requireMethods(lifecycleService, [
-    'inspectSource', 'cancelInspection', 'createPlan', 'createManagementPlan', 'startOperation', 'cancelJob', 'getJob', 'getState', 'listHistory',
+    'inspectSource', 'cancelInspection', 'createPlan', 'createManagementPlan', 'startOperation', 'cancelJob', 'getJob', 'getActiveJobs', 'getState', 'listHistory',
     'listRollbackOptions', 'verify'
   ]);
   requireMethods(recoveryService, ['listRecovery', 'recover']);
@@ -490,6 +490,7 @@ function createModpackHandlers({
     'modpacks:start-operation': request => lifecycleService.startOperation(request),
     'modpacks:cancel-job': request => lifecycleService.cancelJob(request.jobId),
     'modpacks:get-job': request => lifecycleService.getJob(request.jobId),
+    'modpacks:get-active-jobs': request => lifecycleService.getActiveJobs(request.serverId),
     'modpacks:get-state': request => lifecycleService.getState(request.serverId),
     'modpacks:list-history': request => lifecycleService.listHistory(request.serverId, {
       cursor: request.cursor ?? null,
@@ -512,7 +513,7 @@ function createModpackHandlers({
     try {
       const normalized = validateModpackIpcRequest(channel, request);
       const value = await operations[channel](normalized, _event);
-      return validateModpackIpcResult(channel, { ok: true, value });
+      return validateModpackIpcResult(channel, { ok: true, value }, normalized);
     } catch (error) {
       return validateModpackIpcResult(channel, publicFailure(error));
     }

@@ -135,6 +135,19 @@ test('pairing inspects only the exact official release archive and binds measure
   assert.deepEqual(await f.service.getStatus({ serverId: 'server-one' }), descriptor);
   assert.throws(() => f.registry.resolveOwnedId({ ownerId: preview.inspectionId, id: preview.inspectionId, kind: 'inspection' }), { code: 'PLAN_STALE' });
 });
+test('saved ready status remains independent of repository identity refusal in asset discovery', async t => {
+  const f = await fixture(t); const preview = await inspect(f);
+  const descriptor = await f.service.accept({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint, inspectionId: preview.inspectionId });
+  f.setRepositoryId('999');
+  assert.deepEqual(await f.service.getStatus({ serverId: 'server-one' }), descriptor);
+  await assert.rejects(f.service.listAssets({ serverId: 'server-one' }), { code: 'PLAN_STALE' });
+  assert.deepEqual(await f.service.getStatus({ serverId: 'server-one' }), descriptor);
+  f.setRepositoryId('123');
+  assert.equal((await f.service.listAssets({ serverId: 'server-one' })).serverFingerprint, descriptor.serverFingerprint);
+  assert.deepEqual((await f.service.listAssets({ serverId: 'server-one' })).assets, [{ assetId: '20', fileName: 'client.mrpack', size: '20' }]);
+  assert.equal(f.store.sequence, 1);
+});
+
 test('Modrinth re-resolves the exact installed version without a renderer-selected source', async t => {
   const f = await fixture(t, { provider: 'modrinth' });
   const preview = await f.service.inspect({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint });

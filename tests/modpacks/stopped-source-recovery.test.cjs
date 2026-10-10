@@ -8,7 +8,8 @@ const { RecoveryRegistry } = require('../../electron/services/modpack-lifecycle/
 const { ModpackRecoveryService, defaultDirectoryAuthority } = require('../../electron/services/modpack-lifecycle/modpack-recovery-service.cjs');
 const { ServerRuntimeWriterAuthority } = require('../../electron/services/modpack-lifecycle/server-runtime-writer-authority.cjs');
 const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
-const { createExistingSiblingPaths } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+const { createExistingSiblingPaths, swapExistingCandidate } = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+const { OperationJournal, createDirectoryMarker } = require('../../electron/services/modpack-lifecycle/operation-journal.cjs');
 const { inspectServerDirectoryTree } = require('../../electron/services/modpack-lifecycle/server-directory-identity.cjs');
 const { ModpackRecoveryFacade } = require('../../electron/services/modpack-lifecycle/modpack-recovery-facade.cjs');
 const { OperationStore } = require('../../electron/services/modpack-lifecycle/operation-store.cjs');
@@ -55,7 +56,7 @@ async function fixture(t, options = {}) {
   const original = await inspectServerDirectoryTree(serverPath, { fsApi: fs, reparseInspector });
   const fsApi = options.fsApi ? options.fsApi(serverPath) : fs;
   let candidate = null;
-  if (options.candidate || options.between) {
+  if (options.candidate || options.between || options.published) {
     fs.mkdirSync(paths.candidatePath);
     fs.writeFileSync(path.join(paths.candidatePath, 'partial.txt'), 'candidate-only');
     candidate = await inspectServerDirectoryTree(paths.candidatePath, { reparseInspector });
@@ -158,6 +159,8 @@ async function fixture(t, options = {}) {
     contextFactory: async ({ record, mutationLease }) => ({ fsApi, reparseInspector, durableFs,
       jobId: record.jobId, mutationLease, targetPath: serverPath, operationKind: record.operationKind,
       recoveryRegistry: registry, stableInstanceId: 'alpha', runtimePolicy,
+      ...(options.published ? { validateCandidate: false, runtime: {}, maxRam: 6,
+        healthTimeoutMs: 30000, port: 25575, networkAccess: 'loopback' } : {}),
       async resolveRecoveryRuntimeConfig() {
         calls.push('config');
         if (options.runtimeConfig) return options.runtimeConfig;
@@ -167,7 +170,7 @@ async function fixture(t, options = {}) {
     }) });
   let service = createService();
   const value = { root, serverPath, paths, original, initial, selector, coordinator, registry, service, calls,
-    authority, reparseInspector, candidate, failHistory(enabled) { failHistory = enabled; },
+    authority, reparseInspector, candidate, durableFs, failHistory(enabled) { failHistory = enabled; },
     recover() { return service.recover(initial); },
     async restartRegistry() {
       registry = new RecoveryRegistry({ userDataPath: root, durableFs: registryDurableFs });
@@ -182,8 +185,479 @@ async function fixture(t, options = {}) {
       value.initial = initial; return initial;
     }
   };
+  if (options.published) {
+    // Real authenticated candidate and real two-rename publication. Only Java is
+    // excluded; this is not a pre-swap record relabeled as published rollback.
+    const operationRoot = path.join(paths.candidatePath, '.minecraft-core-state', 'operations', initial.jobId);
+    fs.mkdirSync(operationRoot, { recursive: true });
+    const marker = createDirectoryMarker({ jobId: initial.jobId, operationKind: initial.operationKind,
+      stableInstanceId: 'alpha', createdAt: '2026-10-09T00:00:00.000Z' });
+    await durableFs.writeJsonAtomicAsync(path.join(operationRoot, 'directory-marker.json'), marker,
+      { expectedTargetSha256: null });
+    const journal = new OperationJournal({ durableFs, fsApi: fs, clock: () => new Date() });
+    const journalPath = path.join(operationRoot, 'journal.json');
+    await journal.create(journalPath, { jobId: initial.jobId, operationKind: initial.operationKind,
+      stableInstanceId: 'alpha', targetPath: serverPath, candidateIdentity: candidate.directoryIdentity,
+      markerSha256: marker.checksum });
+    candidate = await inspectServerDirectoryTree(paths.candidatePath, { reparseInspector,
+      mutableRelativePaths: [`.minecraft-core-state/operations/${initial.jobId}/journal.json`] });
+    await journal.transition(journalPath, { expectedPhase: 'staging', nextPhase: 'committing', patch: {
+      swapStep: 'prepared', targetIdentity: original.directoryIdentity, sourceFingerprint: original.fingerprint,
+      candidateFingerprint: candidate.fingerprint } });
+    initial = await registry.transition(initial.jobId, { expectedPhase: initial.phase, nextPhase: 'committing', patch: {
+      swapStep: 'prepared', journalPath, outcome: { ...initial.outcome,
+        candidate: { fingerprint: candidate.fingerprint, markerSha256: marker.checksum, health: { ready: true } },
+        runtime: { source: {}, target: {}, maxRam: 6, networkAccess: 'loopback', port: 25575 },
+        runtimePolicy: { targetRunning: true, targetAutoRestart: false, targetInactive: false } } } });
+    await value.withLease(lease => swapExistingCandidate({ fsApi: fs, durableFs, reparseInspector,
+      jobId: initial.jobId, targetPath: serverPath, operationKind: initial.operationKind,
+      stableInstanceId: 'alpha', recoveryRegistry: registry, mutationLease: lease,
+      validateCandidate: false, runtime: {}, maxRam: 6, healthTimeoutMs: 30000, port: 25575 }));
+    initial = await registry.load(initial.jobId);
+    if (options.mutable !== false) {
+      await journal.transition(path.join(serverPath, '.minecraft-core-state', 'operations', initial.jobId, 'journal.json'), {
+        expectedPhase: 'starting', nextPhase: 'validating-live', patch: {} });
+      initial = await registry.transition(initial.jobId, { expectedPhase: 'starting', nextPhase: 'validating-live',
+        patch: { outcome: { ...initial.outcome, liveMutationAuthorized: true,
+          liveValidation: { properties: { canonical: true } } } } });
+      fs.writeFileSync(path.join(serverPath, 'post-boot.txt'), 'candidate legitimately mutated after boot');
+    }
+    value.initial = initial;
+    value.candidate = candidate;
+    value.journal = journal;
+    value.failedJournalPath = path.join(paths.failedPath, '.minecraft-core-state', 'operations', initial.jobId, 'journal.json');
+    if (options.terminalCorrupt) {
+      const transition = registry.transition.bind(registry);
+      registry.transition = async (jobId, request) => {
+        if (request.nextPhase === 'rolled-back') {
+          const terminal = { ...structuredClone(await registry.load(jobId)), ...structuredClone(request.patch) };
+          options.terminalCorrupt(terminal);
+          request = { ...request, patch: { ...request.patch, priorRuntime: terminal.priorRuntime,
+            directoryIdentities: terminal.directoryIdentities, swapStep: terminal.swapStep,
+            restoreCreation: terminal.restoreCreation, outcome: terminal.outcome } };
+        }
+        return transition(jobId, request);
+      };
+    }
+  }
   return value;
 }
+
+test('stopped published rollback restores malformed original without source config or health boot', async t => {
+  let proofs = 0;
+  let renames = 0;
+  const value = await fixture(t, { published: true, authority: base => ({ ...base,
+    async verifyOriginal(request) { proofs++; return base.verifyOriginal(request); },
+    async renameExact(request) { renames++; return base.renameExact(request); }
+  }) });
+  assert.deepEqual(value.initial.priorRuntime, { running: false, autoRestart: false });
+  assert.deepEqual(value.initial.outcome.runtimePolicy, {
+    targetRunning: true, targetAutoRestart: false, targetInactive: false
+  });
+  const result = await value.withLease(lease => value.service.rollbackWithLease(value.initial, lease));
+  assert.deepEqual(result, { jobId: 'job-stopped', resolved: true, action: 'rollback-restored' });
+  assert.ok(proofs >= 3, 'initial restoration must still use full original proof');
+  assert.equal(renames, 2, 'failed candidate move and exact original restoration');
+  assert.equal(fs.readFileSync(path.join(value.serverPath, 'config', 'broken.toml'), 'utf8'), 'malformed = [');
+  assert.equal(fs.readFileSync(path.join(value.serverPath, 'logs', 'latest.log'), 'utf8'), 'old log');
+  assert.equal(fs.readFileSync(path.join(value.paths.failedPath, 'post-boot.txt'), 'utf8'), 'candidate legitimately mutated after boot');
+  assert.equal(value.calls.includes('config'), false);
+  assert.equal(value.calls.includes('health'), false);
+  assert.equal(value.calls.at(-1), 'auto');
+  const history = await value.registry.loadHistory('job-stopped');
+  assert.equal(history.phase, 'rolled-back');
+  assert.equal(history.swapStep, 'rollback-restored');
+  assert.equal(history.outcome.health, undefined);
+  assert.equal(history.outcome.revisionEvent, undefined);
+  assert.equal(await value.registry.load('job-stopped'), null);
+  assert.deepEqual(fs.readdirSync(value.registry.historyPath).sort(), ['job-stopped.json', 'job-stopped.target.json']);
+});
+
+async function publishedTerminal(t, options = {}) {
+  let preparing = true;
+  const value = await fixture(t, { ...options, published: true,
+    onStop: async c => { if (!preparing && options.onStop) await options.onStop(c); },
+    onAuto: async c => { if (!preparing && options.onAuto) await options.onAuto(c); },
+    onHistory: async c => { if (!preparing && options.onHistory) await options.onHistory(c); }
+  });
+  value.failHistory(true);
+  await value.withLease(lease => assert.rejects(value.service.rollbackWithLease(value.initial, lease),
+    { code: 'RECOVERY_REQUIRED' }));
+  value.initial = await value.registry.load(value.initial.jobId);
+  assert.equal(value.initial.phase, 'rolled-back');
+  value.failHistory(false);
+  value.calls.length = 0;
+  preparing = false;
+  return value;
+}
+
+// Removing either terminal route, or reintroducing historical hashing, breaks
+// this test despite legitimate current drift and unreadable source payload.
+for (const entry of ['recoverWithLease', 'rollbackWithLease']) for (const mutable of [false, true]) {
+  test(`stopped published terminal ${entry} retains current drift without payload reads (${mutable ? 'mutable' : 'immutable'} failed)`, async t => {
+    const probe = sourceReadProbe();
+    let renames = 0;
+    const value = await publishedTerminal(t, { mutable, fsApi: probe.fsApi,
+      authority: base => ({ ...base, async renameExact(request) { renames++; return base.renameExact(request); } }) });
+    const before = value.initial;
+    const initialRenames = renames;
+    fs.writeFileSync(path.join(value.serverPath, 'config', 'broken.toml'), 'legitimate drift = [');
+    fs.writeFileSync(path.join(value.serverPath, 'logs', 'latest.log'), 'previous buggy recovery log');
+    probe.opens.length = 0;
+    probe.reads.length = 0;
+    probe.denyOpen = true;
+    await value.restartRegistry();
+    const result = await value.withLease(lease => value.service[entry](value.initial, lease));
+    assert.deepEqual(result, { jobId: 'job-stopped', resolved: true, action: 'rollback-restored' });
+    assert.deepEqual(probe.opens, []);
+    assert.deepEqual(probe.reads, []);
+    assert.equal(renames, initialRenames);
+    assert.deepEqual(value.calls, ['stop', 'auto']);
+    assert.equal(fs.readFileSync(path.join(value.serverPath, 'logs', 'latest.log'), 'utf8'), 'previous buggy recovery log');
+    assert.equal(fs.existsSync(value.paths.failedPath), true);
+    const history = await value.registry.loadHistory('job-stopped');
+    assert.equal(history.sequence, before.sequence);
+    assert.deepEqual(history.outcome, before.outcome);
+  });
+}
+
+for (const move of [1, 2]) for (const after of [false, true]) {
+  test(`stopped published history move ${move} ${after ? 'after' : 'before'} effect keeps reservation and exact retry semantics`, async t => {
+    let retry = false;
+    let protectedMoves = 0;
+    const probe = sourceReadProbe();
+    const value = await fixture(t, { published: true, fsApi: probe.fsApi, historyFault: { move, after },
+      onAuto: async c => {
+        if (!retry) await assert.rejects(c.coordinator.acquireStart(c.selector, { operation: 'competing-policy',
+          operationId: 'other', parentMutationLease: c.parentLease }), { code: 'OPERATION_IN_PROGRESS' });
+      },
+      onHistory: async c => {
+        if (retry) return;
+        protectedMoves++;
+        await assert.rejects(c.coordinator.acquireStart(c.selector, { operation: 'competing-history',
+          operationId: 'other', parentMutationLease: c.parentLease }), { code: 'OPERATION_IN_PROGRESS' });
+        await assert.rejects(c.coordinator.acquireStart(c.selector, { operation: 'ordinary-history',
+          operationId: 'ordinary', parentMutationLease: null }));
+      } });
+    await value.withLease(async lease => {
+      value.parentLease = lease;
+      await assert.rejects(value.service.rollbackWithLease(value.initial, lease), { code: 'RECOVERY_REQUIRED' });
+      const released = await value.coordinator.acquireStart(value.selector, { operation: 'prove-release',
+        operationId: 'after-failure', parentMutationLease: lease });
+      released.release();
+    });
+    assert.equal(protectedMoves, move);
+    const activeSurvives = move === 1 && !after;
+    assert.equal(Boolean(await value.registry.load('job-stopped')), activeSurvives);
+    await assert.rejects(value.coordinator.acquireStart(value.selector, { operation: 'quarantined',
+      operationId: 'later', parentMutationLease: null }), { code: 'RECOVERY_REQUIRED' });
+    const calls = [...value.calls];
+    retry = true;
+    fs.writeFileSync(path.join(value.serverPath, 'logs', 'latest.log'), 'safe retry drift');
+    probe.opens.length = 0;
+    probe.denyOpen = true;
+    await value.restartRegistry();
+    const result = await value.recover();
+    assert.equal(result.action, activeSurvives ? 'rollback-restored' : 'already-finished');
+    assert.deepEqual(probe.opens, []);
+    assert.deepEqual(value.calls, activeSurvives ? [...calls, 'suspend', 'stop', 'auto'] : calls);
+    assert.equal(fs.existsSync(value.paths.failedPath), true);
+    assert.deepEqual(fs.readdirSync(value.registry.historyPath).sort(), ['job-stopped.json', 'job-stopped.target.json']);
+    const admitted = await value.coordinator.acquireStart(value.selector, { operation: 'resolved',
+      operationId: 'later', parentMutationLease: null });
+    admitted.release();
+  });
+}
+
+for (const mutable of [false, true]) test(`stopped published authentic lagging journal is synchronized (${mutable ? 'mutable' : 'immutable'})`, async t => {
+  const value = await publishedTerminal(t, { mutable });
+  await value.journal.transition(value.failedJournalPath, { expectedPhase: 'rolled-back', nextPhase: 'rolling-back', patch: {} });
+  assert.equal((await value.recover()).resolved, true);
+  assert.equal(value.journal.load(value.failedJournalPath).phase, 'rolled-back');
+  assert.deepEqual(value.calls, ['suspend', 'stop', 'auto']);
+});
+
+const publishedContradictions = [
+  ['action', r => { r.outcome.recovery.action = 'pre-swap-restored'; }],
+  ['job', r => { r.outcome.recovery.operationId = 'other-job'; }],
+  ['restored step', r => { r.swapStep = 'candidate-published'; }],
+  ['publication lineage', r => { r.outcome.swap.step = 'live-moved'; }],
+  ['original identity', r => { r.directoryIdentities.target = r.directoryIdentities.candidate; }],
+  ['rollback identity missing', r => { r.directoryIdentities.rollback = null; }],
+  ['candidate identity missing', r => { r.directoryIdentities.candidate = null; }],
+  ['failed identity', r => { r.directoryIdentities.failed = r.directoryIdentities.target; }],
+  ['source fingerprint missing', r => { delete r.outcome.live.fingerprint; }],
+  ['restoration fingerprint', r => { r.outcome.rollback.fingerprint = 'b'.repeat(64); }],
+  ['candidate fingerprint', r => { r.outcome.candidate.fingerprint = 'b'.repeat(64); }],
+  ['marker digest', r => { r.outcome.candidate.markerSha256 = 'b'.repeat(64); }],
+  ['committed health', r => { r.outcome.health = { ready: true }; }],
+  ['revision', r => { r.outcome.revisionEvent = { published: false }; }],
+  ['handoff', r => { r.outcome.runtimePolicy.handoffEventId = 'handoff'; }],
+  ['running-restored', r => { r.outcome.runtimePolicy.runningRestored = true; }]
+];
+for (const [name, corrupt] of publishedContradictions) test(`stopped published contradictory ${name} fails closed without source boot`, async t => {
+  const value = await publishedTerminal(t, { terminalCorrupt: corrupt });
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(value.calls.includes('config'), false);
+  assert.equal(value.calls.includes('health'), false);
+  assert.equal(value.calls.includes('auto'), false);
+  assert.equal(fs.existsSync(value.paths.failedPath), true);
+  assert.equal(await value.registry.loadHistory('job-stopped'), null);
+});
+
+for (const mutable of [false, true]) for (const [name, patch] of [
+  ['unrelated phase', { phase: 'validating-live' }],
+  ['wrong step', { swapStep: 'candidate-published' }],
+  ['wrong source digest', { sourceFingerprint: 'b'.repeat(64) }],
+  ['wrong rollback digest', { rollbackFingerprint: 'b'.repeat(64) }],
+  ['revision id', { revisionEventId: 'revision' }],
+  ['revision publication', { revisionEventId: 'revision', revisionEventPublished: true }]
+]) test(`stopped published ${mutable ? 'mutable' : 'immutable'} failed journal rejects ${name}`, async t => {
+  const value = await publishedTerminal(t, { mutable });
+  const { phase = 'rolled-back', ...changes } = patch;
+  await value.journal.transition(value.failedJournalPath, { expectedPhase: 'rolled-back', nextPhase: phase, patch: changes });
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(value.calls.includes('auto'), false);
+  assert.equal(value.calls.includes('config'), false);
+  assert.equal(await value.registry.loadHistory('job-stopped'), null);
+});
+
+for (const missing of ['journal.json', 'directory-marker.json']) test(`stopped published missing failed ${missing} cannot authorize finish`, async t => {
+  const value = await publishedTerminal(t);
+  fs.unlinkSync(path.join(path.dirname(value.failedJournalPath), missing));
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(value.calls.includes('auto'), false);
+  assert.equal(value.calls.includes('config'), false);
+});
+
+for (const name of ['journal.json', 'directory-marker.json']) test(`stopped published failed authority hardlink ${name} blocks retention`, async t => {
+  const value = await publishedTerminal(t);
+  fs.linkSync(path.join(path.dirname(value.failedJournalPath), name), path.join(value.root, `linked-${name}`));
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(value.calls.includes('auto'), false);
+  assert.equal(value.calls.includes('config'), false);
+  assert.equal(await value.registry.loadHistory('job-stopped'), null);
+});
+
+for (const slot of ['original', 'journal.json', 'directory-marker.json', 'failed-root']) {
+  test(`stopped published genuine symlink or junction in ${slot} blocks retention`, async t => {
+    const value = await publishedTerminal(t);
+    const target = slot === 'original' ? path.join(value.serverPath, 'config', 'broken.toml')
+      : slot === 'failed-root' ? value.paths.failedPath : path.join(path.dirname(value.failedJournalPath), slot);
+    const moved = path.join(value.root, `symlink-target-${slot}`);
+    fs.renameSync(target, moved);
+    try { fs.symlinkSync(moved, target, slot === 'failed-root' ? 'junction' : 'file'); }
+    catch (error) {
+      if (!['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) throw error;
+      t.skip(`Platform refused genuine symlink creation: ${error.code}`);
+      return;
+    }
+    await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+    assert.equal(value.calls.includes('auto'), false);
+    assert.equal(value.calls.includes('config'), false);
+    assert.equal(await value.registry.loadHistory('job-stopped'), null);
+  });
+}
+
+for (const topology of ['missing-source', 'candidate-present', 'rollback-present', 'failed-missing',
+  'source-replaced', 'failed-replaced', 'source-hardlink']) {
+  test(`stopped published current ${topology} refuses retention`, async t => {
+    const value = await publishedTerminal(t);
+    if (topology === 'missing-source') fs.renameSync(value.serverPath, path.join(value.root, 'saved-source'));
+    if (topology === 'candidate-present') fs.mkdirSync(value.paths.candidatePath);
+    if (topology === 'rollback-present') fs.mkdirSync(value.paths.rollbackPath);
+    if (topology === 'failed-missing') fs.renameSync(value.paths.failedPath, path.join(value.root, 'saved-failed'));
+    if (topology === 'source-replaced' || topology === 'failed-replaced') {
+      const target = topology === 'source-replaced' ? value.serverPath : value.paths.failedPath;
+      fs.renameSync(target, path.join(value.root, 'saved-tree'));
+      fs.mkdirSync(target);
+    }
+    if (topology === 'source-hardlink') fs.linkSync(path.join(value.serverPath, 'config', 'broken.toml'),
+      path.join(value.root, 'linked-source.toml'));
+    await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+    assert.equal(value.calls.includes('auto'), false);
+    assert.equal(value.calls.includes('config'), false);
+    assert.equal(await value.registry.loadHistory('job-stopped'), null);
+  });
+}
+
+for (const replacement of ['parent', 'source', 'failed', 'authority-hardlink']) {
+  test(`stopped published ${replacement} replacement during policy keeps quarantine`, async t => {
+    const value = await publishedTerminal(t, { onAuto: async c => {
+      if (replacement === 'parent') {
+        const parent = path.dirname(c.serverPath);
+        const saved = path.join(c.root, 'saved-parent');
+        fs.renameSync(parent, saved);
+        fs.mkdirSync(parent);
+        // The same source/failed roots in a different parent still must fail.
+        for (const name of fs.readdirSync(saved)) fs.renameSync(path.join(saved, name), path.join(parent, name));
+      } else if (replacement === 'authority-hardlink') {
+        fs.linkSync(c.failedJournalPath, path.join(c.root, 'linked-journal.json'));
+      } else {
+        const target = replacement === 'source' ? c.serverPath : c.paths.failedPath;
+        fs.renameSync(target, path.join(c.root, 'saved-tree'));
+        fs.mkdirSync(target);
+      }
+    } });
+    await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+    assert.equal(await value.registry.loadHistory('job-stopped'), null);
+    assert.equal((await value.registry.load('job-stopped')).phase, 'rolled-back');
+    await assert.rejects(value.coordinator.acquireStart(value.selector,
+      { operation: 'quarantined', operationId: 'other', parentMutationLease: null }), { code: 'RECOVERY_REQUIRED' });
+  });
+}
+
+for (const boundary of ['stop', 'policy']) test(`stopped published ${boundary} failure retains terminal authority and releases reservation`, async t => {
+  let fail = true;
+  const value = await publishedTerminal(t, { [boundary === 'stop' ? 'onStop' : 'onAuto']: async () => {
+    if (fail) throw new Error(`controlled ${boundary} failure`);
+  } });
+  await value.withLease(async lease => {
+    await assert.rejects(value.service.recoverWithLease(value.initial, lease), { code: 'RECOVERY_REQUIRED' });
+    const start = await value.coordinator.acquireStart(value.selector, { operation: 'prove-release',
+      operationId: 'other', parentMutationLease: lease });
+    start.release();
+  });
+  assert.equal((await value.registry.load('job-stopped')).phase, 'rolled-back');
+  assert.equal(fs.existsSync(value.paths.failedPath), true);
+  fail = false;
+  assert.equal((await value.recover()).action, 'rollback-restored');
+});
+
+test('stopped published source safety and policy boundaries hold genuine nested start reservation', async t => {
+  const value = await publishedTerminal(t, { onAuto: async c => {
+    c.stage = 'after-policy';
+    await assert.rejects(c.coordinator.acquireStart(c.selector, { operation: 'competing-policy', operationId: 'other',
+      parentMutationLease: c.parentLease }), { code: 'OPERATION_IN_PROGRESS' });
+  } });
+  const observed = [];
+  value.stage = 'before-policy';
+  value.reparseInspector.isReparsePoint = async candidate => {
+    if (path.relative(value.serverPath, candidate).replaceAll(path.sep, '/') === 'config/broken.toml') {
+      observed.push(value.stage);
+      await assert.rejects(value.coordinator.acquireStart(value.selector, { operation: 'competing-source', operationId: 'other',
+        parentMutationLease: value.parentLease }), { code: 'OPERATION_IN_PROGRESS' });
+    }
+    return false;
+  };
+  await value.withLease(async lease => {
+    value.parentLease = lease;
+    assert.equal((await value.service.recoverWithLease(value.initial, lease)).resolved, true);
+  });
+  assert.deepEqual(observed, ['before-policy', 'after-policy', 'after-policy']);
+});
+
+test('stopped published source safety is rechecked after the last awaited failed-authority proof', async t => {
+  const value = await publishedTerminal(t);
+  let markerChecks = 0;
+  value.reparseInspector.isReparsePoint = async candidate => {
+    if (path.relative(value.paths.failedPath, candidate).replaceAll(path.sep, '/') ===
+        '.minecraft-core-state/operations/job-stopped/directory-marker.json' && ++markerChecks === 5) {
+      fs.linkSync(path.join(value.serverPath, 'config', 'broken.toml'), path.join(value.root, 'last-boundary-hardlink'));
+    }
+    return false;
+  };
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(markerChecks, 6);
+  assert.equal(await value.registry.loadHistory('job-stopped'), null);
+  assert.equal((await value.registry.load('job-stopped')).phase, 'rolled-back');
+});
+
+test('stopped published unsettled candidate worker refuses before context and source work', async t => {
+  const value = await publishedTerminal(t);
+  const marker = { schemaVersion: 1, jobId: value.initial.jobId, candidatePath: value.paths.candidatePath,
+    candidateIdentity: value.candidate.directoryIdentity, bootSequence: 1, state: 'unproven' };
+  const active = await value.registry.updateRuntimeWriterAuthority(value.initial.jobId, {
+    expectedSequence: value.initial.sequence, authority: marker, failureCode: null });
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.deepEqual(value.calls, []);
+  assert.equal(fs.existsSync(value.paths.failedPath), true);
+  await value.registry.updateRuntimeWriterAuthority(value.initial.jobId, { expectedSequence: active.sequence,
+    authority: { ...marker, state: 'settled' }, failureCode: null });
+  assert.equal((await value.recover()).action, 'rollback-restored');
+});
+
+for (const priorRuntime of [{ running: true, autoRestart: false }, { running: false, autoRestart: true }]) {
+  test(`published prior ${JSON.stringify(priorRuntime)} preserves ordinary source health requirement`, async t => {
+    const value = await publishedTerminal(t, { patch: { priorRuntime }, runtimeConfig: {
+      runtime: {}, maxRam: 6, networkAccess: 'loopback', port: 25575 } });
+    await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+    assert.equal(value.calls.includes('config'), true);
+    assert.equal(value.calls.includes('health'), true);
+    assert.equal(await value.registry.loadHistory('job-stopped'), null);
+  });
+}
+
+test('stopped published immutable failed payload drift still requires full candidate proof', async t => {
+  const value = await publishedTerminal(t, { mutable: false });
+  fs.writeFileSync(path.join(value.paths.failedPath, 'partial.txt'), 'unauthorized candidate drift');
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(value.calls.includes('auto'), false);
+  assert.equal(value.calls.includes('config'), false);
+});
+
+test('stopped published intermediate rollback-restored still requires original payload proof', async t => {
+  const value = await fixture(t, { published: true });
+  const transition = value.registry.transition.bind(value.registry);
+  value.registry.transition = async (jobId, request) => {
+    if (request.nextPhase === 'rolled-back') throw new Error('terminal transition refused before effect');
+    return transition(jobId, request);
+  };
+  await value.withLease(lease => assert.rejects(value.service.rollbackWithLease(value.initial, lease),
+    { code: 'RECOVERY_REQUIRED' }));
+  const intermediate = await value.registry.load('job-stopped');
+  assert.equal(intermediate.phase, 'rolling-back');
+  assert.equal(intermediate.swapStep, 'rollback-restored');
+  value.registry.transition = transition;
+  fs.writeFileSync(path.join(value.serverPath, 'logs', 'latest.log'), 'not terminal retain authority');
+  value.calls.length = 0;
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(value.calls.includes('auto'), false);
+  assert.equal(value.calls.includes('config'), false);
+  assert.equal((await value.registry.load('job-stopped')).phase, 'rolling-back');
+});
+
+test('stopped published unresolved restore creation never acquires retention authority', async t => {
+  const value = await publishedTerminal(t, { patch: { restoreCreation: restoreCreation() } });
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(value.calls.includes('auto'), false);
+  assert.equal(value.calls.includes('config'), false);
+  assert.deepEqual((await value.registry.load('job-stopped')).restoreCreation, restoreCreation());
+});
+
+for (const [name, changed] of [['job', { jobId: 'other-job' }], ['instance', { stableInstanceId: 'other' }],
+  ['operation', { operationKind: 'upgrade' }]]) test(`stopped published actual failed marker with wrong ${name} is rejected`, async t => {
+  const value = await publishedTerminal(t);
+  const marker = createDirectoryMarker({ jobId: 'job-stopped', stableInstanceId: 'alpha', operationKind: 'repair',
+    createdAt: '2026-10-09T00:00:00.000Z', ...changed });
+  fs.writeFileSync(path.join(path.dirname(value.failedJournalPath), 'directory-marker.json'), JSON.stringify(marker));
+  await assert.rejects(value.recover(), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(value.calls.includes('auto'), false);
+  assert.equal(value.calls.includes('config'), false);
+});
+
+test('stopped published facade reconciles public rolled-back only after authenticated finish', async t => {
+  const value = await publishedTerminal(t);
+  const store = await recoveryStore(value);
+  await reconcileOperationStoreWithRecovery({ operationStore: store, recoveryRegistry: value.registry,
+    jobs: [await store.get('job-stopped')] });
+  assert.equal((await store.get('job-stopped')).phase, 'recovery-required');
+  const facade = new ModpackRecoveryFacade({ recoveryRegistry: value.registry, recoveryService: value.service,
+    hasActiveJob: () => false,
+    canExposePendingNewServer: () => false,
+    onResolved: async () => {
+      assert.ok(await value.registry.loadHistory('job-stopped'));
+      await reconcileOperationStoreWithRecovery({ operationStore: store, recoveryRegistry: value.registry,
+        jobs: [await store.get('job-stopped')] });
+      return (await store.get('job-stopped')).phase === 'rolled-back';
+    } });
+  const listed = await facade.listRecovery();
+  const result = await facade.recover({ recoveryId: listed.items[0].recoveryId, actionId: 'retry-recovery' });
+  assert.equal(result.resolved, true);
+  assert.equal(result.operationStateReconciled, true);
+  assert.equal((await store.get('job-stopped')).outcome.status, 'rolled-back');
+  assert.deepEqual(value.calls, ['suspend', 'stop', 'auto']);
+});
 
 test('stopped original initial cleanup proves full source and finishes failed without config or boot', async t => {
   let originalProofs = 0;
@@ -319,6 +793,7 @@ test('stopped between-renames facade reconciles real OperationStore only after a
     jobs: [await store.get('job-stopped')] });
   assert.equal((await store.get('job-stopped')).phase, 'recovery-required');
   const facade = new ModpackRecoveryFacade({ recoveryRegistry: value.registry, recoveryService: value.service,
+    hasActiveJob: () => false,
     canExposePendingNewServer: () => false,
     onResolved: async () => {
       assert.ok(await value.registry.loadHistory('job-stopped'));

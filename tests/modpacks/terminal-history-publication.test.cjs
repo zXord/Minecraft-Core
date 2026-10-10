@@ -178,6 +178,7 @@ test('facade offers one opaque bookkeeping action, revalidates it, and invokes o
   f.registry.initialize = async () => { scans++; return initialize(); };
   let callbacks = 0;
   const facade = new ModpackRecoveryFacade({ recoveryRegistry: f.registry, recoveryService: f.service,
+    hasActiveJob: () => false,
     canExposePendingNewServer: () => true, onResolved: async (jobId, record, result) => {
       callbacks++; assert.equal(jobId, 'job-alpha'); assert.equal(record.phase, 'failed');
       assert.equal(result.action, 'already-finished'); f.assertPublished(); return true;
@@ -388,7 +389,7 @@ test('bookkeeping action crosses public IPC validation and renders its label in 
   const { validateModpackIpcRequest, validateModpackIpcResult } = require('../../electron/services/modpacks/ipc-schemas.cjs');
   const { pathToFileURL } = require('node:url');
   const f = await fixture(t); f.bindBlock(); f.controls.fault = null;
-  const facade = new ModpackRecoveryFacade({ recoveryRegistry: f.registry, recoveryService: f.service, canExposePendingNewServer: () => true });
+  const facade = new ModpackRecoveryFacade({ recoveryRegistry: f.registry, recoveryService: f.service, canExposePendingNewServer: () => true, hasActiveJob: () => false });
   const previousWindow = global.window;
   global.window = { electron: { async invoke(channel, request) {
     const normalized = validateModpackIpcRequest(channel, request);

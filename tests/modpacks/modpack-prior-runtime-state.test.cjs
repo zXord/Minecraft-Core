@@ -254,16 +254,21 @@ test('committed healthy recovery uses the target runtime and never relaunches a 
   assert.ok(fixture.calls.indexOf('cleanup') < fixture.calls.indexOf('finish:completed'));
 });
 
-test('committed target recovery honors start-after-install while source rollback still honors prior running state', async () => {
+test('committed target recovery honors start-after-install for a previously stopped server', async () => {
   const target = serviceFixture({ phase: 'committed-healthy', running: false, autoRestart: false, targetRunning: true });
   await target.service.recover(target.initial);
   assert.ok(target.calls.includes('health:1.21.1:10:25566:true'));
   assert.ok(target.calls.includes('adopt:modpack-runtime-handoff:job-runtime'));
+});
 
+test('contradictory stopped source rollback record fails closed without source boot or policy release', async () => {
   const source = serviceFixture({ running: false, autoRestart: false, targetRunning: true });
-  await source.service.recover(source.initial);
-  assert.ok(source.calls.includes('health:1.20.1:6:25565:false'));
+  await assert.rejects(source.service.recover(source.initial), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(source.calls.some(call => call.startsWith('health:')), false);
   assert.equal(source.calls.some(call => call.startsWith('adopt:')), false);
+  assert.equal(source.calls.some(call => call.startsWith('auto:')), false);
+  assert.equal(source.calls.some(call => call.startsWith('finish:')), false);
+  assert.equal(source.calls[0], 'hold:job-runtime');
 });
 
 test('failed stop, health, or handoff adoption retains the recovery hold and never restores auto-restart', async () => {

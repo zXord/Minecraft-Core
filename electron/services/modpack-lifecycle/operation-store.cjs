@@ -320,6 +320,13 @@ function dto(record) {
   return deepFreeze(result);
 }
 
+// Public reads share the durable job contract without accepting a checksum as
+// renderer authority. This does not authenticate bytes; OperationStore.get does.
+function validatePublicJob(value) {
+  strictObject(value, RECORD_KEYS.filter(key => key !== 'checksum'));
+  return dto(normalizeRecord({ ...value, checksum: checksumFor(value) }));
+}
+
 class OperationStore {
   constructor({ userDataPath, fsApi = fs, durableFs, clock = () => new Date(), randomUUID = crypto.randomUUID, eventSink = () => {} } = {}) {
     if (typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath) || !fsApi || typeof fsApi !== 'object' ||
@@ -698,5 +705,6 @@ module.exports = {
   JOB_TYPE,
   OperationStore,
   TERMINAL_PHASES: Object.freeze([...TERMINAL_PHASES]),
-  isLegalJobTransition
+  isLegalJobTransition,
+  validatePublicJob
 };

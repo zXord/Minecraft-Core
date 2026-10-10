@@ -1339,7 +1339,122 @@ class ModpackRecoveryService {
     }
   }
 
+  #classifyStoppedPublishedRollback(record) {
+    if (record.phase !== 'rolled-back' || record.priorRuntime.running !== false ||
+        record.priorRuntime.autoRestart !== false) return false;
+    const outcome = record.outcome || {};
+    const identities = record.directoryIdentities;
+    const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value);
+    // Terminal restoration authority is distinct from current retention safety.
+    // A contradictory stopped rollback must not fall through to a source boot.
+    if (record.target.kind !== 'existing' || record.swapStep !== 'rollback-restored' ||
+        outcome.recovery?.action !== 'rollback-restored' || outcome.recovery.operationId !== record.jobId ||
+        record.restoreCreation != null || !identities.target || !identities.rollback ||
+        !identities.candidate || !identities.failed ||
+        !sameIdentity(identities.target, identities.rollback) ||
+        !sameIdentity(identities.failed, identities.candidate) ||
+        sameIdentity(identities.target, identities.candidate) ||
+        !digest(outcome.live?.fingerprint) || !digest(outcome.rollback?.fingerprint) ||
+        outcome.live.fingerprint !== outcome.rollback.fingerprint ||
+        !digest(outcome.candidate?.fingerprint) || !digest(outcome.candidate?.markerSha256) ||
+        outcome.swap?.step !== 'candidate-published' || outcome.health != null || outcome.revisionEvent != null ||
+        outcome.runtimePolicy?.handoffEventId != null ||
+        (outcome.runtimePolicy?.runningRestored != null && outcome.runtimePolicy.runningRestored !== false)) {
+      throw recoveryRequired();
+    }
+    return true;
+  }
+
+  async #proveStoppedPublishedFailed(record, context, paths) {
+    const authorityRoot = path.join(paths.failedPath, '.minecraft-core-state', 'operations', record.jobId);
+    const proveAuthorityFiles = async () => {
+      // Only the two authority files, not the quarantined mutable descendants.
+      // Durable reads authenticate bytes but do not reject hardlinked files.
+      for (const name of ['directory-marker.json', 'journal.json']) {
+        const authorityPath = path.join(authorityRoot, name);
+        const stat = context.fsApi.lstatSync(authorityPath, { bigint: true });
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n ||
+            await context.reparseInspector.isReparsePoint(authorityPath) !== false) throw recoveryRequired();
+      }
+    };
+    await proveAuthorityFiles();
+    const mutable = record.outcome?.liveMutationAuthorized === true ||
+      record.outcome?.recovery?.reason === 'live-health-failed';
+    const evidence = mutable
+      ? await this.transaction.verifyMutableOperationOwnedDirectory(context, paths.failedPath, record.directoryIdentities.failed)
+      : await this.#verifyOwned(context, paths.failedPath, record.directoryIdentities.failed, record.outcome.candidate.fingerprint);
+    const journal = evidence?.journalRecord;
+    // The immutable verifier proves content; the mutable verifier deliberately
+    // does not. Both still need this exact published-restoration lineage.
+    if (!evidence?.journal || typeof evidence.journal.transition !== 'function' ||
+        typeof evidence.locations?.journalPath !== 'string' || !journal ||
+        journal.jobId !== record.jobId || journal.stableInstanceId !== record.target.stableServerId ||
+        journal.operationKind !== record.operationKind ||
+        evidence.marker?.checksum !== record.outcome.candidate.markerSha256 ||
+        journal.markerSha256 !== record.outcome.candidate.markerSha256 ||
+        journal.candidateFingerprint !== record.outcome.candidate.fingerprint ||
+        journal.sourceFingerprint !== record.outcome.live.fingerprint ||
+        journal.rollbackFingerprint !== record.outcome.rollback.fingerprint ||
+        !sameIdentity(journal.candidateIdentity, record.directoryIdentities.candidate) ||
+        !sameIdentity(journal.targetIdentity, record.directoryIdentities.target) ||
+        !sameIdentity(journal.rollbackIdentity, record.directoryIdentities.rollback) ||
+        !sameIdentity(journal.failedIdentity, record.directoryIdentities.failed) ||
+        !['rolled-back', 'rolling-back'].includes(journal.phase) || journal.swapStep !== 'rollback-restored' ||
+        journal.revisionEventId !== null || journal.revisionEventPublished !== false) throw recoveryRequired();
+    // Only this fully bound lagging transition is safe to synchronize. Missing
+    // evidence must never be accepted via syncOwnedJournal's generic null no-op.
+    await this.#syncOwnedJournal(evidence, 'rolled-back', 'rollback-restored', {
+      targetIdentity: record.directoryIdentities.target,
+      rollbackIdentity: record.directoryIdentities.rollback,
+      failedIdentity: record.directoryIdentities.failed
+    });
+    await proveAuthorityFiles();
+  }
+
+  async #retainStoppedPublishedRollback(record, context, paths) {
+    const lease = context.mutationLease;
+    if (!lease || lease.operationId !== record.jobId || lease.instanceId !== record.target.stableServerId ||
+        !samePath(lease.serverPath, paths.targetPath)) throw recoveryRequired();
+    const identityOptions = { fsApi: context.fsApi, reparseInspector: context.reparseInspector };
+    const parentPath = path.dirname(paths.targetPath);
+    const parentIdentity = await identifyServerDirectory(parentPath, identityOptions);
+    await this.#stopRuntime(record, context);
+    const reservation = await requireMethod(this.coordinator, 'acquireStart').acquireStart({
+      instanceId: record.target.stableServerId, serverPath: paths.targetPath
+    }, { operation: 'modpack-recovery-retain-stopped', operationId: record.jobId, parentMutationLease: lease });
+    try {
+      requireMethod(reservation, 'release');
+      const proveRetained = async () => {
+        normalizePaths(record);
+        this.#classifyStoppedPublishedRollback(record);
+        await assertServerDirectoryIdentity(parentPath, parentIdentity, identityOptions);
+        await this.#proveStoppedPublishedFailed(record, context, paths);
+        // Current whole-original structure/root proof only: do not read payload
+        // or assert historical bytes, which may legitimately have drifted. Do
+        // this after awaited failed-authority work, not before that boundary.
+        const retained = await inspectServerDirectoryStructure(paths.targetPath, identityOptions);
+        if (!sameIdentity(retained.directoryIdentity, record.directoryIdentities.target)) throw recoveryRequired();
+        await assertServerDirectoryIdentity(parentPath, parentIdentity, identityOptions);
+        await assertServerDirectoryIdentity(paths.targetPath, record.directoryIdentities.target, identityOptions);
+        this.#assertAbsent(paths.candidatePath, context);
+        this.#assertAbsent(paths.rollbackPath, context);
+      };
+      await proveRetained();
+      await this.#restoreAutoRestart(record, context, 'source');
+      await proveRetained();
+      await proveRetained();
+      // Reservation excludes application starts, not external filesystem writers.
+      // Await both authenticated history moves before releasing it.
+      return await this.#finish(record, 'rolled-back', 'rollback-restored');
+    } finally {
+      reservation.release();
+    }
+  }
+
   async #recoverTerminalExisting(record, context, paths, retainingStopped = false) {
+    if (this.#classifyStoppedPublishedRollback(record)) {
+      return this.#retainStoppedPublishedRollback(record, context, paths);
+    }
     if (!retainingStopped) {
       const classification = this.#classifyStoppedBetweenRenames(record, context, paths, true) ||
         (this.#canRetainStoppedOriginal(record, context, paths, true)
@@ -1538,6 +1653,9 @@ class ModpackRecoveryService {
   async #rollbackExisting(record, context, paths, reason) {
     let current = await this.registry.load(record.jobId) || record;
     if (COMMITTED_PHASES.has(current.phase) || current.phase === 'completed') throw recoveryRequired();
+    if (this.#classifyStoppedPublishedRollback(current)) {
+      return this.#retainStoppedPublishedRollback(current, context, paths);
+    }
     this.#assertAbsent(paths.candidatePath, context);
     const candidateFingerprint = current.outcome?.candidate?.fingerprint;
     let mutableCanonical = current.phase === 'validating-live' ||
@@ -1563,7 +1681,8 @@ class ModpackRecoveryService {
             target: current.directoryIdentities.candidate,
             rollback: current.directoryIdentities.rollback || current.directoryIdentities.target
           },
-          outcome: recoveryOutcome(current, 'swap-publication-reconciled', { reason })
+          outcome: { ...recoveryOutcome(current, 'swap-publication-reconciled', { reason }),
+            swap: { step: 'candidate-published' } }
         }
       });
     }

@@ -43,6 +43,10 @@ async function loadServerComponent(relativePath) {
     .replace(
       "from '../../utils/modpacks/serverRequestScope.js'",
       `from '${pathToFileURL(path.join(ROOT, 'src/utils/modpacks/serverRequestScope.js')).href}'`
+    )
+    .replace(
+      "from '../../utils/modpacks/publicJobMerge.js'",
+      `from '${pathToFileURL(path.join(ROOT, 'src/utils/modpacks/publicJobMerge.js')).href}'`
     );
   return (await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`)).default;
 }

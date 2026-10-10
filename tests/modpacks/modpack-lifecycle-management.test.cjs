@@ -96,7 +96,9 @@ class MemoryOperationStore {
   async create(request) {
     const jobId = request.jobId ?? `job-generated-${++this.nextId}`;
     const value = {
-      ...request, jobId, phase: 'queued', cancellationRequested: false, progress: null, outcome: null, events: []
+      ...request, jobId, phase: 'queued', cancellationRequested: false, progress: null, outcome: null, events: [],
+      type: 'minecraft-core-modpack-job', schemaVersion: 1, sequence: 0, swapStep: null,
+      createdAt: '2026-08-02T00:00:00.000Z', updatedAt: '2026-08-02T00:00:00.000Z', terminalAt: null
     };
     this.records.set(jobId, value);
     this.phases.set(jobId, ['queued']);
@@ -118,6 +120,8 @@ class MemoryOperationStore {
       operationKind: value.operationKind
     })) throw new ModpackError('PLAN_STALE', 'The job transition is stale');
     Object.assign(value, structuredClone(patch), { phase: nextPhase });
+    value.sequence += 1;
+    if (['completed', 'cancelled', 'rolled-back', 'failed', 'recovery-required'].includes(nextPhase)) value.terminalAt = value.updatedAt;
     this.phases.get(jobId).push(nextPhase);
     return deepFreeze(structuredClone(value));
   }
@@ -396,6 +400,22 @@ test('verification accepts the production resolved-instance contract and hashes 
   assert.equal(issuances[0].instanceId, 'server-one');
   assert.deepEqual(snapshotServerContent(context.serverPath), before);
   assert.deepEqual(execution.calls, []);
+});
+
+test('active discovery preserves multiple independently owned verification jobs', async (t) => {
+  const context = fixture(t);
+  const gate = deferred();
+  const original = context.stateRepository.verifyManagedFiles.bind(context.stateRepository);
+  context.stateRepository.verifyManagedFiles = async (...args) => { await gate.promise; return original(...args); };
+  const execution = serviceForManagement({ ...context, operationKind: 'repair' });
+  const first = await execution.service.verify('server-one');
+  const second = await execution.service.verify('server-one');
+  try {
+    const discovered = await execution.service.getActiveJobs('server-one');
+    assert.deepEqual(discovered.items.map(item => item.job.jobId).sort(), [first.jobId, second.jobId].sort());
+    assert.equal(discovered.items.every(item => item.ownership === 'running'), true);
+  } finally { gate.resolve(); }
+  await Promise.all([execution.service.getJob(first.jobId), execution.service.getJob(second.jobId)]);
 });
 
 test('failed verification jobs retain a closed filesystem diagnostic without raw error text', async (t) => {

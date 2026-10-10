@@ -40,6 +40,7 @@ function createFixture() {
       startOperation: value('startOperation'),
       cancelJob: value('cancelJob'),
       getJob: value('getJob'),
+      async getActiveJobs(serverId) { calls.push(['getActiveJobs', serverId]); return { serverId, items: [] }; },
       getState: value('getState'),
       listHistory: value('listHistory'),
       listRollbackOptions: value('listRollbackOptions'),
@@ -120,6 +121,7 @@ const VALID_REQUESTS = {
   'modpacks:start-operation': { planId: 'plan-one', planFingerprint: FINGERPRINT, choices: {} },
   'modpacks:cancel-job': { jobId: 'job-one' },
   'modpacks:get-job': { jobId: 'job-one' },
+  'modpacks:get-active-jobs': { serverId: 'server-one' },
   'modpacks:get-state': { serverId: 'server-one' },
   'modpacks:list-history': { serverId: 'server-one', limit: 25 },
   'modpacks:list-rollback-options': { serverId: 'server-one' },
@@ -132,6 +134,15 @@ const VALID_REQUESTS = {
   'modpacks:verify': { serverId: 'server-one' },
   'modpacks:perform-safe-action': { actionId: 'retry', opaqueRef: 'job-one' }
 };
+
+test('active discovery IPC binds the result to the requested server', async () => {
+  const f = createFixture();
+  assert.deepEqual(await f.handlers['modpacks:get-active-jobs']({}, { serverId: 'server-one' }), { ok: true, value: { serverId: 'server-one', items: [] } });
+  assert.deepEqual(f.calls, [['getActiveJobs', 'server-one']]);
+  f.dependencies.lifecycleService.getActiveJobs = async () => ({ serverId: 'server-two', items: [] });
+  const result = await createModpackHandlers(f.dependencies)['modpacks:get-active-jobs']({}, { serverId: 'server-one' });
+  assert.equal(result.ok, false);
+});
 
 test('every approved invoke validates a closed request and returns a validated success envelope', async () => {
   const fixture = createFixture();

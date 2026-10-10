@@ -28,7 +28,7 @@ function handlerDependencies(destinationReservationService) {
     destinationReservationService,
     lifecycleService: {
       inspectSource: noop, cancelInspection: noop, createPlan: noop, createManagementPlan: noop, startOperation: noop,
-      cancelJob: noop, getJob: noop, getState: noop, listHistory: noop, listRollbackOptions: noop, verify: noop
+      cancelJob: noop, getJob: noop, getActiveJobs: noop, getState: noop, listHistory: noop, listRollbackOptions: noop, verify: noop
     },
     recoveryService: { listRecovery: noop, recover: noop },
     notificationStore: { list: noop, acknowledge: noop },

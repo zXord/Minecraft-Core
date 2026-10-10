@@ -2312,6 +2312,29 @@ test('an unproven retained process blocks new-server quarantine instead of renam
   });
 });
 
+test('unproven existing live-health close refuses production rollback before stopped-source recovery', async t => {
+  const { stopValidatedHandoff, isUnprovenHealthProcessError } = require('../../electron/services/server-health-validator.cjs');
+  await targetedRepairFixture(t, {}, async ({ runtime, recoveryRegistry, plan, resolved, lease, built }) => {
+    const before = await recoveryRegistry.load('job-repair');
+    await recoveryRegistry.transition('job-repair', { expectedPhase: before.phase, nextPhase: 'starting',
+      patch: { swapStep: 'candidate-published' } });
+    const retained = retainedHandoffDouble({ closes: false });
+    let validationError;
+    await assert.rejects(stopValidatedHandoff(retained.handoff), error => {
+      validationError = error;
+      return isUnprovenHealthProcessError(error);
+    });
+    runtime.recoveryService.rollbackWithLease = async () => assert.fail('unproven close must precede rollback recovery');
+    runtime.recoveryService.recoverWithLease = async () => assert.fail('unproven close must precede source recovery');
+    await assert.rejects(runtime.rollback({ jobId: 'job-repair', plan, resolved, lease, error: validationError }),
+      { code: 'RECOVERY_REQUIRED' });
+    assert.equal(retained.stopCalls(), 1);
+    assert.equal(retained.isLive(), true);
+    assert.equal((await recoveryRegistry.load('job-repair')).phase, 'starting');
+    assert.equal(fs.existsSync(built.candidatePath), true);
+  });
+});
+
 test('existing candidate batches durability at the transaction boundary while applying many removals', async t => {
   const removeActionCount = 64;
   await targetedRepairFixture(t, { operationKind: 'upgrade', removeActionCount }, async result => {

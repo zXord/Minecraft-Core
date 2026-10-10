@@ -8,18 +8,40 @@
   let descriptor=null,assets=null,selected='',inspection=null,error=null,busy=false,progress=null;
   $: if (mounted && (serverId !== currentId || managed !== currentManaged)) reset();
   function reset(){currentId=serverId;currentManaged=managed;generation+=1;operation+=1;controller?.abort();descriptor=null;assets=null;selected='';inspection=null;error=null;progress=null;busy=false;if(managed&&serverId)refresh();}
-  async function run(action,apply,cancellable=false){
+  async function run(action,apply,cancellable=false,channel='Pairing status'){
     const id=serverId,epoch=generation,token=++operation;
     controller?.abort();const owned=cancellable?new AbortController():null;controller=owned;
     const current=()=>mounted&&id===serverId&&epoch===generation&&token===operation;
     busy=true;error=null;progress=cancellable?{phase:'inspecting'}:null;
-    try{const value=await action(id,{signal:owned?.signal,onProgress:event=>{if(current())progress=event;}});if(current())apply(value);}
-    catch(caught){if(current()){error=caught;if(caught.code==='PLAN_STALE'){inspection=null;assets=null;error={message:'The server or verification evidence changed during this request. Refresh the companion list and try again.'};}else if(caught.code==='SERVER_RUNNING'){error={message:'Stop the server before accepting this matching client pack. The inspected pack has not been paired.'};}}}
+    try{const value=await action(id,{signal:owned?.signal,current,publish:update=>{if(!current())return false;update();return true;},setChannel:value=>{channel=value;},onProgress:event=>{if(current())progress=event;}});if(current())apply(value);}
+    catch(caught){if(current()){
+      const code=typeof caught?.code==='string'&&/^[A-Z][A-Z_]{1,47}$/.test(caught.code)?caught.code:'CLIENT_PACK_UNAVAILABLE';
+      let guidance='Refresh the companion list and try again.';
+      if(code==='PLAN_STALE'||code==='CLIENT_PACK_SERVER_CHANGED'){
+        inspection=null;assets=null;selected='';
+        guidance=code==='PLAN_STALE'?'The server or verification evidence changed during this request. Refresh the companion list and try again.':"The server's managed mod files differ from the installed pack. Use Modpack Verify and Repair before installing or launching its matching client pack.";
+      }else if(code==='SERVER_RUNNING')guidance='Stop the server before accepting this matching client pack. The inspected pack has not been paired.';
+      error={channel,code,message:`${channel} failed (${code}). ${guidance}`};
+    }}
     finally{if(current()){busy=false;controller=null;progress=null;}}
   }
-  function refresh(){inspection=null;return run(async id=>({descriptor:await clientPackApi.getCompanion(id),assets:await clientPackApi.listCompanionAssets(id)}),value=>{descriptor=value.descriptor;assets=value.assets;selected='';});}
-  function inspect(){inspection=null;return run((id,options)=>clientPackApi.inspectCompanion({serverId:id,expectedServerFingerprint:assets.serverFingerprint,assetId:selected},options),value=>{inspection=value;},true);}
-  function accept(){return run(id=>clientPackApi.acceptCompanion({serverId:id,expectedServerFingerprint:inspection.serverFingerprint,inspectionId:inspection.inspectionId}),value=>{descriptor=value;inspection=null;});}
+  function refresh(){
+    descriptor=null;assets=null;selected='';inspection=null;
+    return run(async(id,{current,publish,setChannel})=>{
+      const snapshot=await clientPackApi.getCompanion(id);
+      if(!current())return;
+      if(!snapshot)throw {code:'CLIENT_PACK_UNAVAILABLE'};
+      if(!publish(()=>{descriptor=snapshot;}))return;
+      if(!current())return;
+      setChannel('Asset discovery');
+      const listing=await clientPackApi.listCompanionAssets(id);
+      if(!current())return;
+      if(listing.serverFingerprint!==snapshot.serverFingerprint)throw {code:'PLAN_STALE'};
+      return listing;
+    },value=>{assets=value;});
+  }
+  function inspect(){inspection=null;return run((id,options)=>clientPackApi.inspectCompanion({serverId:id,expectedServerFingerprint:assets.serverFingerprint,assetId:selected},options),value=>{inspection=value;},true,'Pack inspection');}
+  function accept(){return run(id=>clientPackApi.acceptCompanion({serverId:id,expectedServerFingerprint:inspection.serverFingerprint,inspectionId:inspection.inspectionId}),value=>{descriptor=value;inspection=null;},false,'Pairing acceptance');}
   function number(value){try{return BigInt(value).toLocaleString();}catch{return 'Unknown';}}
   onMount(()=>{mounted=true;});
   onDestroy(()=>{mounted=false;generation+=1;operation+=1;controller?.abort();});
@@ -27,9 +49,11 @@
 
 {#if managed}
 <section class="companion" aria-label="Matching client pack" aria-busy={busy}>
-  <p class="eyebrow">Matching client pack</p><h2>{descriptor?.status==='ready'?'Paired for this server release':'Pair a same-release client pack'}</h2>
+  <p class="eyebrow">Matching client pack</p><h2>{descriptor?.status==='ready'?(assets&&!error?'Paired for this server release':'Saved pairing for this server release'):descriptor?.status==='unpaired'?'Pair a same-release client pack':busy?'Loading pairing status':'Pairing status unavailable'}</h2>
   {#if error}<p role="alert">{error.message}</p>{/if}
   {#if descriptor}<p>Server release {descriptor.serverVersion}</p>{/if}
+  {#if descriptor?.status==='ready'&&(!assets||error)}<p>This is the saved pairing snapshot. Current server health is not currently verified; it does not authorize client installation or launch.</p>{/if}
+  {#if !descriptor&&!busy}<p>Pairing status could not be loaded. Refresh the companion list to retry.</p>{/if}
   {#if localArchive}<p>Local server archives remain supported. They cannot advertise a downloadable matching client pack; use an official GitHub or Modrinth release for companion pairing.</p>
   {:else if assets}
     {#if assets.assets.length===0}<p>No MRPACK client asset is available for this installed server release. Server installation is unaffected.</p>

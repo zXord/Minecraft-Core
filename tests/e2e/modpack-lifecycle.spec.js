@@ -671,7 +671,7 @@ test('managed modpack notifications stay on the Modpack tab and page instead of 
     const { page } = fixture;
     const rendererErrors = [];
     page.on('pageerror', error => rendererErrors.push(error.message));
-    expect(page.url()).toContain('/dist/index.html');
+    await expect(page).toHaveURL(new RegExp(process.env.MINECRAFT_CORE_DEV_SERVER_URL ? '^http://127\\.0\\.0\\.1:5173/' : '/dist/index\\.html'));
     await expect(page).toHaveTitle('Minecraft Core');
     await expect(page.locator('vite-error-overlay')).toHaveCount(0);
     const header = page.locator('.server-header');
@@ -740,6 +740,207 @@ test('managed modpack notifications stay on the Modpack tab and page instead of 
 
 const dashboardStarts = page => page.locator('.server-controls').getByRole('button', { name: 'Start', exact: true });
 const dashboardRecovery = page => page.getByRole('status', { name: 'Server recovery status' });
+
+async function startHeldRepair(fixture) {
+  const { page } = fixture;
+  await fixture.openModpack();
+  await page.getByRole('button', { name: 'Actions', exact: true }).click();
+  await page.getByRole('button', { name: 'Verify', exact: true }).click();
+  await expect(page.locator('section.outcome').getByRole('heading', { name: 'Differences found' })).toBeVisible();
+  await page.getByRole('button', { name: 'Return to server', exact: true }).click();
+  await page.getByRole('button', { name: 'Actions', exact: true }).click();
+  await page.getByRole('button', { name: 'Repair', exact: true }).click();
+  await page.getByRole('button', { name: /Local archive/u }).click();
+  await startReviewedArchive(page);
+  await expect(page.getByRole('heading', { name: 'Creating restore point', exact: true })).toBeVisible();
+  return fixture.controlHeldRepair({ kind: 'read' });
+}
+
+test('active-job navigation reattaches Repair and blocks both Starts through owned terminal settlement', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { holdRepairOwner: true } });
+  const errors = [];
+  try {
+    const { page } = fixture;
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+    const job = await startHeldRepair(fixture);
+    await page.locator('.server-tabs').getByRole('button', { name: /Dashboard/u }).click();
+    await expect(dashboardRecovery(page)).toContainText('Operation in progress');
+    await expect(dashboardStarts(page).nth(0)).toBeDisabled();
+    await expect(dashboardStarts(page).nth(1)).toBeDisabled();
+    await dashboardRecovery(page).getByRole('button', { name: 'View operation', exact: true }).click();
+    await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText(job.jobId);
+    await expect(page.getByRole('region', { name: 'Modpack recovery' })).toHaveCount(0);
+    expect(page.url()).toContain('http://127.0.0.1:5173');
+    await expect(page).toHaveTitle('Minecraft Core');
+    await expect(page.locator('vite-error-overlay')).toHaveCount(0);
+    await page.screenshot({ path: path.join(os.tmpdir(), 'task6-held-repair-navigation.png') });
+
+    const old = await fixture.controlHeldRepair({ kind: 'read' });
+    await fixture.controlHeldRepair({ kind: 'queue-poll', reply: { value: old, delayMs: 600 } });
+    await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'getJob' && call.jobId === job.jobId).length).toBeGreaterThan(0);
+    await fixture.controlHeldRepair({ kind: 'emit', event: { sequence: old.sequence + 5, phase: 'staging', cancellationRequested: true, progress: { percent: 50, message: 'Newer staging event', currentItem: null } } });
+    await expect(page.getByRole('heading', { name: 'Extracting and Reconciling files', exact: true })).toBeVisible();
+    await page.waitForTimeout(700);
+    await expect(page.getByRole('heading', { name: 'Extracting and Reconciling files', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Cancel before commit', exact: true })).toHaveCount(0);
+    const terminal = await fixture.controlHeldRepair({ kind: 'settle' });
+    await page.getByText('Technical operation log', { exact: true }).click();
+    await expect(page.getByLabel('Raw operation logs')).toContainText('Held Repair durable final log');
+    await fixture.controlHeldRepair({ kind: 'emit', event: { sequence: terminal.sequence, phase: 'completed', outcome: null, events: [] } });
+    await expect(page.getByLabel('Raw operation logs')).toContainText('Held Repair durable final log');
+    await page.locator('.server-tabs').getByRole('button', { name: /Dashboard/u }).click();
+    await expect(dashboardRecovery(page)).toContainText('Operation in progress');
+    await expect(dashboardStarts(page).nth(0)).toBeDisabled();
+    await expect(dashboardStarts(page).nth(1)).toBeDisabled();
+    const pollsAtUnmount = fixture.readState().lifecycleCalls.filter(call => call.method === 'getJob' && call.jobId === job.jobId).length;
+    await fixture.controlHeldRepair({ kind: 'release' });
+    await expect(dashboardStarts(page).nth(0)).toBeEnabled();
+    await expect(dashboardStarts(page).nth(1)).toBeEnabled();
+    await page.waitForTimeout(1300);
+    expect(fixture.readState().lifecycleCalls.filter(call => call.method === 'getJob' && call.jobId === job.jobId).length).toBe(pollsAtUnmount);
+    expect(errors).toEqual([]);
+  } finally { await fixture.close(); }
+});
+
+test('active-job navigation blocks unknown activity independently of recovery and canonical reads', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { activeFailureIds: ['server-e2e'] } });
+  try {
+    const { page } = fixture;
+    await expect(dashboardRecovery(page)).toContainText('Operation status unavailable');
+    await expect(dashboardStarts(page).nth(0)).toBeDisabled();
+    await expect(dashboardStarts(page).nth(1)).toBeDisabled();
+    await fixture.openModpack();
+    await expect(page.locator('.modpack-page strong').filter({ hasText: /^Operation status unavailable$/u })).toBeVisible();
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Verify', exact: true })).toHaveCount(0);
+  } finally { await fixture.close(); }
+});
+
+test('active-job navigation ignores A-B-A stale discovery success and rejection while canonical reads fail', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { holdRepairOwner: true },
+    secondaryServerState: { schemaVersion: 1, modpackManaged: false, lifecycleMode: 'unmanaged', source: null, runtime: null, installedAt: null, contentRevision: 0, managedFileCount: 0 } });
+  try {
+    const { page } = fixture;
+    const job = await startHeldRepair(fixture);
+    fixture.updateScenario({ refreshFixture: { holdRepairOwner: true, stateFailureIds: ['server-e2e'], historyFailureIds: ['server-e2e'] } });
+    for (const fail of [false, true]) {
+      const before = fixture.readState().lifecycleCalls.filter(call => call.method === 'getActiveJobs').length;
+      await fixture.controlHeldRepair({ kind: 'queue-active', reply: { fail, delayMs: 1600,
+        value: { serverId: 'server-e2e', items: [{ ownership: 'running', job: { ...job, jobId: 'stale-owned-job' } }] } } });
+      await fixture.controlHeldRepair({ kind: 'emit', event: { sequence: job.sequence, phase: 'snapshotting' } });
+      await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'getActiveJobs').length).toBeGreaterThan(before);
+      await page.getByRole('button', { name: '☰' }).click();
+      await page.locator('.instance-item').filter({ hasText: 'E2E Secondary Server' }).click();
+      await expect(page.getByRole('heading', { name: 'No managed modpack is attached' })).toBeVisible();
+      await page.locator('.instance-item').filter({ hasText: 'E2E Fixture Server' }).click();
+      await page.getByRole('button', { name: '☰' }).click();
+      await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText(job.jobId);
+      await page.waitForTimeout(1700);
+      await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText(job.jobId);
+      await expect(page.getByText('stale-owned-job', { exact: false })).toHaveCount(0);
+      await expect(page.locator('.modpack-page strong').filter({ hasText: /^Operation status unavailable$/u })).toHaveCount(0);
+      await expect(page.getByRole('region', { name: 'Modpack recovery' })).toHaveCount(0);
+    }
+    await fixture.controlHeldRepair({ kind: 'duplicate-owner' });
+    const owned = page.getByRole('region', { name: 'Owned operations' });
+    await expect(owned.getByRole('heading', { name: 'Choose an owned operation' })).toBeVisible();
+    await expect(owned.getByRole('button')).toHaveCount(2);
+    await owned.getByRole('button', { name: /second-owned-verify/u }).click();
+    await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText('second-owned-verify');
+  } finally { await fixture.close(); }
+});
+
+test('active-job review fix preserves freshest multi-owner state on same-job reselection and switch-away-back', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { holdRepairOwner: true } });
+  try {
+    const { page } = fixture;
+    const job = await startHeldRepair(fixture);
+    await fixture.controlHeldRepair({ kind: 'duplicate-owner' });
+    const owned = page.getByRole('region', { name: 'Owned operations' });
+    const repair = owned.getByRole('button', { name: new RegExp(job.jobId, 'u') });
+    const verify = owned.getByRole('button', { name: /second-owned-verify/u });
+    await expect(owned.getByRole('button')).toHaveCount(2);
+    const before = fixture.readState().lifecycleCalls.filter(call => call.method === 'getActiveJobs').length;
+    const log = { sequence: job.sequence + 4, jobId: job.jobId, channel: 'log', phase: 'staging', timestamp: job.createdAt,
+      message: 'Fresh multi-owner log', progress: null, currentItem: null, details: null };
+    await fixture.controlHeldRepair({ kind: 'emit', event: { sequence: job.sequence + 5, phase: 'staging', cancellationRequested: true,
+      progress: { percent: 50, message: 'Fresh selected state', currentItem: null }, events: [log] } });
+    await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'getActiveJobs').length).toBeGreaterThan(before);
+    await expect(page.getByRole('heading', { name: 'Extracting and Reconciling files', exact: true })).toBeVisible();
+    await repair.click();
+    await expect(page.getByRole('heading', { name: 'Extracting and Reconciling files', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Cancel before commit', exact: true })).toHaveCount(0);
+    await verify.click();
+    await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText('second-owned-verify');
+    await repair.click();
+    await expect(page.getByRole('heading', { name: 'Extracting and Reconciling files', exact: true })).toBeVisible();
+    await page.getByText('Technical operation log', { exact: true }).click();
+    await expect(page.getByLabel('Raw operation logs')).toContainText('Fresh multi-owner log');
+    await fixture.controlHeldRepair({ kind: 'emit', event: { sequence: job.sequence + 6, phase: 'failed', terminalAt: job.createdAt,
+      outcome: { status: 'failed', kind: 'nothing-changed', result: { serverUnchanged: true }, actions: [] } } });
+    await expect(page.getByRole('heading', { name: 'Stopped before server changes' })).toBeVisible();
+    await verify.click();
+    await repair.click();
+    await expect(page.getByRole('heading', { name: 'Stopped before server changes' })).toBeVisible();
+    await page.getByText('Technical operation log', { exact: true }).click();
+    await expect(page.getByLabel('Raw operation logs')).toContainText('Fresh multi-owner log');
+    await expect(page.locator('vite-error-overlay')).toHaveCount(0);
+  } finally { await fixture.close(); }
+});
+
+for (const scope of ['A-B-A', 'newer-job']) {
+  for (const fail of [false, true]) {
+    test(`active-job review fix ignores held parent Retry ${fail ? 'rejection' : 'success'} after ${scope}`, async () => {
+      const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { holdRepairOwner: true },
+        secondaryServerState: { schemaVersion: 1, modpackManaged: false, lifecycleMode: 'unmanaged', source: null, runtime: null, installedAt: null, contentRevision: 0, managedFileCount: 0 } });
+      try {
+        const { page } = fixture;
+        const job = await startHeldRepair(fixture);
+        const readsBeforeFailure = fixture.readState().lifecycleCalls.filter(call => call.method === 'getJob').length;
+        const failed = await fixture.controlHeldRepair({ kind: 'set-job', job: { sequence: job.sequence + 10, phase: 'failed', terminalAt: job.createdAt,
+          outcome: { status: 'failed', kind: 'nothing-changed', result: { serverUnchanged: true }, actions: [{ actionId: 'retry', opaqueRef: 'held-retry-ref' }] } } });
+        await expect(page.getByRole('heading', { name: 'Stopped before server changes' })).toBeVisible();
+        await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'getJob').length).toBeGreaterThan(readsBeforeFailure);
+        await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeEnabled();
+        await fixture.controlHeldRepair({ kind: 'queue-poll', reply: { hold: true, fail, value: { ...failed, jobId: 'stale-parent-retry-job' } } });
+        await page.getByRole('button', { name: 'Retry', exact: true }).click();
+        await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'heldGetJobEntered').length).toBe(1);
+        const held = fixture.readState().lifecycleCalls.find(call => call.method === 'heldGetJobEntered');
+        let expectedJobId = job.jobId;
+        if (scope === 'A-B-A') {
+          await page.getByRole('button', { name: '☰' }).click();
+          await page.locator('.instance-item').filter({ hasText: 'E2E Secondary Server' }).click();
+          await expect(page.getByRole('heading', { name: 'No managed modpack is attached' })).toBeVisible();
+          await page.locator('.instance-item').filter({ hasText: 'E2E Fixture Server' }).click();
+          await page.getByRole('button', { name: '☰' }).click();
+        } else {
+          expectedJobId = 'newer-owned-repair';
+          await fixture.controlHeldRepair({ kind: 'replace-owner', job: { jobId: expectedJobId, sequence: failed.sequence + 10,
+            phase: 'staging', terminalAt: null, outcome: null, progress: { percent: 60, message: 'Newer owned job', currentItem: null } } });
+        }
+        await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText(expectedJobId);
+        await page.evaluate(() => {
+          window.retryRaceViolations = [];
+          window.retryRaceObserver = new MutationObserver(() => {
+            const root = document.querySelector('.modpack-page');
+            if (root?.textContent?.includes('stale-parent-retry-job')) window.retryRaceViolations.push('stale job rendered');
+            if (root?.querySelector('.page-error')) window.retryRaceViolations.push('stale parent error rendered');
+          });
+          window.retryRaceObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+        });
+        await fixture.controlHeldRepair({ kind: 'release-poll', readId: held.readId });
+        await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'heldGetJobReleased').length).toBe(1);
+        await page.waitForTimeout(150);
+        await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText(expectedJobId);
+        await expect(page.getByText('stale-parent-retry-job', { exact: false })).toHaveCount(0);
+        await expect(page.locator('.page-error')).toHaveCount(0);
+        expect(await page.evaluate(() => { window.retryRaceObserver.disconnect(); return window.retryRaceViolations; })).toEqual([]);
+        await expect(page.locator('vite-error-overlay')).toHaveCount(0);
+      } finally { await fixture.close(); }
+    });
+  }
+}
 
 async function openDashboard(page) {
   await page.locator('.server-tabs').getByRole('button', { name: /Dashboard/u }).click();

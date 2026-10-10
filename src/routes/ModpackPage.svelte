@@ -2,6 +2,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { isPlanStaleError, ModpackApiError, modpackApi } from '../utils/modpacks/modpackApi.js';
   import { createServerRequestScope } from '../utils/modpacks/serverRequestScope.js';
+  import { mergePublicJob } from '../utils/modpacks/publicJobMerge.js';
   import ModpackOverview from '../components/modpacks/ModpackOverview.svelte';
   import ClientCompanionPanel from '../components/modpacks/ClientCompanionPanel.svelte';
   import ModpackVersionPanel from '../components/modpacks/ModpackVersionPanel.svelte';
@@ -81,15 +82,22 @@
   let refreshRequestSequence = 0;
   let pageMounted = false;
   let activeInspectionController = null;
+  let activeJobs = [];
+  let activityStatus = 'unknown';
+  let activityError = null;
+  let activityRequestSequence = 0;
+  let activityTimer = null;
+  let outcomeActionSequence = 0;
   const serverRequestScope = createServerRequestScope();
 
   $: serverId = currentInstance?.type === 'server' ? currentInstance.id || '' : '';
   $: if (serverId !== serverRequestScope.serverId) activateServer(serverId);
   $: isManaged = Boolean(state?.modpackManaged);
   $: loading = [stateStatus, historyStatus, recoveryStatus].some(status => ['unknown', 'loading'].includes(status));
-  $: lifecycleAvailable = stateStatus === 'ready' && historyStatus === 'ready' && recoveryStatus === 'ready' && !recoveryAction;
+  $: lifecycleAvailable = stateStatus === 'ready' && historyStatus === 'ready' && recoveryStatus === 'ready' && activityStatus === 'ready' && activeJobs.length === 0 && !recoveryAction;
   $: recoveryItems = Array.isArray(recovery) ? recovery : recovery?.items || [];
   $: currentServerRecoveryItems = filterRecoveryRecordsForServer(recoveryItems, serverId);
+  $: rememberOwnedJob(job);
   $: if (serverId !== rollbackOptionsServerId) {
     rollbackOptionsServerId = serverId;
     rollbackOptionsRequestSequence += 1;
@@ -131,6 +139,13 @@
     if (!activation.changed) return;
     invalidateInspectionRequests();
     refreshRequestSequence += 1;
+    activityRequestSequence += 1;
+    outcomeActionSequence += 1;
+    if (activityTimer) clearTimeout(activityTimer);
+    activityTimer = null;
+    activeJobs = [];
+    activityStatus = 'unknown';
+    activityError = null;
     rollbackOptionsRequestSequence += 1;
     state = null;
     history = [];
@@ -179,6 +194,65 @@
 
   function currentServerRequest(token) {
     return serverRequestScope.isCurrent(token, serverId);
+  }
+
+  function rememberOwnedJob(value) {
+    if (!value?.jobId || !activeJobs.some(item => item.job.jobId === value.jobId)) return;
+    activeJobs = activeJobs.map(item => item.job.jobId === value.jobId
+      ? { ...item, job: mergePublicJob(item.job, value, { durable: true }) } : item);
+  }
+
+  function setSelectedJob(value) {
+    rememberOwnedJob(job);
+    if (job?.jobId !== value?.jobId) outcomeActionSequence += 1;
+    job = value;
+  }
+
+  function selectOwnedJob(jobId) {
+    rememberOwnedJob(job);
+    const item = activeJobs.find(value => value.job.jobId === jobId);
+    if (!item) return;
+    setSelectedJob(job?.jobId === jobId ? mergePublicJob(job, item.job, { durable: true }) : item.job);
+    flow = 'job';
+  }
+
+  async function discoverActiveJobs() {
+    const token = serverRequestScope.begin();
+    const generation = ++activityRequestSequence;
+    if (activityTimer) clearTimeout(activityTimer);
+    activityTimer = null;
+    if (!pageMounted || !token.serverId) return;
+    if (activityStatus === 'unknown') activityStatus = 'loading';
+    const isCurrent = () => pageMounted && currentServerRequest(token) && generation === activityRequestSequence;
+    try {
+      const result = await modpackApi.getActiveJobs(token.serverId);
+      if (!isCurrent()) return;
+      if (result?.serverId !== token.serverId || !Array.isArray(result.items)) throw new Error('Operation status unavailable');
+      const previouslyOwned = activeJobs.length > 0;
+      const previousJobs = new Map(activeJobs.map(item => [item.job.jobId, item.job]));
+      activeJobs = result.items.map(item => {
+        let current = mergePublicJob(previousJobs.get(item.job.jobId), item.job, { durable: true });
+        if (current.jobId === job?.jobId) current = mergePublicJob(current, job, { durable: true });
+        return { ...item, job: current };
+      });
+      activityStatus = 'ready';
+      activityError = null;
+      if (activeJobs.length === 1) {
+        const discovered = activeJobs[0].job;
+        setSelectedJob(job?.jobId === discovered.jobId ? mergePublicJob(job, discovered, { durable: true }) : discovered);
+        flow = 'job';
+      } else if (activeJobs.length > 1 && !activeJobs.some(item => item.job.jobId === job?.jobId)) {
+        setSelectedJob(null);
+        flow = 'owned-jobs';
+      }
+      if (previouslyOwned && activeJobs.length === 0) void refresh(token.serverId);
+    } catch (caught) {
+      if (!isCurrent()) return;
+      activityStatus = 'error';
+      activityError = caught;
+    } finally {
+      if (isCurrent() && activeJobs.length > 0) activityTimer = setTimeout(discoverActiveJobs, 1200);
+    }
   }
 
   function invalidateInspectionRequests() {
@@ -357,6 +431,7 @@
     if (!requestedServerId || requestedServerId !== serverRequestScope.serverId || (recoveryAction && !afterRecovery)) return;
     const requestToken = serverRequestScope.begin();
     const requestSequence = ++refreshRequestSequence;
+    void discoverActiveJobs();
     stateStatus = historyStatus = recoveryStatus = 'loading';
     const isCurrent = () => pageMounted && currentServerRequest(requestToken) && requestSequence === refreshRequestSequence;
     const reads = [
@@ -752,8 +827,9 @@
       const nextVerification = await modpackApi.verify(requestToken.serverId);
       if (!currentServerRequest(requestToken)) return;
       verification = nextVerification;
-      job = verification;
+      setSelectedJob(verification);
       flow = 'job';
+      void discoverActiveJobs();
     } catch (caught) {
       if (!currentServerRequest(requestToken)) return;
       error = caught;
@@ -763,13 +839,20 @@
   }
 
   function handleStarted(event) {
-    job = event.detail.job;
+    setSelectedJob(event.detail.job);
     flow = 'job';
+    void discoverActiveJobs();
   }
 
   async function handleOutcomeAction(event) {
     const value = event.detail.value;
     if (value?.type !== 'outcome-action-result') return;
+    const originJobId = event.detail.job?.jobId;
+    if (!pageMounted || !originJobId || originJobId !== job?.jobId) return;
+    const requestToken = serverRequestScope.begin();
+    const sequence = ++outcomeActionSequence;
+    const isCurrent = () => pageMounted && currentServerRequest(requestToken) &&
+      sequence === outcomeActionSequence && job?.jobId === originJobId;
     const destination = value?.destination;
     if (!destination && !value?.operationRef) {
       if (['removed', 'retained'].includes(value?.status)) await refresh();
@@ -779,15 +862,17 @@
     if (value.operationRef) {
       if (event.detail.actionId === 'retry') {
         try {
-          job = await modpackApi.getJob(value.operationRef);
+          const resultJob = await modpackApi.getJob(value.operationRef);
+          if (!isCurrent()) return;
+          setSelectedJob(resultJob);
           flow = 'job';
         } catch (caught) {
-          error = caught;
+          if (isCurrent()) error = caught;
         }
       } else {
         flow = 'dashboard';
         activeSection = 'recovery';
-        job = null;
+        setSelectedJob(null);
         await refresh();
       }
       return;
@@ -803,7 +888,7 @@
     reviewedPlan = null;
     inspection = null;
     selectedRequest = null;
-    job = null;
+    setSelectedJob(null);
     if (destination.kind === 'details' || destination.kind === 'restore-point') activeSection = 'history';
     else if (destination.kind === 'recovery') activeSection = 'recovery';
     else if (destination.kind === 'server') activeSection = 'overview';
@@ -822,7 +907,7 @@
     inspection = null;
     selectedRequest = null;
     void discardInspectionSession(abandonedInspection).catch(() => {});
-    job = null;
+    // Keep the final job summary available while refreshing current authority.
     refresh();
   }
 
@@ -830,12 +915,21 @@
     pageMounted = true;
     cleanups = [modpackApi.onStateChanged(event => {
       if (event?.instanceId === serverId || event?.serverId === serverId) refresh();
+    }), modpackApi.onJobProgress(event => {
+      if (!pageMounted || event?.serverId !== serverId) return;
+      activeJobs = activeJobs.map(item => item.job.jobId === event.jobId
+        ? { ...item, job: mergePublicJob(item.job, event) } : item);
+      if (event.jobId === job?.jobId) job = mergePublicJob(job, event);
+      void discoverActiveJobs();
     })];
     if (serverId) refresh(serverId);
   });
   onDestroy(() => {
     pageMounted = false;
     refreshRequestSequence += 1;
+    activityRequestSequence += 1;
+    outcomeActionSequence += 1;
+    if (activityTimer) clearTimeout(activityTimer);
     invalidateInspectionRequests();
     const abandonedInspection = inspection;
     inspection = null;
@@ -869,7 +963,9 @@
 
   {#if error}<section class="mp-state error page-error" bind:this={errorRegion} tabindex="-1" aria-live="assertive"><strong>{error.code || 'Modpack action unavailable'}</strong><p>{error.message}</p><button class="mp-button" type="button" on:click={() => (error = null)}>Dismiss</button></section>{/if}
 
-  {#if activeSection !== 'recovery' && (recoveryStatus !== 'ready' || currentServerRecoveryItems.length > 0)}<ModpackRecoveryPanel {serverId} records={currentServerRecoveryItems} status={recoveryStatus} loadError={recoveryError} actionError={recoveryActionError} pendingAction={recoveryAction} onRefresh={() => refresh()} onRecover={recoverRecord} />{/if}
+  {#if activityStatus !== 'ready'}<section class="mp-panel mp-state" aria-live="polite"><strong>{activityStatus === 'error' ? 'Operation status unavailable' : 'Checking active operations…'}</strong><p>Operation ownership must be checked before new changes can start.</p>{#if activityError}<p>{activityError.message}</p>{/if}<button class="mp-button" type="button" on:click={discoverActiveJobs}>Retry operation status</button></section>{/if}
+  {#if activeJobs.length > 1}<section class="mp-panel mp-stack" aria-label="Owned operations"><h2>Choose an owned operation</h2><p>Multiple operations are owned by this process. New changes remain blocked.</p>{#each activeJobs as item (item.job.jobId)}<button class="mp-button" type="button" on:click={() => selectOwnedJob(item.job.jobId)}>{item.job.operationKind} · {item.job.jobId} · {item.ownership}</button>{/each}</section>{/if}
+  {#if activeJobs.length === 0 && activeSection !== 'recovery' && (recoveryStatus !== 'ready' || currentServerRecoveryItems.length > 0)}<ModpackRecoveryPanel {serverId} records={currentServerRecoveryItems} status={recoveryStatus} loadError={recoveryError} actionError={recoveryActionError} pendingAction={recoveryAction} onRefresh={() => refresh()} onRecover={recoverRecord} />{/if}
 
   {#if busy && preflightProgress && flow !== 'inspection'}
     <ModpackPlanningProgress progress={preflightProgress} />
@@ -910,7 +1006,7 @@
   {:else if flow === 'review'}
     <ModpackPlanReview {reviewedPlan} {operationKind} {busy} restorePointId={selectedRestorePointId} on:started={handleStarted} on:stale={refreshStaleReview} on:cancel={() => { reviewedPlan = null; flow = 'source'; }} />
   {:else if flow === 'job'}
-    <ModpackJobProgress {job} on:return={returnToDashboard} on:terminal={(event) => { if (event.detail.job.operationKind === 'verify') verification = event.detail.job; }} on:action={handleOutcomeAction} />
+    {#key job?.jobId}<ModpackJobProgress bind:job on:return={returnToDashboard} on:terminal={(event) => { if (event.detail.job.operationKind === 'verify') verification = event.detail.job; }} on:action={handleOutcomeAction} />{/key}
   {/if}
   {#if busy && inspectionProgress && flow !== 'github-assets' && !['inspection', 'review', 'job'].includes(flow)}
     <ModpackInspectionProgress progress={inspectionProgress} />

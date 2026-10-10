@@ -275,6 +275,8 @@ class MemoryOperationStore {
     if (this.failCreate) throw new ModpackError('COMMIT_FAILED', 'injected create failure');
     const record = {
       ...request,
+      type: 'minecraft-core-modpack-job', schemaVersion: 1, sequence: 0, swapStep: null,
+      createdAt: '2026-08-02T00:00:00.000Z', updatedAt: '2026-08-02T00:00:00.000Z', terminalAt: null,
       phase: 'queued',
       cancellationRequested: false,
       progress: null,
@@ -307,6 +309,10 @@ class MemoryOperationStore {
       operationKind: record.operationKind
     })) throw new ModpackError('PLAN_STALE', 'stale transition');
     Object.assign(record, patch, { phase: nextPhase });
+    record.sequence += 1;
+    if (['completed', 'cancelled', 'rolled-back', 'failed', 'recovery-required'].includes(nextPhase)) {
+      record.terminalAt = '2026-08-02T00:00:00.000Z';
+    }
     this.phaseHistory.get(jobId).push(nextPhase);
     if (patch.progress) this.progressHistory.get(jobId).push({ phase: nextPhase, ...structuredClone(patch.progress) });
     return deepFreeze(structuredClone(record));
@@ -499,6 +505,7 @@ function mutationFixture(operationKind, options = {}) {
     operationStore,
     mutationCoordinator,
     mutationRuntime,
+    instanceResolver: { async resolveInstance(instanceId) { return { instanceId }; } },
     outcomeActionIssuer,
     ...(options.yieldControl ? { yieldControl: options.yieldControl } : {})
   });
@@ -824,6 +831,97 @@ for (const operationKind of [
     }
   });
 }
+
+for (const [gateName, expectedPhase] of [['resolveInstance', 'queued'], ['createRestorePoint', 'snapshotting'], ['buildCandidate', 'staging']]) {
+  test(`active discovery retains the held ${expectedPhase} mutation owner and isolates other servers`, async () => {
+    const gate = { ...deferred(), entered: deferred() };
+    const fixture = mutationFixture('repair', { gates: { [gateName]: gate } });
+    const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+    try {
+      await gate.entered.promise;
+      const result = await fixture.service.getActiveJobs('server-one');
+      assert.equal(fixture.service.hasActiveJob(queued.jobId), true);
+      assert.equal(result.serverId, 'server-one');
+      assert.equal(result.items.length, 1);
+      assert.equal(result.items[0].ownership, 'running');
+      assert.equal(result.items[0].job.jobId, queued.jobId);
+      assert.equal(result.items[0].job.phase, expectedPhase);
+      assert.deepEqual(await fixture.service.getActiveJobs('server-two'), { serverId: 'server-two', items: [] });
+    } finally { gate.resolve(); }
+    await fixture.service.getJob(queued.jobId);
+  });
+}
+
+test('active discovery retains terminal settlement until finally releases the exact owner', async () => {
+  const gate = { ...deferred(), entered: deferred() };
+  const fixture = mutationFixture('repair', { gates: { buildCandidate: gate } });
+  const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+  await gate.entered.promise;
+  const owner = fixture.service.activeOperations.get(queued.jobId);
+  const terminalPublication = deferred();
+  const terminalEntered = deferred();
+  const transition = fixture.operationStore.transition.bind(fixture.operationStore);
+  fixture.operationStore.transition = async (id, request) => {
+    const value = await transition(id, request);
+    if (request.nextPhase === 'completed') { terminalEntered.resolve(); await terminalPublication.promise; }
+    return value;
+  };
+  try {
+    gate.resolve();
+    await terminalEntered.promise;
+    const result = await fixture.service.getActiveJobs('server-one');
+    assert.equal(result.items[0].ownership, 'settling');
+    assert.equal(fixture.service.activeOperations.get(queued.jobId), owner);
+  } finally { terminalPublication.resolve(); gate.resolve(); }
+  await owner.settled;
+  assert.equal(fixture.service.hasActiveJob(queued.jobId), false);
+  assert.deepEqual(await fixture.service.getActiveJobs('server-one'), { serverId: 'server-one', items: [] });
+});
+
+test('active discovery rejects missing corrupt and mismatched owned DTOs', async () => {
+  const gate = { ...deferred(), entered: deferred() };
+  const fixture = mutationFixture('repair', { gates: { buildCandidate: gate } });
+  const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+  await gate.entered.promise;
+  const get = fixture.operationStore.get.bind(fixture.operationStore);
+  const good = await get(queued.jobId);
+  try {
+    for (const value of [null, { ...good, sequence: -1 }, { ...good, serverId: 'server-two' }, { ...good, jobId: 'job-other' }]) {
+      fixture.operationStore.get = async () => value;
+      await assert.rejects(fixture.service.getActiveJobs('server-one'));
+    }
+  } finally { fixture.operationStore.get = get; gate.resolve(); }
+  await fixture.service.activeOperations.get(queued.jobId)?.settled;
+});
+
+test('active discovery rechecks owner release and replacement after durable reads', async () => {
+  const gate = { ...deferred(), entered: deferred() };
+  const fixture = mutationFixture('repair', { gates: { buildCandidate: gate } });
+  const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+  await gate.entered.promise;
+  const owner = fixture.service.activeOperations.get(queued.jobId);
+  const get = fixture.operationStore.get.bind(fixture.operationStore);
+  try {
+    let replacement;
+    let reads = 0;
+    fixture.operationStore.get = async id => {
+      const value = await get(id);
+      if (++reads === 1) {
+        replacement = { ...owner };
+        fixture.service.activeOperations.set(id, replacement);
+        return { ...value, phase: 'snapshotting' };
+      }
+      return value;
+    };
+    const result = await fixture.service.getActiveJobs('server-one');
+    assert.equal(reads, 2);
+    assert.equal(result.items[0].job.phase, 'staging');
+    assert.equal(fixture.service.activeOperations.get(queued.jobId), replacement);
+    fixture.operationStore.get = async id => { const value = await get(id); fixture.service.activeOperations.delete(id); return value; };
+    assert.deepEqual(await fixture.service.getActiveJobs('server-one'), { serverId: 'server-one', items: [] });
+  } finally { fixture.operationStore.get = get; fixture.service.activeOperations.set(queued.jobId, owner); gate.resolve(); }
+  await owner.settled;
+});
 
 const snapshotActivities = [
   ['prepare-scope', 'scope', null], ['creation-scope', 'scope', null],
@@ -1959,6 +2057,31 @@ test('unproven runtime shutdown reports recovery with the original error and ret
   assert.equal(fixture.calls.filter(([name]) => name === 'quarantine').length, 1);
   assert.equal(fixture.calls.some(([name]) => name === 'restorePriorState'), false);
   assert.deepEqual(fixture.released, []);
+});
+
+test('live boundary diagnostics publish bounded primary failure after publication and raw fallback makes no rollback claim', async t => {
+  for (const diagnostic of [null, { stage: 'live-handoff', reason: 'unknown' }, { stage: 'live-health-publication', reason: 'unknown' }]) {
+    await t.test(diagnostic?.stage || 'raw fallback', async () => {
+      const failure = new Error('private C:\\server\\publication secret failure');
+      if (diagnostic) failure.runtimeDiagnostic = diagnostic;
+      const fixture = mutationFixture('update', { failureAt: 'validateLive', failureErrors: { validateLive: failure } });
+      const queued = await fixture.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: fixture.choices });
+      await fixture.service.activeOperations.get(queued.jobId).settled;
+      const settled = await fixture.operationStore.get(queued.jobId);
+      assert.equal(fixture.calls.some(([name]) => name === 'commitCandidate'), true);
+      assert.equal(fixture.calls.some(([name]) => name === 'rollback'), true);
+      const events = settled.events.filter(event => event.details?.errorCode === 'COMMIT_FAILED');
+      assert.equal(events.length, 1);
+      if (diagnostic) {
+        assert.deepEqual(events[0].details.runtimeDiagnostic, diagnostic);
+        assert.equal(events[0].message, `COMMIT_FAILED: Runtime preparation stopped (${diagnostic.stage}; unknown)`);
+      } else {
+        assert.equal(events[0].message, 'The operation stopped');
+        assert.equal(Object.hasOwn(events[0].details, 'runtimeDiagnostic'), false);
+      }
+      assert.doesNotMatch(JSON.stringify(settled), /private|secret|before the server changed/);
+    });
+  }
 });
 
 test('exact snapshot diagnostic roundtrip uses production lifecycle, durable store and IPC with closed data only', { timeout: 10000 }, async t => {

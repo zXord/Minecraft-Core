@@ -96,6 +96,8 @@ test.beforeEach(async ({ page }) => {
     };
     const state = window.controlsTest;
     state.recovery = [];
+    state.active = [];
+    state.activeError = false;
     state.recoveryReplies = [];
     state.pendingRecovery = [];
     state.listeners = {};
@@ -120,6 +122,10 @@ test.beforeEach(async ({ page }) => {
       removeAllListeners(channel) { state.listeners[channel] = []; },
       async invoke(channel, request) {
         state.requests.push({ channel, request });
+        if (channel === 'modpacks:get-active-jobs') {
+          if (state.activeError) throw new Error('activity unavailable');
+          return { ok: true, value: { serverId: request.serverId, items: state.active } };
+        }
         if (channel === 'modpacks:list-recovery') {
           const reply = state.recoveryReplies.shift() || { value: state.recovery };
           if (reply.hold) await new Promise((resolve, reject) => state.pendingRecovery.push({ resolve, reject }));
@@ -253,7 +259,7 @@ for (const scope of ['server', 'generation', 'path']) {
   }
 }
 
-test('only exact-server terminal events refresh once and refreshed empty recovery clears restriction', async ({ page }) => {
+test('only exact-server activity events refresh once per update and refreshed empty recovery clears restriction', async ({ page }) => {
   await show(page, 'alpha', true);
   await expect(starts(page).nth(0)).toBeEnabled();
   await page.evaluate(() => {
@@ -262,16 +268,21 @@ test('only exact-server terminal events refresh once and refreshed empty recover
     const emit = value => state.listeners['modpacks:job-progress'].forEach(handler => handler(value));
     emit({ jobId: 'other', serverId: 'beta', phase: 'failed' });
     emit({ jobId: 'missing', phase: 'failed' });
-    emit({ jobId: 'working', serverId: 'alpha', phase: 'staging' });
   });
   expect(await page.evaluate(() => window.controlsTest.requests.filter(value => value.channel === 'modpacks:list-recovery').length)).toBe(1);
+  await page.evaluate(() => {
+    const event = { jobId: 'working', serverId: 'alpha', phase: 'staging' };
+    window.controlsTest.listeners['modpacks:job-progress'].forEach(handler => { handler(event); handler(event); });
+  });
+  await expect(recoveryStatus(page)).toContainText('Recovery is pending');
+  expect(await page.evaluate(() => window.controlsTest.requests.filter(value => value.channel === 'modpacks:list-recovery').length)).toBe(2);
   await page.evaluate(() => {
     const state = window.controlsTest;
     const event = { jobId: 'failed-cleanup', serverId: 'alpha', phase: 'failed' };
     state.listeners['modpacks:job-progress'].forEach(handler => { handler(event); handler(event); });
   });
   await expect(recoveryStatus(page)).toContainText('Recovery is pending');
-  expect(await page.evaluate(() => window.controlsTest.requests.filter(value => value.channel === 'modpacks:list-recovery').length)).toBe(2);
+  expect(await page.evaluate(() => window.controlsTest.requests.filter(value => value.channel === 'modpacks:list-recovery').length)).toBe(3);
   await page.evaluate(() => {
     window.controlsFixture.hide();
     window.controlsTest.recovery = [];
@@ -334,6 +345,37 @@ test('pending recovery keeps existing running-server Stop and Kill available', a
   await expect(page.locator('.minecraft-server-section').getByRole('button', { name: 'Kill', exact: true })).toBeEnabled();
   await expect(page.locator('.management-compact').getByRole('button', { name: 'Stop', exact: true })).toBeEnabled();
 });
+
+test('active-job navigation polls owner settlement independently of a held recovery read', async ({ page }) => {
+  await page.evaluate(() => {
+    window.controlsTest.active = [{ ownership: 'settling', job: { jobId: 'owned-job', serverId: 'alpha' } }];
+    window.controlsTest.recoveryReplies.push({ hold: true, value: [] });
+  });
+  await show(page, 'alpha', true);
+  await expect(recoveryStatus(page)).toContainText('Operation in progress');
+  await page.evaluate(() => { window.controlsTest.active = []; });
+  await expect.poll(() => page.evaluate(() => window.controlsTest.requests.filter(value => value.channel === 'modpacks:get-active-jobs').length)).toBeGreaterThan(1);
+  await expect(page.locator('.server-warning-banner').filter({ hasText: 'Operation in progress' })).toHaveCount(0);
+  await page.evaluate(() => window.controlsTest.pendingRecovery[0].resolve());
+  await expect(starts(page).nth(0)).toBeEnabled();
+});
+
+for (const activity of ['running', 'settling', 'unknown']) {
+  test(`active-job navigation blocks local auto-start when activity is ${activity}`, async ({ page }) => {
+    await page.evaluate(activity => {
+      window.appStartupCompleted = false;
+      window.controlsTest.autoStart = true;
+      window.controlsTest.activeError = activity === 'unknown';
+      window.controlsTest.active = activity === 'unknown' ? [] : [{ ownership: activity, job: { jobId: 'owned-job', serverId: 'alpha' } }];
+    }, activity);
+    await show(page, 'alpha', true);
+    await expect(recoveryStatus(page)).toContainText(activity === 'unknown' ? 'Operation status unavailable' : 'Operation in progress');
+    await expect(starts(page).nth(0)).toBeDisabled();
+    await expect(starts(page).nth(1)).toBeDisabled();
+    await page.waitForTimeout(200);
+    expect(await startCalls(page)).toEqual([]);
+  });
+}
 
 for (const initial of ['empty', 'pending', 'error', 'switch', 'destroy']) {
   test(`one-time local auto-start waits for fresh initial recovery: ${initial}`, async ({ page }) => {

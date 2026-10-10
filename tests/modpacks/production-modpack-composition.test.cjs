@@ -170,6 +170,23 @@ function fixture(t, { useDefaultMutationRuntime = false, useDefaultArchiveRuntim
   };
 }
 
+test('production active discovery uses registration authority without reading a swapping canonical tree and shares recovery ownership', async t => {
+  const f = fixture(t);
+  f.input.store.set('instances', [{ id: 'server-one', type: 'server', path: path.join(f.input.userDataPath, 'temporarily-swapping') }]);
+  f.input.instanceResolver.resolveInstance = async () => { throw new Error('canonical tree is unavailable during swap'); };
+  const composition = await createProductionModpackComposition(f.input);
+  t.after(() => composition.dispose());
+  await composition.initialize();
+  assert.deepEqual(await composition.lifecycleService.getActiveJobs('server-one'), { serverId: 'server-one', items: [] });
+  await assert.rejects(composition.lifecycleService.getActiveJobs('unknown-server'));
+  const record = { jobId: 'job-owned', operationKind: 'repair', phase: 'cleanup', swapStep: 'candidate-published', target: { kind: 'existing', stableServerId: 'server-one', path: path.join(f.input.userDataPath, 'temporarily-swapping') } };
+  f.input.rawRecoveryServices.registry.listActive = async () => [record];
+  composition.lifecycleService.activeOperations.set('job-owned', { serverId: 'server-one' });
+  assert.deepEqual(await composition.recoveryService.listRecovery(), { items: [] });
+  composition.lifecycleService.activeOperations.delete('job-owned');
+  assert.equal((await composition.recoveryService.listRecovery()).items.length, 1);
+});
+
 test('production composition exposes guarded client services and unavailable pairing does not break initialization', async t => {
   const f = fixture(t);
   const registryRoot = path.join(f.input.userDataPath, 'client-packs');

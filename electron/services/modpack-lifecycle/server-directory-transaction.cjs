@@ -8,7 +8,7 @@ const { performance } = require('node:perf_hooks');
 const { MAX_FLUSH_DIRECTORIES } = require('../../utils/durable-fs.cjs');
 const { isNetworkAccess } = require('../../utils/server-network-properties.cjs');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
-const { normalizeRuntimeDiagnostic, runRuntimeStage } = require('../runtime-diagnostic.cjs');
+const { normalizeRuntimeDiagnostic, runRuntimeStage, runRuntimeStageSync } = require('../runtime-diagnostic.cjs');
 const {
   MAX_SERVER_HEALTH_TIMEOUT_MS,
   MAX_SERVER_PROPERTIES_BYTES
@@ -2110,7 +2110,7 @@ async function markCommittedHealthy(contextValue) {
     const targetRunning = record.outcome?.runtimePolicy?.targetRunning ?? record.priorRuntime.running;
     const validation = context.validateLive === false
       ? { evidence: { skipped: true, reason: 'unmanaged-files-only' }, handoff: null }
-      : await context.healthValidator.validateLive({
+      : await runRuntimeStage('live-health-call', () => context.healthValidator.validateLive({
           instanceId: context.stableInstanceId,
           jobId: context.jobId,
           keepRunning: targetRunning,
@@ -2120,16 +2120,18 @@ async function markCommittedHealthy(contextValue) {
           port: context.port,
           runtime: context.runtime,
           serverPath: context.targetPath,
+          captureBootDiagnostic: true,
           signal: undefined,
           timeoutMs: context.healthTimeoutMs
-        });
+        }));
     let event;
     let adoptedHandoff = null;
     try {
-      await assertExactFileSnapshot(context, context.targetPath, 'server.properties', canonicalProperties);
-      event = revisionEvent(context, record);
+      await runRuntimeStage('live-properties-check', () =>
+        assertExactFileSnapshot(context, context.targetPath, 'server.properties', canonicalProperties));
+      event = runRuntimeStageSync('live-revision-event', () => revisionEvent(context, record));
       if (targetRunning && context.validateLive !== false) {
-        adoptedHandoff = await adoptExistingValidatedHandoff(context, validation?.handoff);
+        adoptedHandoff = await runRuntimeStage('live-handoff', () => adoptExistingValidatedHandoff(context, validation?.handoff));
       }
     } catch (error) {
       if (validation?.handoff && !adoptedHandoff) {
@@ -2137,7 +2139,7 @@ async function markCommittedHealthy(contextValue) {
       }
       throw error;
     }
-    record = await context.recoveryRegistry.transition(context.jobId, {
+    record = await runRuntimeStage('live-health-publication', () => context.recoveryRegistry.transition(context.jobId, {
       expectedPhase: 'validating-live',
       nextPhase: 'committed-healthy',
       patch: {
@@ -2155,7 +2157,7 @@ async function markCommittedHealthy(contextValue) {
           swap: { step: 'candidate-published' }
         })
       }
-    });
+    }));
     if (journalRecord.phase === 'validating-live') {
       await owned.journal.transition(owned.locations.journalPath, {
         expectedPhase: 'validating-live',

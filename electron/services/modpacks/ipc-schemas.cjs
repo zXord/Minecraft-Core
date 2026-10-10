@@ -2,6 +2,7 @@ const Ajv = require('ajv');
 const { strictJsonClone } = require('../../utils/durable-fs.cjs');
 const { ModpackError, FAILURE_CODES, PUBLIC_ERROR_DETAILS_BY_CODE, deepFreeze, isValidPublicErrorResult } = require('./errors.cjs');
 const { normalizeRuntimeTuple } = require('./contracts.cjs');
+const { validatePublicJob, TERMINAL_PHASES } = require('../modpack-lifecycle/operation-store.cjs');
 
 const ajv = new Ajv({ allErrors: true, strict: true });
 
@@ -61,7 +62,7 @@ const MODPACK_INVOKE_CHANNELS = Object.freeze([
   'modpacks:search-catalog', 'modpacks:get-project', 'modpacks:list-versions', 'modpacks:list-github-releases',
   'modpacks:list-github-assets', 'modpacks:select-local-archive', 'modpacks:reserve-server-destination',
   'modpacks:release-server-destination', 'modpacks:inspect', 'modpacks:cancel-inspection', 'modpacks:preflight',
-  'modpacks:preflight-management', 'modpacks:start-operation', 'modpacks:cancel-job', 'modpacks:get-job', 'modpacks:get-state',
+  'modpacks:preflight-management', 'modpacks:start-operation', 'modpacks:cancel-job', 'modpacks:get-job', 'modpacks:get-active-jobs', 'modpacks:get-state',
   'modpacks:list-history', 'modpacks:list-rollback-options', 'modpacks:list-recovery', 'modpacks:recover', 'modpacks:list-notifications',
   'modpacks:ack-notification', 'modpacks:check-updates', 'modpacks:update-tracking', 'modpacks:verify',
   'modpacks:perform-safe-action'
@@ -253,6 +254,7 @@ const requestSchemas = Object.freeze({
   'modpacks:start-operation': closed({ planId: shortIdSchema, planFingerprint: fingerprintSchema, choices: executionChoicesSchema }),
   'modpacks:cancel-job': closed({ jobId: shortIdSchema }),
   'modpacks:get-job': closed({ jobId: shortIdSchema }),
+  'modpacks:get-active-jobs': closed({ serverId: shortIdSchema }),
   'modpacks:get-state': closed({ serverId: shortIdSchema }),
   'modpacks:list-history': closed({
     serverId: shortIdSchema,
@@ -278,6 +280,10 @@ const requestValidators = Object.freeze(Object.fromEntries(MODPACK_INVOKE_CHANNE
   channel, ajv.compile(requestSchemas[channel])
 ])));
 const resultValidator = ajv.compile(resultSchema);
+const activeJobsValidator = ajv.compile(closed({
+  serverId: shortIdSchema,
+  items: { type: 'array', maxItems: 10000, items: closed({ ownership: { enum: ['running', 'settling'] }, job: { $ref: 'minecraft-core-safe-json' } }) }
+}));
 const eventValidator = ajv.compile({ $ref: 'minecraft-core-safe-json' });
 const inspectionProgressEventValidator = ajv.compile(closed({
   requestId: shortIdSchema,
@@ -378,13 +384,24 @@ function validateModpackIpcRequest(channel, value) {
   return deepFreeze(candidate);
 }
 
-function validateModpackIpcResult(channel, value) {
+function validateModpackIpcResult(channel, value, request = null) {
   if (!MODPACK_INVOKE_CHANNELS.includes(channel)) throw new ModpackError('INVALID_REQUEST', 'Modpack IPC channel is invalid');
   const candidate = cloneJson(value);
   if (!resultValidator(candidate) || (candidate.ok === false && !isValidPublicErrorResult(candidate))) {
     throw new ModpackError('INVALID_REQUEST', 'Modpack IPC result is invalid');
   }
   if (candidate.ok) assertNoAuthority(candidate.value, { channel, output: true }, 'result');
+  if (candidate.ok && channel === 'modpacks:get-active-jobs') {
+    const result = candidate.value;
+    if (!activeJobsValidator(result) || (request !== null && result.serverId !== request.serverId)) throw new ModpackError('INVALID_REQUEST', 'Active operation status is invalid');
+    const ids = new Set();
+    for (const item of result.items) {
+      const job = validatePublicJob(item.job);
+      if (job.serverId !== result.serverId || ids.has(job.jobId) ||
+          (item.ownership === 'settling') !== TERMINAL_PHASES.includes(job.phase)) throw new ModpackError('INVALID_REQUEST', 'Active operation status is invalid');
+      ids.add(job.jobId);
+    }
+  }
   return deepFreeze(candidate);
 }
 

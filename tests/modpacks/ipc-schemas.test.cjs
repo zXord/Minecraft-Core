@@ -8,6 +8,32 @@ const {
   validateSchema
 } = require('../../electron/services/modpacks/ipc-schemas.cjs');
 
+function activeJob() {
+  return { type: 'minecraft-core-modpack-job', schemaVersion: 1, sequence: 0, jobId: 'job-one',
+    operationKind: 'repair', serverId: 'server-one', planFingerprint: null, phase: 'queued', swapStep: null,
+    progress: null, cancellationRequested: false, createdAt: '2026-10-10T00:00:00.000Z',
+    updatedAt: '2026-10-10T00:00:00.000Z', terminalAt: null, outcome: null, events: [] };
+}
+
+test('active jobs transport closes selector result ownership and public job bindings', () => {
+  const channel = 'modpacks:get-active-jobs';
+  assert.deepEqual(validateModpackIpcRequest(channel, { serverId: 'server-one' }), { serverId: 'server-one' });
+  for (const request of [{}, { serverId: 'server-one', extra: true }, { serverId: 'server-one', path: 'C:\\private' }]) {
+    assert.throws(() => validateModpackIpcRequest(channel, request));
+  }
+  const value = { serverId: 'server-one', items: [{ ownership: 'running', job: activeJob() }] };
+  assert.deepEqual(validateModpackIpcResult(channel, { ok: true, value }).value, value);
+  for (const bad of [
+    { ...value, extra: true },
+    { ...value, items: [{ ownership: 'unknown', job: activeJob() }] },
+    { ...value, items: [{ ownership: 'settling', job: activeJob() }] },
+    { ...value, items: [{ ownership: 'running', job: { ...activeJob(), serverId: 'server-two' } }] },
+    { ...value, items: [{ ownership: 'running', job: { ...activeJob(), serverPath: 'C:\\private' } }] },
+    { ...value, items: [{ ownership: 'running', job: { ...activeJob(), phase: 'bogus' } }] }
+  ]) assert.throws(() => validateModpackIpcResult(channel, { ok: true, value: bad }));
+  assert.throws(() => validateModpackIpcResult(channel, { ok: true, value }, { serverId: 'server-two' }));
+});
+
 test('schema validation clones and freezes a valid runtime tuple', () => {
   const input = {
     minecraftVersion: '1.21.1', loaderFamily: 'fabric', loaderVersion: '0.16.14', javaMajor: 21, os: 'win32', architecture: 'x64'

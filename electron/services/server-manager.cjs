@@ -10,6 +10,7 @@ const { ServerJavaManager } = require('./server-java-manager.cjs');
 const { readServerConfig, getDefaultServerConfig, detectMinecraftVersion } = require('../utils/config-manager.cjs');
 const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
 const { normalizeRuntimeTuple } = require('./modpacks/contracts.cjs');
+const { normalizeServerDirectoryPath } = require('./modpack-lifecycle/server-directory-identity.cjs');
 const { syncServerPort } = require('./server-launcher.cjs');
 const { launchServerProcess } = require('./server-process-runner.cjs');
 const { runManagedRuntimeVerificationWorker } = require('./managed-runtime-worker-client.cjs');
@@ -752,6 +753,15 @@ function reportStartFailure(state, startLease, targetPath, error, { releaseLease
   };
 }
 
+function sameLifecycleServerRoot(left, right) {
+  try {
+    return normalizeServerDirectoryPath(left).toLocaleLowerCase('en-US') ===
+      normalizeServerDirectoryPath(right).toLocaleLowerCase('en-US');
+  } catch {
+    return false;
+  }
+}
+
 function adoptValidatedLifecycleProcess(request) {
   const allowedKeys = new Set([
     'eventId', 'handoff', 'instanceId', 'jobId', 'maxRam', 'port', 'runtime', 'serverPath'
@@ -771,7 +781,7 @@ function adoptValidatedLifecycleProcess(request) {
   }
   const existingAdoption = lifecycleAdoptions.get(request.eventId);
   if (existingAdoption) {
-    if (existingAdoption.instanceId !== request.instanceId || existingAdoption.serverPath !== request.serverPath ||
+    if (existingAdoption.instanceId !== request.instanceId || !sameLifecycleServerRoot(existingAdoption.serverPath, request.serverPath) ||
         !existingAdoption.processHandle.isLive()) throw new Error('Validated lifecycle handoff is stale');
     return existingAdoption.result;
   }
@@ -783,13 +793,13 @@ function adoptValidatedLifecycleProcess(request) {
       !child || child.pid !== processHandle.pid || !child.stdout || !child.stderr || !child.stdin ||
       typeof child.on !== 'function' || !startLease || startLease.kind !== 'start' ||
       startLease.operation !== 'server-health-live' || startLease.operationId !== processHandle.operationId ||
-      startLease.instanceId !== request.instanceId || startLease.serverPath !== request.serverPath ||
+      startLease.instanceId !== request.instanceId || !sameLifecycleServerRoot(startLease.serverPath, request.serverPath) ||
       typeof startLease.assertOwnedPath !== 'function' || typeof startLease.release !== 'function') {
     throw new Error('Validated lifecycle handoff cannot be proven');
   }
   startLease.assertOwnedPath(request.serverPath);
   if (Array.from(serverStates.values()).some(item => item.process === child ||
-      (item.process && (item.instanceId === request.instanceId || item.targetPath === request.serverPath)))) {
+      (item.process && (item.instanceId === request.instanceId || sameLifecycleServerRoot(item.targetPath, request.serverPath))))) {
     throw new Error('A different managed process already owns this server');
   }
   const state = getOrCreateState({ instanceId: request.instanceId, targetPath: request.serverPath });

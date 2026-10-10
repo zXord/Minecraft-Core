@@ -64,6 +64,45 @@ async function start(page, status = 'install-required', kind = 'client') {
   if (kind !== 'client') await page.evaluate(kind => window.show(kind,'a'),kind);
 }
 
+async function companionEvidence(page, label, errors) {
+  if (!process.env.COMPANION_WARNING_EVIDENCE) return;
+  const prefix = path.join(process.env.COMPANION_WARNING_EVIDENCE, `${process.env.COMPANION_WARNING_PHASE ?? 'fixture'}-${label}`);
+  await page.screenshot({path:`${prefix}.png`,fullPage:true});
+  await fs.writeFile(`${prefix}.json`,JSON.stringify({url:page.url(),...await page.evaluate(()=>({
+    title:document.title,panel:document.querySelector('section[aria-label="Matching client pack"]')?.innerText,
+    busy:document.querySelector('section[aria-label="Matching client pack"]')?.getAttribute('aria-busy'),
+    overlays:document.querySelectorAll('vite-error-overlay, nextjs-portal, #webpack-dev-server-client-overlay').length
+  })),errors},null,2));
+}
+
+test('companion first-mount saved pairing survives asset discovery PLAN_STALE and ordinary Refresh recovers', async ({page}) => {
+  const errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  page.on('console',message=>{if(['error','warning'].includes(message.type()))errors.push(message.text());});
+  await start(page);
+  await page.evaluate(() => {
+    window.companionDescriptor=window.descriptor;
+    window.fail={'client-packs:list-companion-assets':{code:'PLAN_STALE',message:'PRIVATE fixture list proof changed'}};
+    window.show('companion','a');
+  });
+  await expect(page.getByRole('alert')).toBeVisible();
+  await companionEvidence(page,'partial-list-failure',errors);
+  await expect(page.getByRole('heading',{name:'Saved pairing for this server release'})).toBeVisible();
+  await expect(page.getByText('Server release 0.13.4',{exact:true})).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText(/Asset discovery.*PLAN_STALE/);
+  await expect(page.getByRole('alert')).not.toContainText('PRIVATE');
+  await expect(page.getByText(/not currently verified/i)).toBeVisible();
+  await expect(page.getByRole('button',{name:/Inspect selected pack|Accept matching client pack/})).toHaveCount(0);
+  await page.evaluate(()=>window.fail={});
+  await page.getByRole('button',{name:'Refresh companion list'}).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('heading',{name:'Paired for this server release'})).toBeVisible();
+  await expect(page.getByLabel('pack-0.13.4.mrpack')).toBeVisible();
+  await companionEvidence(page,'ordinary-refresh-recovered',errors);
+  expect(await page.evaluate(()=>window.calls.filter(call=>/inspect-companion|accept-companion/.test(call.channel)))).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
 test('pairing requires explicit same-release asset inspection and runtime review', async ({page}) => {
   await start(page,'install-required','companion');
   await expect(page.getByText('pack-0.13.4.mrpack')).toBeVisible();
@@ -81,7 +120,7 @@ test('PLAN_STALE freshness warning clears after refreshing the unchanged compani
     window.fail = {'client-packs:get-companion':{code:'PLAN_STALE',message:'Freshness proof changed'}};
     window.show('companion','a');
   });
-  await expect(page.getByRole('alert')).toHaveText('The server or verification evidence changed during this request. Refresh the companion list and try again.');
+  await expect(page.getByRole('alert')).toContainText(/Pairing status.*PLAN_STALE.*Refresh/);
 
   await page.evaluate(() => {window.fail={};});
   await page.getByRole('button',{name:'Refresh companion list'}).click();
@@ -90,6 +129,208 @@ test('PLAN_STALE freshness warning clears after refreshing the unchanged compani
   const calls = await page.evaluate(() => window.calls.map(call=>call.channel));
   expect(calls.filter(channel=>channel==='client-packs:inspect-companion')).toHaveLength(0);
   expect(calls.filter(channel=>channel==='client-packs:accept-companion')).toHaveLength(0);
+});
+
+const companionPanel = page => page.getByRole('region',{name:'Matching client pack'});
+const refreshCompanion = page => page.getByRole('button',{name:'Refresh companion list'});
+const companionJobs = (page,channel,count) => expect.poll(()=>page.evaluate(channel=>window.pending[`client-packs:${channel}`]?.length,channel)).toBe(count);
+async function settleCompanion(page,channel,index,{code,version='0.13.4',fingerprint='f'}={}) {
+  await page.evaluate(({channel,index,code,version,fingerprint})=>{
+    const value=channel==='list-companion-assets'
+      ? {serverFingerprint:fingerprint.repeat(64),serverVersion:version,assets:[{assetId:'3',fileName:`pack-${version}.mrpack`,size:'2048'}]}
+      : {...window.descriptor,serverVersion:version,serverFingerprint:fingerprint.repeat(64),...(channel==='inspect-companion'?{inspectionId:'obsolete-inspection',name:'Obsolete pack',version,downloadBytes:'2048'}:{})};
+    window.pending[`client-packs:${channel}`][index].resolve(code?{ok:false,error:{code,message:'PRIVATE obsolete error'}}:{ok:true,value});
+  },{channel,index,code,version,fingerprint});
+}
+
+test('companion pending discovery publishes saved status before list settles and RATE_LIMITED stays list-specific',async({page})=>{
+  await start(page);
+  await page.evaluate(()=>{window.companionDescriptor=window.descriptor;window.pending['client-packs:list-companion-assets']=[];window.show('companion','a');});
+  await companionJobs(page,'list-companion-assets',1);
+  await expect(page.getByRole('heading',{name:'Saved pairing for this server release'})).toBeVisible();
+  await expect(page.getByText('Server release 0.13.4',{exact:true})).toBeVisible();
+  await expect(companionPanel(page)).toHaveAttribute('aria-busy','true');
+  await expect(page.getByRole('button',{name:/Inspect selected pack|Accept matching client pack/})).toHaveCount(0);
+  await settleCompanion(page,'list-companion-assets',0,{code:'RATE_LIMITED'});
+  await expect(page.getByRole('alert')).toContainText(/Asset discovery.*RATE_LIMITED/);
+  await expect(page.getByRole('alert')).not.toContainText(/PRIVATE|PLAN_STALE/);
+  await expect(page.getByRole('heading',{name:'Saved pairing for this server release'})).toBeVisible();
+  await expect(companionPanel(page)).toHaveAttribute('aria-busy','false');
+});
+
+for(const priorReady of [false,true])test(`companion failed status ${priorReady?'after ready':'on first mount'} is unavailable not unpaired or ready`,async({page})=>{
+  await start(page);
+  await page.evaluate(({priorReady})=>{window.companionDescriptor=window.descriptor;if(!priorReady)window.fail={'client-packs:get-companion':{code:'PLAN_STALE',message:'PRIVATE failed status'}};window.show('companion','a');},{priorReady});
+  if(priorReady){
+    await expect(page.getByRole('heading',{name:'Paired for this server release'})).toBeVisible();
+    await page.getByLabel('pack-0.13.4.mrpack').check();
+    await page.getByRole('button',{name:'Inspect selected pack'}).click();
+    await expect(page.getByRole('button',{name:'Accept matching client pack'})).toBeVisible();
+    await page.evaluate(()=>window.fail={'client-packs:get-companion':{code:'CLIENT_PACK_UNAVAILABLE',message:'PRIVATE failed status'}});
+    await refreshCompanion(page).click();
+  }
+  await expect(page.getByRole('heading',{name:'Pairing status unavailable'})).toBeVisible();
+  await expect(page.getByRole('heading',{name:/^Pair a same-release|^Paired for|^Saved pairing/})).toHaveCount(0);
+  await expect(page.getByRole('alert')).toContainText(/Pairing status.*Refresh/);
+  await expect(page.getByRole('alert')).not.toContainText('PRIVATE');
+  await expect(page.getByText('Server release 0.13.4',{exact:true})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:/Inspect selected pack|Accept matching client pack/})).toHaveCount(0);
+  expect(await page.evaluate(()=>window.calls.filter(call=>call.channel==='client-packs:list-companion-assets').length)).toBe(priorReady?1:0);
+});
+
+test('companion mismatched status/list fingerprints refuse actionable discovery without losing saved pairing',async({page})=>{
+  await start(page);
+  await page.evaluate(()=>{window.companionDescriptor=window.descriptor;window.pending['client-packs:list-companion-assets']=[];window.show('companion','a');});
+  await companionJobs(page,'list-companion-assets',1);
+  await settleCompanion(page,'list-companion-assets',0,{fingerprint:'e'});
+  await expect(page.getByRole('alert')).toContainText(/Asset discovery.*PLAN_STALE.*Refresh/);
+  await expect(page.getByRole('heading',{name:'Saved pairing for this server release'})).toBeVisible();
+  await expect(page.getByRole('button',{name:/Inspect selected pack|Accept matching client pack/})).toHaveCount(0);
+  await page.evaluate(()=>delete window.pending['client-packs:list-companion-assets']);
+  await refreshCompanion(page).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByLabel('pack-0.13.4.mrpack')).toBeVisible();
+});
+
+for(const channel of ['inspect-companion','accept-companion'])test(`companion ${channel} freshness refusal qualifies saved pairing and invalidates inspection`,async({page})=>{
+  await start(page);
+  await page.evaluate(()=>{window.companionDescriptor=window.descriptor;window.show('companion','a');});
+  await page.getByLabel('pack-0.13.4.mrpack').check();
+  if(channel==='accept-companion')await page.getByRole('button',{name:'Inspect selected pack'}).click();
+  await page.evaluate(channel=>window.fail={[`client-packs:${channel}`]:{code:'PLAN_STALE',message:'PRIVATE stale action'}},channel);
+  await page.getByRole('button',{name:channel==='inspect-companion'?'Inspect selected pack':'Accept matching client pack'}).click();
+  await expect(page.getByRole('alert')).toContainText(channel==='inspect-companion'?/Pack inspection.*PLAN_STALE/:/Pairing acceptance.*PLAN_STALE/);
+  await expect(page.getByRole('heading',{name:'Saved pairing for this server release'})).toBeVisible();
+  await expect(page.getByText(/not currently verified/i)).toBeVisible();
+  await expect(page.getByRole('button',{name:/Inspect selected pack|Accept matching client pack/})).toHaveCount(0);
+  await page.evaluate(()=>window.fail={});
+  await refreshCompanion(page).click();
+  await expect(page.getByRole('heading',{name:'Paired for this server release'})).toBeVisible();
+});
+
+for(const code of [undefined,'PLAN_STALE'])test(`companion A-to-B-to-A rejects obsolete status ${code?'rejection':'success'} and does not start its list`,async({page})=>{
+  await start(page);
+  await page.evaluate(()=>{window.pending['client-packs:get-companion']=[];window.show('companion','a');});
+  await companionJobs(page,'get-companion',1);
+  await page.evaluate(()=>window.show('companion','b'));
+  await companionJobs(page,'get-companion',2);
+  await page.evaluate(()=>window.show('companion','a'));
+  await companionJobs(page,'get-companion',3);
+  await settleCompanion(page,'get-companion',0,{code,version:'obsolete-A'});
+  await expect(companionPanel(page)).toHaveAttribute('aria-busy','true');
+  await expect(refreshCompanion(page)).toBeDisabled();
+  expect(await page.evaluate(()=>window.calls.filter(call=>call.channel==='client-packs:list-companion-assets').length)).toBe(0);
+  await settleCompanion(page,'get-companion',2);
+  await expect(page.getByRole('heading',{name:'Paired for this server release'})).toBeVisible();
+  await settleCompanion(page,'get-companion',1,{code:'RATE_LIMITED'});
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByText('Server release 0.13.4',{exact:true})).toBeVisible();
+  expect(await page.evaluate(()=>window.calls.filter(call=>call.channel==='client-packs:list-companion-assets').length)).toBe(1);
+});
+
+for(const code of [undefined,'PLAN_STALE'])test(`companion A-to-B-to-A rejects obsolete list ${code?'rejection':'success'} without clearing current busy or error`,async({page})=>{
+  await start(page);
+  await page.evaluate(()=>{window.companionDescriptor=window.descriptor;window.pending['client-packs:list-companion-assets']=[];window.show('companion','a');});
+  await companionJobs(page,'list-companion-assets',1);
+  await page.evaluate(()=>window.show('companion','b'));
+  await companionJobs(page,'list-companion-assets',2);
+  await page.evaluate(()=>{window.companionDescriptor={...window.descriptor,serverVersion:'current-A'};window.show('companion','a');});
+  await companionJobs(page,'list-companion-assets',3);
+  await settleCompanion(page,'list-companion-assets',0,{code,version:'obsolete-A'});
+  await expect(page.getByText('Server release current-A',{exact:true})).toBeVisible();
+  await expect(companionPanel(page)).toHaveAttribute('aria-busy','true');
+  await expect(refreshCompanion(page)).toBeDisabled();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await settleCompanion(page,'list-companion-assets',2,{code:'RATE_LIMITED'});
+  await expect(page.getByRole('alert')).toContainText(/Asset discovery.*RATE_LIMITED/);
+  await settleCompanion(page,'list-companion-assets',1,{code:code?'PLAN_STALE':undefined,version:'obsolete-B'});
+  await expect(page.getByRole('alert')).toContainText(/Asset discovery.*RATE_LIMITED/);
+  await expect(page.getByText('Server release current-A',{exact:true})).toBeVisible();
+  await expect(companionPanel(page)).toHaveAttribute('aria-busy','false');
+});
+
+for(const channel of ['get-companion','list-companion-assets'])for(const code of [undefined,'PLAN_STALE'])test(`companion unmount fences ${channel} obsolete ${code?'rejection':'success'}`,async({page})=>{
+  await start(page);
+  await page.evaluate(channel=>{window.companionDescriptor=window.descriptor;window.pending[`client-packs:${channel}`]=[];window.show('companion','a');},channel);
+  await companionJobs(page,channel,1);
+  await page.evaluate(()=>{window.show('client','a');window.companionDescriptor={...window.descriptor,serverVersion:'new-mount'};});
+  await expect(companionPanel(page)).toHaveCount(0);
+  await page.evaluate(()=>window.show('companion','b'));
+  await companionJobs(page,channel,2);
+  await settleCompanion(page,channel,0,{code,version:'unmounted'});
+  await expect(companionPanel(page)).toHaveAttribute('aria-busy','true');
+  await expect(refreshCompanion(page)).toBeDisabled();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await settleCompanion(page,channel,1,{version:'new-mount'});
+  await expect(page.getByText('Server release new-mount',{exact:true})).toBeVisible();
+  await expect(page.getByRole('heading',{name:'Paired for this server release'})).toBeVisible();
+  await expect(page.getByText(/unmounted|PRIVATE/)).toHaveCount(0);
+});
+
+// Deliberately dispatch the disabled Refresh handler: forced offline concurrency, not an ordinary user action.
+async function forceCompanionRefresh(page){await refreshCompanion(page).evaluate(button=>{const disabled=button.disabled;button.disabled=false;button.dispatchEvent(new MouseEvent('click',{bubbles:true}));button.disabled=disabled;});}
+for(const channel of ['get-companion','list-companion-assets'])for(const code of [undefined,'PLAN_STALE'])test(`companion forced offline concurrent Refresh fences stale ${channel} ${code?'rejection':'success'}`,async({page})=>{
+  await start(page);
+  await page.evaluate(channel=>{window.companionDescriptor=window.descriptor;window.pending[`client-packs:${channel}`]=[];window.show('companion','a');},channel);
+  await companionJobs(page,channel,1);
+  await expect(refreshCompanion(page)).toBeDisabled();
+  await forceCompanionRefresh(page);
+  await companionJobs(page,channel,2);
+  await settleCompanion(page,channel,0,{code,version:'obsolete-refresh'});
+  await expect(companionPanel(page)).toHaveAttribute('aria-busy','true');
+  await expect(refreshCompanion(page)).toBeDisabled();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByText('Server release obsolete-refresh',{exact:true})).toHaveCount(0);
+  await settleCompanion(page,channel,1,{code:'RATE_LIMITED'});
+  await expect(page.getByRole('alert')).toContainText(channel==='get-companion'?/Pairing status.*RATE_LIMITED/:/Asset discovery.*RATE_LIMITED/);
+  await expect(companionPanel(page)).toHaveAttribute('aria-busy','false');
+});
+
+for(const code of [undefined,'PLAN_STALE'])test(`companion forced offline Refresh supersedes inspection ${code?'rejection':'success'} and progress without enabling Accept`,async({page})=>{
+  await start(page,'install-required','companion');
+  await page.evaluate(()=>window.pending['client-packs:inspect-companion']=[]);
+  await page.getByLabel('pack-0.13.4.mrpack').check();
+  await page.getByRole('button',{name:'Inspect selected pack'}).click();
+  await companionJobs(page,'inspect-companion',1);
+  await page.evaluate(()=>window.pending['client-packs:get-companion']=[]);
+  await forceCompanionRefresh(page);
+  await companionJobs(page,'get-companion',1);
+  await page.evaluate(()=>{const input=window.pending['client-packs:inspect-companion'][0].input;for(const listener of window.listeners)listener({...input,phase:'obsolete-inspection-progress'});});
+  await settleCompanion(page,'inspect-companion',0,{code});
+  await expect(companionPanel(page)).toHaveAttribute('aria-busy','true');
+  await expect(refreshCompanion(page)).toBeDisabled();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByText('obsolete-inspection-progress')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Accept matching client pack'})).toHaveCount(0);
+  await settleCompanion(page,'get-companion',0);
+  await expect(page.getByRole('heading',{name:'Paired for this server release'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Accept matching client pack'})).toHaveCount(0);
+  await expect.poll(()=>page.evaluate(()=>window.listeners.size)).toBe(0);
+});
+
+test('companion cancellation keeps inspection unaccepted and exact fingerprint survives stopped-server retry',async({page})=>{
+  await start(page,'install-required','companion');
+  await page.evaluate(()=>window.pending['client-packs:inspect-companion']=[]);
+  await page.getByLabel('pack-0.13.4.mrpack').check();
+  await page.getByRole('button',{name:'Inspect selected pack'}).click();
+  await companionJobs(page,'inspect-companion',1);
+  await page.getByRole('button',{name:'Cancel request'}).click();
+  await settleCompanion(page,'inspect-companion',0,{code:'CANCELLED'});
+  await expect(page.getByRole('alert')).toContainText(/Pack inspection.*CANCELLED/);
+  await expect(page.getByRole('button',{name:'Accept matching client pack'})).toHaveCount(0);
+  await page.evaluate(()=>delete window.pending['client-packs:inspect-companion']);
+  await page.getByRole('button',{name:'Inspect selected pack'}).click();
+  await page.evaluate(()=>window.fail={'client-packs:accept-companion':{code:'SERVER_RUNNING',message:'PRIVATE running'}});
+  await page.getByRole('button',{name:'Accept matching client pack'}).click();
+  await expect(page.getByRole('alert')).toContainText(/Pairing acceptance.*SERVER_RUNNING.*Stop the server/);
+  await expect(page.getByRole('heading',{name:'Paired for this server release'})).toHaveCount(0);
+  await page.evaluate(()=>window.fail={});
+  await page.getByRole('button',{name:'Accept matching client pack'}).click();
+  await expect(page.getByRole('heading',{name:'Paired for this server release'})).toBeVisible();
+  const calls=await page.evaluate(()=>window.calls.filter(call=>/inspect-companion|accept-companion|cancel$/.test(call.channel)));
+  expect(calls.filter(call=>call.channel==='client-packs:cancel')).toHaveLength(1);
+  for(const call of calls.filter(call=>/inspect-companion|accept-companion/.test(call.channel)))expect(call.input.expectedServerFingerprint).toBe('f'.repeat(64));
+  expect(calls.filter(call=>call.channel==='client-packs:accept-companion').map(call=>call.input.inspectionId)).toEqual(['inspection-1','inspection-1']);
 });
 test('preview preserves settings and requires every conflict choice before installation', async ({page}) => {
   await start(page);

@@ -69,6 +69,22 @@ test('normalizer rejects raw details and accessor objects without invoking gette
   assert.notEqual(result, diagnostic);
 });
 
+test('live boundary diagnostics normalize only closed stages and preserve exact snapshot evidence', async () => {
+  for (const stage of ['live-health-call', 'live-properties-check', 'live-revision-event', 'live-handoff', 'live-health-publication']) {
+    assert.deepEqual(diagnostics.normalizeRuntimeDiagnostic({ stage, reason: 'unknown' }), { stage, reason: 'unknown' });
+  }
+  for (const value of [{ stage: 'live-private-path', reason: 'unknown' }, { stage: 'live-handoff', reason: 'private-error' }]) {
+    assert.throws(() => diagnostics.normalizeRuntimeDiagnostic(value), error => error.code === 'RUNTIME_DIAGNOSTIC_INVALID');
+  }
+  const exact = { stage: 'exact-snapshot-post-handle-identity', reason: 'identity-changed', changedIdentityFields: 32 };
+  const failure = Object.assign(new Error('private snapshot failure'), { runtimeDiagnostic: exact });
+  await assert.rejects(diagnostics.runRuntimeStage('live-properties-check', async () => { throw failure; }), error => {
+    assert.equal(error, failure);
+    assert.deepEqual(error.runtimeDiagnostic, exact);
+    return true;
+  });
+});
+
 test('diagnostic extraction cannot replace a failure when its metadata descriptor traps', () => {
   const error = new Proxy(new Error('private'), { getOwnPropertyDescriptor() { throw new Error('private trap'); } });
   assert.deepEqual(diagnostics.runtimeDiagnosticFor(error, 'forge-installer'), { stage: 'forge-installer', reason: 'unknown' });

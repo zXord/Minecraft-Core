@@ -9,6 +9,7 @@ const STAGES = new Set([
   'finalizer-fresh-record', 'finalizer-stability-before-publish', 'finalizer-publish',
   'finalizer-readback', 'finalizer-stability-after-publish', 'finalizer-response',
   'candidate-health-call', 'candidate-properties-check', 'candidate-progress-60',
+  'live-health-call', 'live-properties-check', 'live-revision-event', 'live-handoff', 'live-health-publication',
   'exact-snapshot-initial-stat', 'exact-snapshot-initial-type', 'exact-snapshot-initial-symlink',
   'exact-snapshot-initial-links', 'exact-snapshot-initial-size', 'exact-snapshot-initial-reparse',
   'exact-snapshot-open', 'exact-snapshot-opened-stat', 'exact-snapshot-opened-identity',

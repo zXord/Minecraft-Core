@@ -39,6 +39,7 @@ function dependencies(createPlan, createManagementPlan = null) {
       startOperation: value,
       cancelJob: value,
       getJob: value,
+      getActiveJobs: value,
       getState: value,
       listHistory: value,
       listRollbackOptions: value,

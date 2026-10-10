@@ -130,23 +130,32 @@ function assertRequest(request) {
 }
 
 class ModpackRecoveryFacade {
-  constructor({ recoveryRegistry, recoveryService, canExposePendingNewServer, onResolved = null } = {}) {
+  constructor({ recoveryRegistry, recoveryService, canExposePendingNewServer, hasActiveJob = () => { throw invalid(); }, onResolved = null } = {}) {
     requireMethod(recoveryRegistry, 'initialize');
     for (const method of ['recover', 'rollback', 'retryCommittedCleanup']) requireMethod(recoveryService, method);
     if (typeof canExposePendingNewServer !== 'function') throw invalid();
+    if (typeof hasActiveJob !== 'function') throw invalid();
     if (onResolved !== null && typeof onResolved !== 'function') throw invalid();
     this.registry = recoveryRegistry;
     this.recoveryService = recoveryService;
     this.canExposePendingNewServer = canExposePendingNewServer;
     this.onResolved = onResolved;
+    this.hasActiveJob = hasActiveJob;
+  }
+
+  #owned(record) {
+    assertRecord(record);
+    const owned = this.hasActiveJob(record.jobId);
+    if (typeof owned !== 'boolean') throw invalid();
+    return owned;
   }
 
   async listRecovery() {
     const scan = await this.registry.initialize();
     const records = scan.records;
     if (!Array.isArray(records)) throw invalid();
-    const items = [...records.map(record => publicRecord(record, this.canExposePendingNewServer)),
-      ...(scan.pendingTerminalPublications || []).map(record => ({ ...publicRecord(record, this.canExposePendingNewServer),
+    const items = [...records.filter(record => !this.#owned(record)).map(record => publicRecord(record, this.canExposePendingNewServer)),
+      ...(scan.pendingTerminalPublications || []).filter(record => !this.#owned(record)).map(record => ({ ...publicRecord(record, this.canExposePendingNewServer),
         automaticPossible: true, summary: 'The terminal operation is recorded. Its recovery bookkeeping can be finished.',
         actions: [HISTORY_PUBLICATION_ACTION] }))]
       .sort((left, right) => left.recoveryId.localeCompare(right.recoveryId, 'en-US'));
@@ -166,6 +175,7 @@ class ModpackRecoveryFacade {
     const visibilityScope = visibilityScopeFor(record, this.canExposePendingNewServer);
     const allowed = metadataOnly ? [HISTORY_PUBLICATION_ACTION] : actionsFor(record, visibilityScope);
     if (!allowed.some(action => action.actionId === request.actionId)) throw invalid();
+    if (this.#owned(record)) throw stale();
 
     let result;
     if (request.actionId === HISTORY_PUBLICATION_ACTION.actionId) {

@@ -2,6 +2,7 @@
   import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
   import { modpackApi } from '../../utils/modpacks/modpackApi.js';
   import { isNewServerDestinationRecoveryOutcome } from '../../utils/modpacks/serverRequestScope.js';
+  import { mergePublicJob } from '../../utils/modpacks/publicJobMerge.js';
 
   const dispatch = createEventDispatcher();
   export let job = null;
@@ -119,6 +120,17 @@
   let actionBusy = '';
   let retainedDownloadRemoved = false;
   let actionResultJobId = null;
+  let mounted = false;
+  let jobEpoch = 0;
+  let observedJobId = null;
+  $: if ((job?.jobId || null) !== observedJobId) {
+    observedJobId = job?.jobId || null;
+    jobEpoch += 1;
+    hydratedTerminalJobId = null;
+    hydratingTerminalJobId = null;
+    error = null;
+    if (mounted) schedulePoll();
+  }
 
   $: phase = job?.phase || 'queued';
   $: cleanupPending = terminal.has(phase) && job?.outcome?.cleanupPending === true;
@@ -268,7 +280,9 @@
   }
 
   async function focusResult() {
+    const epoch = jobEpoch;
     await tick();
+    if (!mounted || epoch !== jobEpoch) return;
     resultHeading?.focus?.();
     dispatch('terminal', { job });
   }
@@ -276,41 +290,45 @@
   async function refresh() {
     if (!job?.jobId || terminal.has(job.phase)) return;
     const jobId = job.jobId;
+    const epoch = jobEpoch;
     try {
       const refreshed = await modpackApi.getJob(jobId);
-      if (job?.jobId !== jobId) return;
+      if (!mounted || epoch !== jobEpoch || job?.jobId !== jobId) return;
       if (terminal.has(refreshed?.phase)) hydratedTerminalJobId = jobId;
-      job = refreshed;
+      job = mergePublicJob(job, refreshed, { durable: true });
       error = null;
     } catch (caught) {
-      error = caught;
+      if (mounted && epoch === jobEpoch && job?.jobId === jobId) error = caught;
     }
     schedulePoll();
   }
 
   async function hydrateTerminalJob(jobId) {
+    const epoch = jobEpoch;
     if (!jobId || hydratedTerminalJobId === jobId || hydratingTerminalJobId === jobId) return;
     hydratingTerminalJobId = jobId;
     let retryDelay = 0;
     try {
       const hydrated = await modpackApi.getJob(jobId);
-      if (job?.jobId !== jobId) return;
-      job = hydrated;
+      if (!mounted || epoch !== jobEpoch || job?.jobId !== jobId) return;
+      job = mergePublicJob(job, hydrated, { durable: true });
       error = null;
       if (terminal.has(hydrated?.phase)) hydratedTerminalJobId = jobId;
     } catch (caught) {
-      if (job?.jobId === jobId) error = caught;
+      if (mounted && epoch === jobEpoch && job?.jobId === jobId) error = caught;
       retryDelay = 1200;
     } finally {
-      if (hydratingTerminalJobId === jobId) hydratingTerminalJobId = null;
-      schedulePoll(retryDelay);
+      if (mounted && epoch === jobEpoch) {
+        if (hydratingTerminalJobId === jobId) hydratingTerminalJobId = null;
+        schedulePoll(retryDelay);
+      }
     }
   }
 
   function schedulePoll(terminalDelay = 0) {
     if (pollTimer) clearTimeout(pollTimer);
     pollTimer = null;
-    if (!job?.jobId) return;
+    if (!mounted || !job?.jobId) return;
     if (terminal.has(job.phase)) {
       if (hydratedTerminalJobId !== job.jobId && hydratingTerminalJobId !== job.jobId) {
         const jobId = job.jobId;
@@ -323,14 +341,18 @@
 
   async function cancel() {
     if (!canCancel) return;
+    const jobId = job.jobId;
+    const epoch = jobEpoch;
     cancelling = true;
     try {
-      job = await modpackApi.cancelJob(job.jobId);
+      const cancelled = await modpackApi.cancelJob(jobId);
+      if (!mounted || epoch !== jobEpoch || job?.jobId !== jobId) return;
+      job = mergePublicJob(job, cancelled, { durable: true });
       schedulePoll();
     } catch (caught) {
-      error = caught;
+      if (mounted && epoch === jobEpoch && job?.jobId === jobId) error = caught;
     } finally {
-      cancelling = false;
+      if (mounted && epoch === jobEpoch) cancelling = false;
     }
   }
 
@@ -345,6 +367,8 @@
   }
 
   async function performAction(actionId) {
+    const epoch = jobEpoch;
+    const jobId = job?.jobId;
     const opaqueRef = actionReference(actionId);
     if (!opaqueRef) {
       error = new Error('This outcome action is no longer available. Return to the Modpack page and refresh its durable state.');
@@ -354,26 +378,28 @@
     error = null;
     try {
       const value = await modpackApi.performSafeAction(actionId, opaqueRef);
+      if (!mounted || epoch !== jobEpoch || job?.jobId !== jobId) return;
       if (actionId === 'remove-retained-download' && value?.status === 'removed') {
         retainedDownloadRemoved = true;
       }
       dispatch('action', { actionId, value, job });
     } catch (caught) {
-      error = caught;
+      if (mounted && epoch === jobEpoch && job?.jobId === jobId) error = caught;
     } finally {
-      actionBusy = '';
+      if (mounted && epoch === jobEpoch) actionBusy = '';
     }
   }
 
   onMount(() => {
+    mounted = true;
     cleanups = [
       modpackApi.onJobProgress(event => {
-        if (event?.jobId !== job?.jobId) return;
-        job = { ...job, ...event };
+        if (!mounted || event?.jobId !== job?.jobId) return;
+        job = mergePublicJob(job, event);
         schedulePoll();
       }),
       modpackApi.onJobLog(event => {
-        if (event?.jobId !== job?.jobId) return;
+        if (!mounted || event?.jobId !== job?.jobId) return;
         logs = [...logs, event].slice(-500);
       })
     ];
@@ -381,6 +407,8 @@
   });
 
   onDestroy(() => {
+    mounted = false;
+    jobEpoch += 1;
     if (pollTimer) clearTimeout(pollTimer);
     for (const cleanup of cleanups) cleanup();
   });

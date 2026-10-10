@@ -432,6 +432,9 @@ async function launchModpackApp(options = {}) {
     updateScenario(changes) {
       writeJson(prepared.scenarioFile, { ...readJson(prepared.scenarioFile), ...clone(changes) });
     },
+    async controlHeldRepair(command) {
+      return running.electronApp.evaluate((_electron, value) => globalThis.__MINECRAFT_CORE_HELD_REPAIR__(value), command);
+    },
     readEvidence() { return readJson(prepared.scenarioFile); },
     readServerFile(relativeName) { return fs.readFileSync(path.join(prepared.serverRoot, ...relativeName.split('/')), 'utf8'); },
     serverFileExists(relativeName) { return fs.existsSync(path.join(prepared.serverRoot, ...relativeName.split('/'))); },
@@ -861,10 +864,14 @@ function createComposition({ input, scenarioFile }) {
   const inspections = new Map();
   const plans = new Map();
   const jobs = new Map();
+  const heldPollReplies = [];
+  const heldActiveReplies = [];
   const destinationReservations = new Map();
   let inspectionSequence = 0;
   let planSequence = 0;
   let jobSequence = 0;
+  let heldJobReadSequence = 0;
+  const heldJobReadReleases = new Map();
 
   const scenario = () => readJson(scenarioFile);
   const save = value => writeJson(scenarioFile, value);
@@ -875,6 +882,56 @@ function createComposition({ input, scenarioFile }) {
     return result;
   };
   const record = (bucket, entry) => update(value => value[bucket].push({ at: FIXED_TIME, ...clone(entry) }));
+  if (scenario().refreshFixture?.holdRepairOwner === true) {
+    // Explicit test controls own progression. Discovery only snapshots the map.
+    globalThis.__MINECRAFT_CORE_HELD_REPAIR__ = command => {
+      if (command.kind === 'queue-active') { heldActiveReplies.push(clone(command.reply)); return; }
+      if (command.kind === 'queue-poll') { heldPollReplies.push(clone(command.reply)); return; }
+      if (command.kind === 'release-poll') {
+        const release = heldJobReadReleases.get(command.readId);
+        if (!release) throw new Error('No held job read exists');
+        heldJobReadReleases.delete(command.readId);
+        release();
+        return;
+      }
+      const stored = [...jobs.values()].find(value => value.heldRepair);
+      if (!stored) throw new Error('No held Repair fixture exists');
+      const window = input.getWindow();
+      const emit = event => window?.webContents?.send('modpacks:job-progress', event);
+      if (command.kind === 'read') return clone(stored.job);
+      if (command.kind === 'set-job' || command.kind === 'replace-owner') {
+        const next = { ...clone(stored.job), ...clone(command.job) };
+        if (command.kind === 'replace-owner') {
+          stored.owned = false;
+          jobs.set(next.jobId, { ...stored, job: next, reads: 0, owned: true });
+        } else stored.job = next;
+        emit(clone(next));
+        return clone(next);
+      }
+      if (command.kind === 'duplicate-owner') {
+        const duplicate = { ...clone(stored.job), jobId: 'second-owned-verify', operationKind: 'verify' };
+        jobs.set(duplicate.jobId, { ...stored, job: duplicate, reads: 0 });
+        emit({ jobId: stored.job.jobId, serverId: stored.job.serverId, sequence: stored.job.sequence, phase: stored.job.phase });
+        return;
+      }
+      if (command.kind === 'emit') { emit({ jobId: stored.job.jobId, serverId: stored.job.serverId, ...clone(command.event) }); return; }
+      if (command.kind === 'settle') {
+        stored.job = { ...stored.job, sequence: stored.job.sequence + 10, phase: 'completed', terminalAt: FIXED_TIME,
+          progress: { percent: 100, message: 'Repair complete; owned settlement held', currentItem: null }, outcome: completeOperation(stored.plan),
+          events: [{ sequence: stored.job.sequence + 9, jobId: stored.job.jobId, channel: 'log', phase: 'cleanup', timestamp: FIXED_TIME,
+            message: 'Held Repair durable final log', progress: null, currentItem: null, details: null }] };
+        const { events, ...sparse } = clone(stored.job);
+        emit(sparse);
+        return clone(stored.job);
+      }
+      if (command.kind === 'release') {
+        stored.owned = false;
+        window?.webContents?.send('modpacks:state-changed', { instanceId: stored.job.serverId });
+        return;
+      }
+      throw new Error('Unknown held Repair fixture control');
+    };
+  }
   const blocked = () => scenario().recovery.length > 0;
   const assertNotBlocked = () => {
     if (blocked()) throw new ModpackError('RECOVERY_REQUIRED', 'This server remains blocked until durable recovery is reviewed.');
@@ -1303,21 +1360,26 @@ function createComposition({ input, scenarioFile }) {
       if (plan.planView.blockers.length) throw new ModpackError('RECOVERY_REQUIRED', 'A required compatible restore point is missing.');
       const jobId = `job-${++jobSequence}`;
       const crash = scenario().crashPoint && plan.operationKind === 'rollback-restore-point';
+      const heldRepair = plan.operationKind === 'repair' && scenario().refreshFixture?.holdRepairOwner === true;
       const deferred = !crash && !['detach', 'uninstall', 'repair', 'rollback-restore-point'].includes(plan.operationKind);
       const holdBeforeCommit = deferred && jobSequence === 1 && scenario().holdFirstJobBeforeCommit === true;
       if (holdBeforeCommit) update(value => { value.holdFirstJobBeforeCommit = false; });
       const job = {
+        type: 'minecraft-core-modpack-job', schemaVersion: 1, sequence: 1,
+        serverId: plan.instanceId, planFingerprint: FINGERPRINT, swapStep: null,
+        createdAt: FIXED_TIME, updatedAt: FIXED_TIME, terminalAt: crash || deferred || heldRepair ? null : FIXED_TIME, events: [],
         jobId,
         operationKind: plan.operationKind,
-        phase: crash ? 'committing' : deferred ? 'downloading' : 'completed',
+        phase: heldRepair ? 'snapshotting' : crash ? 'committing' : deferred ? 'downloading' : 'completed',
         progress: {
-          percent: crash ? 82 : deferred ? 35 : 100,
-          message: crash ? 'Publishing the durable candidate directory' : deferred ? 'Verifying exact offline fixture bytes' : 'Final server state validated'
+          percent: heldRepair ? 20 : crash ? 82 : deferred ? 35 : 100,
+          message: heldRepair ? 'Held Repair restore point' : crash ? 'Publishing the durable candidate directory' : deferred ? 'Verifying exact offline fixture bytes' : 'Final server state validated',
+          currentItem: null
         },
         cancellationRequested: false,
-        outcome: crash || deferred ? null : completeOperation(plan)
+        outcome: crash || deferred || heldRepair ? null : completeOperation(plan)
       };
-      jobs.set(jobId, { job, plan, reads: 0, holdBeforeCommit });
+      jobs.set(jobId, { job, plan, reads: 0, holdBeforeCommit, heldRepair, owned: heldRepair });
       record('lifecycleCalls', {
         method: 'startOperation', operationKind: plan.operationKind, jobId,
         choices: clone(request.choices)
@@ -1392,6 +1454,21 @@ function createComposition({ input, scenarioFile }) {
         record('lifecycleCalls', { method: 'getJob', jobId, phase: stored.job.phase });
       }
       stored.reads += 1;
+      if (stored.heldRepair) {
+        record('lifecycleCalls', { method: 'getJob', jobId, phase: stored.job.phase });
+        const reply = heldPollReplies.shift();
+        if (reply?.hold) {
+          const readId = ++heldJobReadSequence;
+          await new Promise(resolve => {
+            heldJobReadReleases.set(readId, resolve);
+            record('lifecycleCalls', { method: 'heldGetJobEntered', readId, jobId });
+          });
+          record('lifecycleCalls', { method: 'heldGetJobReleased', readId, jobId });
+        }
+        if (reply?.delayMs) await new Promise(resolve => setTimeout(resolve, reply.delayMs));
+        if (reply?.fail) throw new ModpackError('COMMIT_FAILED', 'Held parent Retry read rejected');
+        return clone(reply?.value || stored.job);
+      }
       if (stored.job.phase === 'downloading' && stored.reads >= 1 && !stored.holdBeforeCommit) {
         const destinationRecovery = scenario().destinationRecoveryOnFirstJob === true;
         if ((scenario().retainedDownloadOnFirstJob === true || destinationRecovery) && stored.job.jobId === 'job-1') {
@@ -1420,6 +1497,16 @@ function createComposition({ input, scenarioFile }) {
         }
       }
       return clone(stored.job);
+    },
+
+    async getActiveJobs(serverId) {
+      record('lifecycleCalls', { method: 'getActiveJobs', serverId });
+      const reply = heldActiveReplies.shift();
+      const snapshot = reply?.value || { serverId, items: [...jobs.values()].filter(stored => stored.owned && stored.job.serverId === serverId)
+        .map(stored => ({ ownership: stored.job.terminalAt ? 'settling' : 'running', job: clone(stored.job) })) };
+      if (reply?.delayMs) await new Promise(resolve => setTimeout(resolve, reply.delayMs));
+      if (reply?.fail || scenario().refreshFixture?.activeFailureIds?.includes(serverId)) throw new ModpackError('COMMIT_FAILED', 'Operation status unavailable');
+      return snapshot;
     },
 
     async getState(instanceId) {

@@ -416,10 +416,15 @@ async function createProductionModpackComposition(input = {}) {
       issuer: new LifecycleOutcomeActionIssuer(),
       artifactCache
     });
+    let lifecycleService = null;
     const recoveryService = new ModpackRecoveryFacade({
       recoveryRegistry,
       recoveryService: rawRecoveryService,
       canExposePendingNewServer: record => canExposePendingNewServer(store, record),
+      hasActiveJob: jobId => {
+        if (!lifecycleService) throw new ModpackError('RECOVERY_REQUIRED', 'Operation ownership is unavailable');
+        return lifecycleService.hasActiveJob(jobId);
+      },
       async onResolved(jobId, record, result) {
         finalizeResolvedNewServerReservation({
           destinationReservations: destinationReservationService,
@@ -462,7 +467,6 @@ async function createProductionModpackComposition(input = {}) {
       randomUUID
     });
 
-    let lifecycleService = null;
     lifecycleService = new ModpackLifecycleService({
       sourceResolver,
       artifactDownloader: artifactAcquisition,
@@ -474,6 +478,14 @@ async function createProductionModpackComposition(input = {}) {
       mutationCoordinator: coordinator,
       mutationRuntime,
       instanceResolver: compositeInstanceResolver,
+      resolveServerSelection: instanceId => {
+        const instances = store.get('instances');
+        const matches = Array.isArray(instances) ? instances.filter(item => item?.id === instanceId) : [];
+        if (matches.length !== 1 || matches[0].type !== 'server' || typeof matches[0].path !== 'string' || !path.isAbsolute(matches[0].path)) {
+          throw new ModpackError('PLAN_STALE', 'The server instance is no longer available');
+        }
+        return { instanceId };
+      },
       stateRepository,
       stateEventSink: state => nativeNotificationBridge.publishStateChanged(state),
       outcomeActionIssuer: lifecycleOutcomeActionIssuer,

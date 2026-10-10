@@ -14,6 +14,7 @@
   import logger from '../../utils/logger.js';
   import { getInviteDisplayState } from '../../utils/server/inviteDisplayState.js';
   import { modpackApi } from '../../utils/modpacks/modpackApi.js';
+  import { createServerRequestScope } from '../../utils/modpacks/serverRequestScope.js';
   import { filterRecoveryRecordsForServer } from '../../stores/modpackNotificationStore.js';
   
   // Import compareVersions function for semantic version comparison
@@ -87,11 +88,15 @@
   let recoveryStatus = 'unknown';
   let recoveryPendingCount = 0;
   let recoveryRequestSequence = 0;
+  let activityStatus = 'unknown';
+  let activeOperationCount = 0;
+  let activityPollTimer;
+  let activityRequestSequence = 0;
+  const activityScope = createServerRequestScope();
   let autoStartIntentionSequence = 0;
   let loadedRecoveryScopeKey = '';
   let unsubscribeRecoveryProgress;
   const terminalRecoveryJobs = new Set();
-  const terminalRecoveryPhases = new Set(['completed', 'cancelled', 'rolled-back', 'failed', 'recovery-required']);
   $: recoveryScopeKey = JSON.stringify([currentInstanceId, serverPath, modpackStateGeneration]);
   $: if (recoveryMounted && recoveryScopeKey !== loadedRecoveryScopeKey) {
     autoStartIntentionSequence += 1;
@@ -100,7 +105,7 @@
     void refreshRecovery();
   }
   $: recoveryStartBlocked = !currentInstanceId || !serverPath || recoveryStatus !== 'ready' ||
-    recoveryPendingCount > 0 || recoveryScopeKey !== loadedRecoveryScopeKey;
+    activityStatus !== 'ready' || activeOperationCount > 0 || recoveryPendingCount > 0 || recoveryScopeKey !== loadedRecoveryScopeKey;
 
   function currentRecoveryScopeKey() {
     return JSON.stringify([currentInstance?.type === 'server' ? currentInstance.id : null, serverPath, modpackStateGeneration]);
@@ -108,7 +113,32 @@
 
   function canStartAfterRecoveryCheck() {
     return recoveryMounted && Boolean(currentInstanceId && serverPath) && recoveryStatus === 'ready' &&
-      recoveryPendingCount === 0 && currentRecoveryScopeKey() === loadedRecoveryScopeKey;
+      activityStatus === 'ready' && activeOperationCount === 0 && recoveryPendingCount === 0 && currentRecoveryScopeKey() === loadedRecoveryScopeKey;
+  }
+
+  async function refreshActivity() {
+    const sequence = ++activityRequestSequence;
+    const scopeKey = currentRecoveryScopeKey();
+    const serverId = currentInstanceId;
+    if (activityScope.activate(serverId || '').changed) activeOperationCount = 0;
+    const token = activityScope.begin();
+    if (activityPollTimer) clearTimeout(activityPollTimer);
+    activityStatus = serverId && serverPath ? 'loading' : 'unknown';
+    if (!recoveryMounted || !serverId || !serverPath) return;
+    const isCurrent = () => recoveryMounted && activityScope.isCurrent(token, currentInstanceId || '') && sequence === activityRequestSequence && scopeKey === currentRecoveryScopeKey();
+    try {
+      const result = await modpackApi.getActiveJobs(serverId);
+      if (!isCurrent()) return;
+      if (result?.serverId !== serverId || !Array.isArray(result.items)) throw new Error('Operation status unavailable');
+      const previouslyOwned = activeOperationCount > 0;
+      activeOperationCount = result.items.length;
+      activityStatus = 'ready';
+      if (previouslyOwned && activeOperationCount === 0) void refreshRecovery();
+    } catch {
+      if (isCurrent()) activityStatus = 'error';
+    } finally {
+      if (isCurrent() && activeOperationCount > 0) activityPollTimer = setTimeout(refreshActivity, 1200);
+    }
   }
 
   async function refreshRecovery() {
@@ -120,16 +150,17 @@
     recoveryStatus = serverId && serverPath ? 'loading' : 'unknown';
     if (!recoveryMounted || !serverId || !serverPath) return;
     const isCurrent = () => recoveryMounted && sequence === recoveryRequestSequence && scopeKey === currentRecoveryScopeKey();
-    try {
-      const result = await modpackApi.listRecovery();
+    const activeRead = refreshActivity();
+    const recoveryRead = modpackApi.listRecovery().then(result => {
       if (!isCurrent()) return;
       const records = Array.isArray(result) ? result : result?.items;
       if (!Array.isArray(records)) throw new Error('Recovery list unavailable');
       recoveryPendingCount = filterRecoveryRecordsForServer(records, serverId).length;
       recoveryStatus = 'ready';
-    } catch {
+    }).catch(() => {
       if (isCurrent()) recoveryStatus = 'error';
-    }
+    });
+    await Promise.all([activeRead, recoveryRead]);
   }
   const ACTIVE_SERVER_STATUSES = new Set(['Starting', 'Running', 'Stopping']);
   const TRANSITIONAL_SERVER_STATUSES = new Set(['Starting', 'Stopping']);
@@ -1109,17 +1140,22 @@
   onMount(() => {
     recoveryMounted = true;
     const mountRecoveryScope = currentRecoveryScopeKey();
-    const initialRecoveryRead = refreshRecovery();
-    const initialRecoverySequence = recoveryRequestSequence;
     unsubscribeRecoveryProgress = modpackApi.onJobProgress(event => {
       if (!recoveryMounted || !currentInstanceId || event?.serverId !== currentInstanceId ||
-          !event?.jobId || !terminalRecoveryPhases.has(event.phase)) return;
-      const identity = `${event.jobId}:${event.phase}`;
+          !event?.jobId) return;
+      const identity = `${event.jobId}:${event.sequence ?? event.phase}`;
       if (terminalRecoveryJobs.has(identity)) return;
       terminalRecoveryJobs.add(identity);
       if (terminalRecoveryJobs.size > 100) terminalRecoveryJobs.delete(terminalRecoveryJobs.values().next().value);
       void refreshRecovery();
     });
+    const unsubscribeStateChanged = modpackApi.onStateChanged(event => {
+      if (recoveryMounted && (event?.serverId === currentInstanceId || event?.instanceId === currentInstanceId)) void refreshRecovery();
+    });
+    const unsubscribeProgress = unsubscribeRecoveryProgress;
+    unsubscribeRecoveryProgress = () => { unsubscribeProgress(); unsubscribeStateChanged(); };
+    const initialRecoveryRead = refreshRecovery();
+    const initialRecoverySequence = recoveryRequestSequence;
     logger.info('ServerControls component mounted', {
       category: 'ui',
       data: {
@@ -1276,6 +1312,8 @@
     autoStartIntentionSequence += 1;
     recoveryMounted = false;
     recoveryRequestSequence += 1;
+    activityRequestSequence += 1;
+    if (activityPollTimer) clearTimeout(activityPollTimer);
     pendingAutoStart = false;
     unsubscribeRecoveryProgress?.();
     versionCheckRequestId += 1;
@@ -1632,7 +1670,14 @@
   <!-- MINECRAFT SERVER SECTION -->
   {#if currentInstanceId && serverPath && recoveryStartBlocked}
     <div class="server-warning-banner" role="status" aria-label="Server recovery status">
-      {#if recoveryStatus === 'ready' && recoveryPendingCount > 0}
+      {#if activityStatus === 'ready' && activeOperationCount > 0}
+        <p>Operation in progress. Starts remain blocked until the owned operation settles.</p>
+        <button on:click={() => navigate('/modpack')}>View operation</button>
+      {:else if activityStatus === 'error'}
+        <p>Operation status unavailable</p>
+        <button on:click={() => refreshRecovery()}>Retry check</button>
+        <button on:click={() => navigate('/modpack')}>View operation</button>
+      {:else if recoveryStatus === 'ready' && recoveryPendingCount > 0}
         <p>Recovery is pending for this server. Review Modpack recovery before starting.</p>
         <button on:click={() => navigate('/modpack')}>Review Modpack</button>
       {:else if recoveryStatus === 'error'}

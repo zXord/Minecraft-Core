@@ -9,6 +9,7 @@ const {
   publicationFailureDiagnosticFromError
 } = require('./publication-failure-diagnostic.cjs');
 const { runtimeDiagnosticFromError } = require('./server-runtime-writer-authority.cjs');
+const { validatePublicJob } = require('./operation-store.cjs');
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SOURCE_AUTHORITY_KEY = /(?:path|directory|destination|command|argument|executable)/i;
@@ -267,12 +268,13 @@ function defaultYieldControl() {
   return new Promise(resolve => setImmediate(resolve));
 }
 
-function createActiveOperation(controller) {
+function createActiveOperation(controller, serverId) {
   let resolveSettled;
   let isSettled = false;
   let isSettling = false;
   const settled = new Promise(resolve => { resolveSettled = resolve; });
   return Object.freeze({
+    serverId,
     abort() {
       if (isSettling || isSettled) return false;
       controller.abort();
@@ -652,11 +654,11 @@ function safeErrorCode(error) {
 }
 
 function safeFailureLogMessage(error) {
-  if (!(error instanceof ModpackError)) return 'The operation stopped before the server changed';
+  if (!(error instanceof ModpackError)) return 'The operation stopped';
   const descriptor = Object.getOwnPropertyDescriptor(error, 'safeMessage');
   return descriptor && Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'string'
     ? descriptor.value
-    : 'The operation stopped before the server changed';
+    : 'The operation stopped';
 }
 
 function safeFailureField(error) {
@@ -776,6 +778,7 @@ class ModpackLifecycleService {
     mutationCoordinator = null,
     mutationRuntime = null,
     instanceResolver = null,
+    resolveServerSelection = null,
     stateRepository = null,
     stateEventSink = null,
     outcomeActionIssuer = null,
@@ -807,6 +810,8 @@ class ModpackLifecycleService {
     this.mutationCoordinator = mutationCoordinator;
     this.mutationRuntime = mutationRuntime;
     this.instanceResolver = instanceResolver;
+    if (resolveServerSelection !== null && typeof resolveServerSelection !== 'function') throw invalid();
+    this.resolveServerSelection = resolveServerSelection;
     this.stateRepository = stateRepository;
     this.stateEventSink = stateEventSink;
     this.outcomeActionIssuer = outcomeActionIssuer;
@@ -998,6 +1003,36 @@ class ModpackLifecycleService {
     return job;
   }
 
+  hasActiveJob(jobId) {
+    return this.activeOperations.has(assertIdentifier(jobId));
+  }
+
+  async getActiveJobs(serverIdValue) {
+    const serverId = assertIdentifier(serverIdValue);
+    const resolver = this.resolveServerSelection || (id => this.instanceResolver?.resolveInstance(id));
+    const selection = await resolver(serverId);
+    if (selection?.instanceId !== serverId) throw stale();
+    const visited = new Set();
+    const results = [];
+    while (true) {
+      const next = [...this.activeOperations].find(([, owner]) => owner.serverId === serverId && !visited.has(owner));
+      if (!next) break;
+      const [jobId, owner] = next;
+      visited.add(owner);
+      let value;
+      try { value = await this.operationStore.get(jobId); }
+      catch (error) {
+        if (this.activeOperations.get(jobId) !== owner) continue;
+        throw error;
+      }
+      if (this.activeOperations.get(jobId) !== owner) continue;
+      const job = validatePublicJob(value);
+      if (job.jobId !== jobId || job.serverId !== serverId) throw stale();
+      results.push({ owner, jobId, item: { ownership: TERMINAL_JOB_PHASES.has(job.phase) ? 'settling' : 'running', job } });
+    }
+    return deepFreeze({ serverId, items: results.filter(({ owner, jobId }) => this.activeOperations.get(jobId) === owner).map(({ item }) => item) });
+  }
+
   async cancelJob(jobId) {
     const existing = await this.getJob(jobId);
     const active = this.activeOperations.get(existing.jobId);
@@ -1081,7 +1116,7 @@ class ModpackLifecycleService {
       planFingerprint: null
     });
     const controller = new AbortController();
-    const active = createActiveOperation(controller);
+    const active = createActiveOperation(controller, instanceId);
     this.activeOperations.set(queued.jobId, active);
     Promise.resolve().then(() => this.#executeVerification({
       jobId: queued.jobId,
@@ -1127,7 +1162,7 @@ class ModpackLifecycleService {
         planFingerprint
       });
       const controller = new AbortController();
-      const active = createActiveOperation(controller);
+      const active = createActiveOperation(controller, claimed.plan.operation.instanceId);
       this.activeOperations.set(claimed.jobId, active);
       Promise.resolve().then(() => this.#executeOperation({
         claimed,
