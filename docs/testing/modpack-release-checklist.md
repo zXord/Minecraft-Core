@@ -2,7 +2,7 @@
 
 Updated 10 October 2026 after the successful normal Repair retry, Asia/Riyadh. **Not release ready.** This is the restart checklist for normal, visible app testing. Automated tests support these checks; they do not replace installing the real pack, running Minecraft, and joining the server.
 
-## Current working summary — 10 October, 15:19
+## Current working summary — 10 October, 15:40
 
 The disposable b1 app has been closed normally since12:56. Its invite was already created with approval; do not recreate it. Real profiles/instances and a1 recovery evidence remain excluded.
 
@@ -12,11 +12,12 @@ The disposable b1 app has been closed normally since12:56. Its invite was alread
 | Browsing / update notice | Exact notification navigation and Modrinth cross-runtime browsing/inspection passed; no version update installed. |
 | Matching MRPACK client | Registered through normal UI; preview failed before install. Required resourcepack URL currently404; no missing-file skip or cache injection. |
 | Idle-session recovery fix | Reviewed and committed73cd00e after two focused correction rounds. Final frozen gates:4402/4410Node passed,0fail,8 explicit Windows privilege/retention skips;81/81UI; build413modules18.84s. Normal-app idle/restart/install acceptance remains pending; earlier failed full runs remain recorded below. |
-| Complete client alternative | Same-release MultiMC ZIP support designed/reviewed and tasks prepared, not implemented. Pairing must be an explicit native selection after source gates. |
+| GitHub-hosted MRPACK downloads | Bounded redirect compatibility correction reviewed and committed f8740eb; 182 focused checks passed. Raw URL admission, exact hosts and file digests remain enforced. Does not restore the unavailable TFG resourcepack. |
+| Complete client alternative | Same-release MultiMC ZIP support: parser/guarded preparation implementation has started; durable runtime integration and selection UI remain queued. Pairing must be an explicit native selection after source gates. |
 | Client acceptance | Install, Verify, reopen, idle/restart recovery, Microsoft authentication and actual world join remain unpassed. |
 | Remaining release checks | Upgrade/downgrade/rollback, drift/conflicts and server-mod/client reactions; real local formats; cleanup/failed-target reuse; notification controls; packaged startup/icon; remaining UI/recovery/backup-retirement gaps. |
 
-Next source sequence: MRPACK exact-GitHub redirect correction, then sequential MultiMC support. Session source prerequisite is complete, not native acceptance. Startup partition instrumentation is prepared only, not an optimization or completed speed fix. Return to the normal b1 app only with coherent reviewed source. Detailed evidence and historical attempts follow below.
+Next source sequence: sequential MultiMC preparation, durable runtime evidence, then explicit provider/UI selection. Session and redirect source prerequisites are complete, not native acceptance. Targeted progress/layout and Verify-result continuity corrections, plus startup partition instrumentation, are prepared only. Return to the normal b1 app only with coherent reviewed source. Detailed evidence and historical attempts follow below.
 
 ## Pause and resume
 
