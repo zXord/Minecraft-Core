@@ -1,0 +1,77 @@
+# MultiMC client companion implementation plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Let an owner explicitly pair a supported same-release MultiMC ZIP and let a registered client review, install, verify and launch its bundled content through the existing managed-client workflow.
+
+**Architecture:** A client-only metadata/projector adapter feeds the existing guarded archive/preparer pipeline. Private ownership schema2 preserves extra runtime requirements through publication and restart; the public companion descriptor stays schema1. Discovery and UI expose the format only after preparation and verification are integrated.
+
+**Tech Stack:** Electron/CommonJS, existing guarded ZIP extraction and artifact acquisition, Svelte, Node tests, controlled rendered Playwright regressions.
+
+**Spec:** `docs/superpowers/specs/2026-10-10-multimc-client-companions-design.md`
+
+## Global Constraints
+
+- Finish the session-recovery plan before editing overlapping product/test files. One implementer at a time; root alone does normal native testing.
+- Never touch real profiles/instances, a1 recovery evidence or live b1 data through scripts. Preserve unrelated `src/stores/modStore.js`, `tests/ignored-mod-updates-renderer.test.cjs`, `migration-review-2026-10-07.md` exactly.
+- Explicit same-release GitHub single `.mrpack` or `.zip`; Modrinth stays MRPACK-only. No automatic fallback, diagnostic cache injection, missing-file skipping, source URLs from renderer, or pack-specific branches.
+- Root-only MultiMC: regular `mmc-pack.json`, regular `instance.cfg`, `.minecraft` content. Reject mixed/wrapped/nested/ambiguous roots, external pack-manager manifests, custom runtime components/folders, protected incoming content and scripts. Shared server `multimc-client-only` remains blocked.
+- Metadata at most256KiB, formatVersion1, exact Minecraft/vanilla/Fabric/Forge runtime, Windows/x64 Java resolved by the existing resolver. No launcher settings/commands/authentication imported.
+- Optional dependency-only LWJGL version must match effective core/modules. Standard dependency-only Fabric intermediary must equal Minecraft; effective MultiMC Fabric runtime always verifies the same-version intermediary.
+- Public companion schema1 unchanged. Private MultiMC ownership schema2 requires `contentFormat:"multimc"`, `runtimeConstraints:{lwjglVersion:string|null}`, GitHub descriptor and empty optional choices. Schema1 MRPACK compatibility remains.
+- No baseline/equality/source-digest/session-binding weakening, no network after seal, no new download authority or leases. Existing copy measurement, cancellation/quiescence, publication/recovery and cleanup remain authoritative.
+- No dependencies, push or release. Test-first RED/GREEN, independent task review and final frozen gates before normal b1 acceptance; fixtures never count as native install/join.
+
+## Review Focus
+
+- A ZIP with valid markers also contains another nested launcher root or CurseForge manifest: refuse instead of silently dropping a competing source (Task1).
+- A component is disabled, duplicated or carries custom executable/runtime fields: refuse rather than changing launch semantics (Task1).
+- Source metadata or projected file identity changes between inspect and copy: fail before publication and release only owned candidate work (Task1).
+- A fresh process sees a valid-looking library profile with different LWJGL, or malformed schema2 evidence: Verify and launch refuse even though Minecraft/Forge still match (Task2).
+- The owner changes companion MRPACK↔ZIP while a client holds a reviewed plan: the stale plan fails, and explicit new review replaces the whole state without losing seeded settings or retaining stale constraints (Tasks2/3).
+
+### Task 1: Client-only MultiMC parser and guarded preparation
+
+**Files:** Create `electron/services/client-modpacks/multimc-client-plan.cjs`, `electron/services/client-modpacks/client-runtime-constraints.cjs`, `tests/client-modpacks/multimc-client-plan.test.cjs`. Modify `electron/services/client-modpacks/client-candidate-preparer.cjs` and `tests/client-modpacks/client-candidate-preparer.test.cjs`.
+
+**Interfaces:**
+- `selectClientArchiveFormat(entries) -> {format:'mrpack'|'multimc', metadataPath}` consumes existing inspected `{entryName,type,size}` entries; no filesystem or caller-selected root. Preserve existing root MRPACK behavior but reject conflicting launcher markers.
+- `parseMultiMCManifest(bytes:Buffer) -> {runtime,runtimeConstraints}` performs fatal UTF-8 decoding, bounded parsing and exact component validation. Use existing `normalizeClientRuntime`/Java resolver for the complete runtime tuple.
+- `buildMultiMCClientPlan({manifest,archiveEntries}) -> {runtime,runtimeConstraints,downloads:[],finalOverrides,finalDirectories}` consumes normalized parser output and existing `{path,type,size}` archive entries. Operations retain exact `archivePath`, projected `targetPath`, decimal `size`; directories retain targetPath. No fake MRPACK manifest.
+- `normalizeRuntimeConstraints(value) -> frozen {lwjglVersion:string|null}` requires exactly one own enumerable data key and exact version or null. `assertRuntimeConstraints(libraries,runtime,value) -> void` checks normalized effective library coordinates; undefined means legacy MRPACK/no extra constraint, malformed supplied evidence throws `RUNTIME_INCOMPLETE`.
+- Existing inspect/prepare DTOs remain compatible; internal MultiMC inspect adds private `contentFormat:'multimc'` and normalized `runtimeConstraints`. Prepared MultiMC result retains these fields plus the existing owned path/runtime/manifest/optional IDs/total bytes. MRPACK results need no added evidence. No new public IPC fields.
+
+- [ ] Write behavioral failing tests with small inert archive entries: observed MC1.20.1/Forge47.4.13/Java17/LWJGL3.3.1; vanilla; Fabric plus intermediary1.20.1; intermediary wrongversion/withoutFabric; missing/duplicate Minecraft or loaders; disabled/custom/unknown components; aliases; malformed/non-UTF8/oversized metadata; wrong format. Assert exact normalized tuple and `{lwjglVersion:'3.3.1'}` or `{lwjglVersion:null}`. Limit components to32, version identifiers to128 characters with the existing exact-version grammar; reject `latest`, `release`, `snapshot`.
+- [ ] Add layout/content tests: missing marker or payload, competing/nested/wrapped roots, root `manifest.json`, `patches`/`libraries`/`jarmods`, mixed MRPACK; prefix strips exactly once; case/Unicode/file-directory collisions; all existing protected roots/files/executable policy; preserve-after-seed options. Accept only component keys `uid,version,dependencyOnly,important,disabled,cachedName,cachedVersion,cachedRequires,cachedConflicts,cachedVolatile,volatile`; validate booleans/types, reject disabled true, treat bounded cached fields as inert. Root JSON keys are `formatVersion,components` only.
+- [ ] Extend real preparer tests: no external download calls for MultiMC, optional choices empty and nonempty refused, actual assembly totals, no root launcher settings copied, metadata/marker/source-file identity replacement refused, cancellation/busy/owner cleanup unchanged, MRPACK optional and override regressions remain. At least one tiny ZIP exercises the existing actual archive/extractor seam rather than hand-populated output only.
+- [ ] Run `node --test tests/client-modpacks/multimc-client-plan.test.cjs tests/client-modpacks/client-candidate-preparer.test.cjs` and retain expected RED.
+- [ ] Implement the pure parser/projector and bounded format-specific metadata reader. Store format, consumed metadata digest, archive fingerprint and projected file identities privately; revalidate cached inspect and copy. Require `org.lwjgl3` and `net.fabricmc.intermediary` declarations to be dependencyOnly true. Strip only `.minecraft/`, validate every projected path with existing policy, reuse awaited extraction/copy/hashing/release. MultiMC label is `MultiMC client export`, internal version is declared Minecraft version, optionalFiles/optionalFileIds are empty and downloadBytes is `"0"`; version is not advertised as pack release.
+- [ ] Run focused command GREEN plus existing server classifier/preparer client-only refusal tests; self-review and freeze scoped diff/report for independent task review, then scoped commit. No native/source-provider calls.
+
+### Task 2: Durable evidence and common runtime verification
+
+**Files:** Modify `electron/services/client-modpacks/client-pack-state.cjs`, `client-pack-transaction.cjs`, `client-runtime-installer.cjs`, `client-pack-service.cjs`, and Task1's constraints helper if required. Tests: `tests/client-modpacks/client-pack-state.test.cjs`, `client-pack-transaction.test.cjs`, `client-runtime-installer.test.cjs`, `client-pack-service.test.cjs`, `client-pack-integration.test.cjs`.
+
+**Interfaces:** Consume Task1's private prepared evidence and constraints functions. `verifyClientRuntime({clientPath,runtime,runtimeConstraints})` applies additional constraints to the same resolved library set before returning verified; existing omitted-constraint calls preserve MRPACK behavior. `_runtime(clientPath,runtime,runtimeConstraints)` forwards evidence. State normalization returns schema1 unchanged or exact schema2 with the existing four fields plus contentFormat/runtimeConstraints; no public descriptor changes.
+
+- [ ] Write failing state/transaction tests: exact schema2 round trip with descriptor-bound GitHub evidence; missing/extra/malformed evidence, nonempty optional choices, other format/provider refuse recovery-required. Schema1 still reads/writes unchanged. Stage writes schema2 from prepared MultiMC evidence; invalid private format/evidence never silently defaults to schema1. Whole-manifest transitions MRPACK→constrained MultiMC→unconstrained MultiMC→MRPACK replace old evidence, preserve options/saves/config and obey conflicts.
+- [ ] Write failing runtime tests using existing real parsed-profile fixtures: declared LWJGL3.3.1 accepts matching core/modules; missing core, mismatched/mixed version fails even with valid file hashes; MultiMC Fabric requires matching intermediary. Undefined legacy constraints and explicit null LWJGL impose no unintended Forge/vanilla constraint. Use `assert.rejects(...,{code:'RUNTIME_INCOMPLETE'})` for runtime mismatches, not mocked verified flags.
+- [ ] Add service/recovery tests: pre-seal and postpublish verify receive the same private evidence; create a fresh service after publication and still enforce it during Verify/getLaunchAuthority; mutate effective library profile with unchanged Minecraft/loader and assert both refuse. Missing/malformed schema2 evidence refuses. Exercise interrupted ready/publication recovery with schema2, and descriptor changes invalidate retained plan. Keep no-network-after-seal, actual config edit refusal, session renewal, full baseline and worker quiescence tests.
+- [ ] Run all affected test files RED, then implement strict schema2 normalization/staging and evidence propagation. Use retained plan before seal, manifest after publish/restart/recovery, never renderer/config. Existing directory tree proofs cover the manifest atomically; do not add a separate sidecar or journal schema.
+- [ ] Re-run affected files GREEN, self-review/freeze scoped report/diff, independent task review and scoped commit. No native launches.
+
+### Task 3: Explicit provider selection and honest UI
+
+**Files:** Create `electron/services/client-modpacks/client-archive-source.cjs`. Modify `electron/services/client-modpacks/companion-service.cjs`, `client-pack-service.cjs`, `src/components/modpacks/ClientCompanionPanel.svelte`, `src/components/client/ClientModpackPanel.svelte`. Tests: `tests/client-modpacks/companion-service.test.cjs`, `client-pack-service.test.cjs`, `client-pack-ipc.test.cjs`, `tests/e2e/client-modpack-panels.spec.js`.
+
+**Interfaces:** `isClientArchiveName(fileName,provider) -> boolean`, `singleClientArchive(plan,provider) -> part` share exact single-archive gates before/after acquisition in both services. GitHub permits .mrpack/.zip case-insensitively; Modrinth .mrpack only; other providers refuse. Inspected bytes remain format authority. Existing public DTOs stay unchanged.
+
+- [ ] Write failing provider tests for both candidate extensions on the exact installed release, no silent selection/fallback, nonclient ZIP refusal during real inspection before pairing, wrong release/asset/runtime/whole digest refusal, MRPACK→ZIP reviewed change, stale server/client review refusal, and Modrinth ZIP rejection. Add one same-release tiny ZIP→actual preparer→transaction integration using synthetic provider acquisition, not real profile/network.
+- [ ] Write rendered failing tests for explicit ZIP radio selection→Inspect→review→Accept, separate client Review→Install, cancelled/refused ZIP leaves existing pairing intact, and zero additional downloads describes bundled content rather than a zero-size install. Assert no source paths/URLs/runtime-constraint authority in IPC, existing session/selection fencing and keyboard controls remain.
+- [ ] Run focused Node and rendered tests RED. Implement shared gates, GitHub listing and copy. Review always names `inspection.serverVersion` as installed server release, not MultiMC's internal Minecraft version. Explain `MRPACK or MultiMC ZIP`, `Additional pack-file downloads`, archive/runtime costs separate, and that launcher commands/settings are not imported. For zero additional bytes explicitly say bundled content still needs installation. No format field is needed in DTOs.
+- [ ] Run focused Node tests and complete `npx playwright test tests/e2e/client-modpack-panels.spec.js --workers=1` GREEN. Self-review/freeze, independent task review, scoped commit. Then freeze all product/test source for `npm test` and `npm run build`; record exact failures/skips, no suppressed tests or inflated timeouts.
+- [ ] Root updates the native checklist and opens the existing b1 profile normally. Explicitly select/inspect/accept official0.13.4 MultiMC asset477754821, review the client, obtain applicable action-time install confirmation, install/Verify/restart/launch/join via mouse/keyboard. Record actual whole ZIP digest verification and progress, idle/restart session recovery and long ready-review retention. No diagnostic cache injection or existing-instance use; user-only authentication/security prompts remain user-only. Native failures enter the normal diagnosis/fix/retest loop.
+
+## Self-review and handoff
+
+All three tasks preserve the same internal evidence names and source gates. Task1 owns format/path/metadata/content proof, Task2 owns durable runtime requirements, Task3 exposes provider/UI behavior only after both foundations. Five review-focus failure classes have explicit owning tests. Main-owned private schema evolution is separate from public descriptor identity; old MRPACK state is untouched. Source overlap requires sequential execution after session recovery. The user delegated spec/plan review and implementation decisions; root self-reviewed this plan and will use sequential subagents with independent task review, without another design-approval question. No fixture result completes the user's normal-app acceptance request.
