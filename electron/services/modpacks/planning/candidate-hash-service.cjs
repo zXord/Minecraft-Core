@@ -112,6 +112,9 @@ class PersistentCandidateHashService {
     this.workerRecord = null;
     this.nextRequestId = 1;
     this.disposed = false;
+    this.retirements = new Set();
+    this.terminationFailed = false;
+    this.disposalPromise = null;
   }
 
   hashFile(filePath, { expectedIdentity, signal } = {}) {
@@ -169,12 +172,18 @@ class PersistentCandidateHashService {
     });
   }
 
-  async dispose() {
-    if (this.disposed) return;
+  dispose() {
+    if (this.disposalPromise) return this.disposalPromise;
     this.disposed = true;
     const record = this.workerRecord;
-    if (!record) return;
-    await this.#failWorker(record, disposed());
+    if (record) this.#failWorker(record, disposed());
+    // Abort, failure and idle retirement clear workerRecord before termination
+    // finishes. Drain every generation, even when one termination has failed.
+    this.disposalPromise = (async () => {
+      await Promise.all([...this.retirements]);
+      if (this.terminationFailed) throw unavailable();
+    })();
+    return this.disposalPromise;
   }
 
   #allocateRequestId(record) {
@@ -260,9 +269,7 @@ class PersistentCandidateHashService {
     clearTimeout(record.idleTimer);
     record.idleTimer = null;
     if (this.workerRecord === record) this.workerRecord = null;
-    try { record.termination = Promise.resolve(record.worker.terminate()).catch(() => undefined); }
-    catch { record.termination = Promise.resolve(); }
-    return record.termination;
+    return this.#terminateWorker(record);
   }
 
   #failWorker(record, reason, terminate = true) {
@@ -277,8 +284,22 @@ class PersistentCandidateHashService {
     }
     record.pending.clear();
     if (!terminate) return Promise.resolve();
-    try { record.termination = Promise.resolve(record.worker.terminate()).catch(() => undefined); }
-    catch { record.termination = Promise.resolve(); }
+    return this.#terminateWorker(record);
+  }
+
+  #terminateWorker(record) {
+    let finish;
+    record.termination = new Promise(resolve => { finish = resolve; });
+    this.retirements.add(record.termination);
+    const settled = failed => {
+      if (failed) this.terminationFailed = true;
+      this.retirements.delete(record.termination);
+      finish();
+    };
+    // Event callbacks must not leak rejected promises. Remember failure for
+    // dispose(), whose successful result is the operation's quiescence proof.
+    try { Promise.resolve(record.worker.terminate()).then(() => settled(false), () => settled(true)); }
+    catch { settled(true); }
     return record.termination;
   }
 }

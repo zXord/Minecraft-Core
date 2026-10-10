@@ -173,6 +173,17 @@ class ClientPackService {
             const cleanup = await this._cleanupSettled(target);
             return deepFreeze({ clientId: value.clientId, status: verified.verified ? 'ready' : 'modified', verified: verified.verified, cleanup });
           } catch (cause) {
+            let stageStatus = null;
+            if (!context) {
+              // A failed stage can still own candidate writers. Releasing its
+              // reservation would falsely grant recovery quiescence, so first
+              // require authoritative absence, another operation's intent, or
+              // durable settlement of this operation's intent.
+              try { stageStatus = await this.transaction.status(target); } catch (statusCause) { throw fail('RECOVERY_REQUIRED', statusCause); }
+              if (stageStatus !== null && (!stageStatus || !['preparing', 'ready', 'committed', 'abandoned'].includes(stageStatus.phase) ||
+                  typeof stageStatus.operationId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(stageStatus.operationId))) throw fail('RECOVERY_REQUIRED', cause);
+              if (stageStatus?.operationId === operation.operationId && !['committed', 'abandoned'].includes(stageStatus.phase)) throw fail('RECOVERY_REQUIRED', cause);
+            }
             let releasedReservation = false;
             if (reservationAttempted && !runtimeStarted) {
               try { releasedReservation = await this.runtimeInstaller.releaseReservedOperation(operation.operationId) === true; } catch { /* Unknown reservation remains recovery evidence. */ }
@@ -184,12 +195,13 @@ class ClientPackService {
               await this.transaction.abandon(context, { quiescent });
               if (operation.signal.aborted) throw fail('CANCELLED', cause);
             } else if (!context) {
-              const status = await this.transaction.status(target);
-              if (status && !['committed', 'abandoned'].includes(status.phase)) throw fail('RECOVERY_REQUIRED', cause);
+              const status = stageStatus;
               // No intent for this reserved operation means stage never owned a
               // candidate; releaseReservedOperation proves no runtime was allowed.
               const noOperationIntent = releasedReservation && (!status || status.operationId !== operation.operationId);
               if (noOperationIntent) await this.runtimeInstaller.forgetOperation(operation.operationId);
+              // Releasing this unused reservation does not settle a prior owner.
+              if (status && !['committed', 'abandoned'].includes(status.phase)) throw fail('RECOVERY_REQUIRED', cause);
               // stage() may not have written an intent, or may have durably
               // abandoned before returning. Normalize only a proven safe abort;
               // uncertain journal/identity failures must remain recovery errors.

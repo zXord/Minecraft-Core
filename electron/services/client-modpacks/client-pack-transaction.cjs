@@ -7,6 +7,7 @@ const { WindowsReparseInspector } = require('../modpacks/local/windows-reparse-i
 const { normalizeServerDirectoryPath, captureServerDirectoryCopySource, copyServerDirectoryContents,
   identifyServerDirectory, assertServerDirectoryIdentity, inspectServerDirectoryTree, inspectAndFlushServerDirectoryTree } = require('../modpack-lifecycle/server-directory-identity.cjs');
 const { copyRegularFile } = require('../modpacks/planning/production-candidate-preparer.cjs');
+const { PersistentCandidateHashService } = require('../modpacks/planning/candidate-hash-service.cjs');
 const { planOwnership, normalizeClientPackManifest, normalizeEntries } = require('./client-pack-state.cjs');
 const { isSafeWindowsBasename } = require('../modpacks/windows-basename.cjs');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -61,10 +62,11 @@ function validateInventory(chunks) {
   return entries;
 }
 class ClientPackTransaction {
-  constructor({ journalRoot, durableFs, stateStore, reparseInspector = process.platform === 'win32' ? new WindowsReparseInspector() : { async isReparsePoint() { return false; } } } = {}) {
-    if (!journalRoot || !durableFs || !stateStore) throw fail('INVALID_REQUEST');
+  constructor({ journalRoot, durableFs, stateStore, reparseInspector = process.platform === 'win32' ? new WindowsReparseInspector() : { async isReparsePoint() { return false; } },
+    hashServiceFactory = () => new PersistentCandidateHashService() } = {}) {
+    if (!journalRoot || !durableFs || !stateStore || typeof hashServiceFactory !== 'function') throw fail('INVALID_REQUEST');
     this.journalRoot = normalizeServerDirectoryPath(journalRoot);
-    Object.assign(this, { durableFs, stateStore, reparseInspector });
+    Object.assign(this, { durableFs, stateStore, reparseInspector, hashServiceFactory });
     this.contexts = new WeakMap();
   }
   _options() { return { reparseInspector: this.reparseInspector }; }
@@ -189,6 +191,7 @@ class ClientPackTransaction {
     this.contexts.set(context, { record: null, sha256: prior.sha256 });
     await this._write(context, { schemaVersion: 1, operationId, clientId: target.clientId, clientPath: context.clientPath,
       parentIdentity, oldTree, candidateIdentity: null, candidateTree: null, phase: 'preparing' });
+    let copyWorkersQuiescent = true;
     try {
     await this._retainProof(context, 'previous', baseline);
     await fs.mkdir(context.candidatePath);
@@ -212,16 +215,32 @@ class ClientPackTransaction {
     const remove = [...ownership.removals, ...ownership.conflicts.filter(c => c.action === 'remove' && conflictChoices[c.path] === 'replace').map(c => c.path)];
     for (const relative of remove) await fs.unlink(path.join(context.candidatePath, ...liveFiles.get(relative.toLowerCase()).path.split('/')));
     const entries = [];
-    for (const entry of selected) {
-      signal?.throwIfAborted();
-      const existing = liveFiles.get(entry.pathKey);
-      const preserved = ownership.preserved.includes(entry.path) || conflictChoices[entry.path] === 'preserve';
-      if (!preserved) {
-        const destination = path.join(context.candidatePath, ...(existing?.path || entry.path).split('/'));
-        const measured = await copyRegularFile(path.join(prepared.path, ...entry.path.split('/')), destination, { ...this._options(), signal, replace: !!existing });
-        if (measured.sha256 !== entry.sha256 || measured.size !== entry.size) throw fail('PLAN_STALE');
+    let candidateHashService = null;
+    try {
+      for (const entry of selected) {
+        signal?.throwIfAborted();
+        const existing = liveFiles.get(entry.pathKey);
+        const preserved = ownership.preserved.includes(entry.path) || conflictChoices[entry.path] === 'preserve';
+        if (!preserved) {
+          if (candidateHashService === null) {
+            const service = this.hashServiceFactory();
+            if (!service || typeof service.hashFile !== 'function' || typeof service.dispose !== 'function') throw fail('INVALID_REQUEST');
+            candidateHashService = service; copyWorkersQuiescent = false;
+          }
+          const destination = path.join(context.candidatePath, ...(existing?.path || entry.path).split('/'));
+          const measured = await copyRegularFile(path.join(prepared.path, ...entry.path.split('/')), destination,
+            { ...this._options(), signal, replace: !!existing, candidateHashService });
+          if (measured.sha256 !== entry.sha256 || measured.size !== entry.size) throw fail('PLAN_STALE');
+        }
+        entries.push({ ...entry, ...(preserved && existing?.sha256 !== entry.sha256 ? { preserved: true } : {}) });
       }
-      entries.push({ ...entry, ...(preserved && existing?.sha256 !== entry.sha256 ? { preserved: true } : {}) });
+    } finally {
+      // The operation owns this lazy service; disposal must finish before either
+      // manifest publication or the outer catch can assert writer quiescence.
+      if (candidateHashService !== null) {
+        await candidateHashService.dispose();
+        copyWorkersQuiescent = true;
+      }
     }
     // Retained removed owned files remain tracked as divergent, never silently re-owned.
     for (const conflict of ownership.conflicts.filter(c => c.action === 'remove' && conflictChoices[c.path] === 'preserve')) {
@@ -231,6 +250,7 @@ class ClientPackTransaction {
     await this.stateStore.write(context.candidatePath, manifest);
     return context;
     } catch (cause) {
+      if (!copyWorkersQuiescent) throw fail('RECOVERY_REQUIRED', cause);
       // Assembly uses awaited filesystem writes; its hash helpers only read and
       // dispose before returning. No runtime writer has started at this boundary.
       // Never delete partial evidence here; settle only the unchanged live tree.

@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
 const { ClientPackStateStore } = require('../../electron/services/client-modpacks/client-pack-state.cjs');
 const { ClientPackTransaction } = require('../../electron/services/client-modpacks/client-pack-transaction.cjs');
+const { PersistentCandidateHashService } = require('../../electron/services/modpacks/planning/candidate-hash-service.cjs');
 const { ClientProcessGuard } = require('../../electron/services/client-modpacks/client-process-guard.cjs');
 const { ClientPackService } = require('../../electron/services/client-modpacks/client-pack-service.cjs');
 const { ManagementSessionBroker } = require('../../electron/services/management-session-broker.cjs');
@@ -779,6 +780,85 @@ test('ordinary pre-stage failure releases reservation and forgets only unstarted
   assert.equal(f.forgottenOperations.length, 1); assert.equal(f.runtimeOperations.size, 0);
   assert.equal(await f.transaction.status(f.target), null);
   assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'later settings');
+});
+for (const mode of ['success', 'hash-error', 'abort']) test(`stage ${mode} with failed hash disposal retains reservation and blocks real recovery`, async t => {
+  const f = fixture(t); const preview = await f.service.preview({ clientId: 'one' });
+  const controller = new AbortController(); let hashes = 0; let disposals = 0; let releases = 0; let runtimePrepares = 0;
+  f.transaction.hashServiceFactory = () => {
+    const real = new PersistentCandidateHashService();
+    return {
+      async hashFile(file, options) {
+        hashes++;
+        if (mode === 'hash-error' && file === path.join(path.dirname(f.live), 'staged/mods/pack.jar')) fs.writeFileSync(file, 'changed after source capture');
+        if (mode === 'abort') controller.abort();
+        return real.hashFile(file, options);
+      },
+      async dispose() { disposals++; await real.dispose(); throw new Error('injected hash disposal failure'); }
+    };
+  };
+  const release = f.dependencies.runtimeInstaller.releaseReservedOperation.bind(f.dependencies.runtimeInstaller);
+  f.dependencies.runtimeInstaller.releaseReservedOperation = async id => { releases++; return release(id); };
+  f.dependencies.runtimeInstaller.prepare = async () => { runtimePrepares++; assert.fail('Runtime must not start after uncertain stage disposal'); };
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }, { signal: controller.signal }), { code: 'RECOVERY_REQUIRED' });
+  const beforeRecovery = await f.transaction.status(f.target);
+  const candidate = f.transaction.candidatePathFor(f.target, beforeRecovery.operationId);
+  const journal = fs.readFileSync(f.transaction._paths(f.target).journalPath);
+  // Exercise the real recovery path: a reserved-but-unreleased operation is not quiescence proof.
+  const recovery = await f.service.recover({ clientId: 'one' }).then(value => ({ value }), error => ({ error }));
+  assert.equal(releases, 0); assert.equal(runtimePrepares, 0);
+  assert.equal(disposals, 1); assert.equal(hashes, 2, 'source and destination hashes are dispatched together');
+  assert.equal(recovery.error?.code, 'RECOVERY_REQUIRED');
+  assert.equal(beforeRecovery.phase, 'preparing');
+  assert.deepEqual(await f.transaction.status(f.target), beforeRecovery);
+  assert.deepEqual(fs.readFileSync(f.transaction._paths(f.target).journalPath), journal);
+  assert.equal(await f.dependencies.runtimeInstaller.awaitQuiescence(beforeRecovery.operationId), false);
+  assert.equal(f.runtimeOperations.get(beforeRecovery.operationId)?.released, false);
+  assert.deepEqual(f.forgottenOperations, []); assert.equal(fs.existsSync(candidate), true);
+  if (mode === 'success') assert.equal(fs.readFileSync(path.join(candidate, 'mods/pack.jar'), 'utf8'), 'pack');
+  assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'settings');
+  assert.equal(fs.existsSync(path.join(f.live, 'mods')), false);
+});
+for (const statusKind of ['read-error', 'unknown', 'malformed-settled']) test(`pre-stage ${statusKind} status cannot release reserved writer proof`, async t => {
+  const f = fixture(t); const preview = await f.service.preview({ clientId: 'one' }); let releases = 0;
+  f.transaction.stage = async () => {
+    f.transaction.status = async () => {
+      if (statusKind === 'read-error') throw new Error('injected journal read failure');
+      return statusKind === 'unknown' ? undefined : { phase: 'abandoned' };
+    };
+    throw new Error('injected stage failure');
+  };
+  const release = f.dependencies.runtimeInstaller.releaseReservedOperation.bind(f.dependencies.runtimeInstaller);
+  f.dependencies.runtimeInstaller.releaseReservedOperation = async id => { releases++; return release(id); };
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(releases, 0); assert.equal(f.runtimeOperations.size, 1); assert.deepEqual(f.forgottenOperations, []);
+});
+test('no stage intent releases reserved proof independently of the thrown public error code', async t => {
+  const f = fixture(t); const preview = await f.service.preview({ clientId: 'one' });
+  const cause = Object.assign(new Error('injected pre-stage refusal'), { code: 'RECOVERY_REQUIRED' });
+  f.transaction.stage = async () => { throw cause; };
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), error => error === cause);
+  assert.equal(await f.transaction.status(f.target), null);
+  assert.equal(f.runtimeOperations.size, 0); assert.equal(f.forgottenOperations.length, 1);
+});
+test('prior other-operation preparing intent retains its evidence but releases only the new unused reservation', async t => {
+  const f = fixture(t); const preview = await f.service.preview({ clientId: 'one' });
+  const plan = f.service.plans.get(preview.planId); const priorId = crypto.randomUUID();
+  await f.dependencies.runtimeInstaller.reserveOperation({ operationId: priorId, clientPath: f.transaction.candidatePathFor(f.target, priorId) });
+  const prior = await f.transaction.stage({ target: f.target, baseline: plan.baseline, oldManifest: plan.oldManifest,
+    prepared: plan.prepared, descriptor: plan.descriptor, optionalFileIds: plan.optionalFileIds, operationId: priorId });
+  const journal = fs.readFileSync(f.transaction._paths(f.target).journalPath); const released = [];
+  const release = f.dependencies.runtimeInstaller.releaseReservedOperation.bind(f.dependencies.runtimeInstaller);
+  f.dependencies.runtimeInstaller.releaseReservedOperation = async id => { released.push(id); return release(id); };
+  let newId;
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }, { onProgress: event => { newId = event.operationId; } }), { code: 'RECOVERY_REQUIRED' });
+  assert.notEqual(newId, priorId); assert.deepEqual(released, [newId]); assert.deepEqual(f.forgottenOperations, [newId]);
+  assert.deepEqual([...f.runtimeOperations.keys()], [priorId]); assert.equal(f.runtimeOperations.get(priorId).released, false);
+  await assert.rejects(f.service.recover({ clientId: 'one' }), { code: 'RECOVERY_REQUIRED' });
+  assert.deepEqual(await f.transaction.status(f.target), { phase: 'preparing', operationId: priorId });
+  assert.deepEqual(fs.readFileSync(f.transaction._paths(f.target).journalPath), journal);
+  assert.equal(fs.readFileSync(path.join(prior.candidatePath, 'mods/pack.jar'), 'utf8'), 'pack');
+  assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'settings');
+  assert.equal(fs.existsSync(path.join(f.live, 'mods')), false);
 });
 test('uncertain reservation release remains recovery-required and is never forgotten', async t => {
   const f = fixture(t); const preview = await f.service.preview({ clientId: 'one' });
