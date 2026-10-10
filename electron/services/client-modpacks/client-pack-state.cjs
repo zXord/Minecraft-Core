@@ -5,6 +5,9 @@ const { normalizeCompanionDescriptor } = require('./companion-contracts.cjs');
 const { clientPathPolicy } = require('./client-content-policy.cjs');
 const { normalizeRuntimeConstraints } = require('./client-runtime-constraints.cjs');
 const MANIFEST_NAME = '.minecraft-core-client-pack.json';
+// Up to 100,000 entry objects (seven values each when preserved), 10,000
+// optional IDs and bounded descriptor fields. Serialized writes remain 8 MiB.
+const MANIFEST_JSON_VALUES = 1_000_000;
 const fail = () => new ModpackError('RECOVERY_REQUIRED', 'Client ownership state could not be verified');
 function normalizeEntries(entries) {
   if (!Array.isArray(entries) || entries.length > 100000) throw fail();
@@ -19,7 +22,7 @@ function normalizeEntries(entries) {
   }).sort((a, b) => a.pathKey.localeCompare(b.pathKey, 'en-US'));
 }
 function normalizeClientPackManifest(value) {
-  const v = strictJsonClone(value);
+  const v = strictJsonClone(value, { maxCollection: MANIFEST_JSON_VALUES });
   if (v?.schemaVersion === 2) {
     try {
       if (Object.keys(v).sort().join(',') !== 'contentFormat,descriptor,entries,optionalFileIds,runtimeConstraints,schemaVersion' ||
@@ -67,7 +70,7 @@ class ClientPackStateStore {
   }
   async write(clientPath, value) {
     const manifest = normalizeClientPackManifest(value);
-    await this.durableFs.writeJsonAtomicAsync(path.join(clientPath, MANIFEST_NAME), manifest);
+    await this.durableFs.writeJsonAtomicAsync(path.join(clientPath, MANIFEST_NAME), manifest, { maxJsonValues: MANIFEST_JSON_VALUES });
     return manifest;
   }
 }

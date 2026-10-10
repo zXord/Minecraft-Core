@@ -11,6 +11,9 @@ const MAX_JSON_BYTES = 8 * 1024 * 1024;
 const MAX_HASH_BYTES = 16 * 1024 * 1024 * 1024;
 const MAX_JSON_DEPTH = 64;
 const MAX_JSON_COLLECTION = 10_000;
+// Large, schema-validated inventories may opt in per write. Other records keep
+// the ordinary limit; byte, depth, string and strict-JSON guards still apply.
+const MAX_JSON_INVENTORY_VALUES = 1_000_000;
 const MAX_JSON_STRING_BYTES = 4 * 1024 * 1024;
 // Each directory carries a nested identity object. Keep the cross-process batch
 // below the native worker's strict 16,384-token JSON ceiling even when all 16
@@ -660,10 +663,12 @@ function createDurableFs({
 
   function writeJsonAtomic(filePath, value, options = {}) {
     try {
-      const clone = strictJsonClone(value, { maxStringBytes: Math.min(MAX_JSON_STRING_BYTES, jsonLimit) });
+      const { maxJsonValues, mode, fsyncParent, expectedTargetSha256 } = options;
+      const maxCollection = boundedInteger(maxJsonValues, MAX_JSON_COLLECTION, MAX_JSON_INVENTORY_VALUES);
+      const clone = strictJsonClone(value, { maxCollection, maxStringBytes: Math.min(MAX_JSON_STRING_BYTES, jsonLimit) });
       const serialized = `${JSON.stringify(clone, null, 2)}\n`;
       if (Buffer.byteLength(serialized, 'utf8') > jsonLimit) throw new TypeError('JSON byte limit exceeded');
-      return writeFileAtomic(filePath, serialized, options);
+      return writeFileAtomic(filePath, serialized, { mode, fsyncParent, expectedTargetSha256 });
     } catch (error) {
       throw commitFailure(error);
     }
@@ -825,10 +830,12 @@ function createDurableFs({
 
   async function writeJsonAtomicAsync(filePath, value, options = {}) {
     try {
-      const clone = strictJsonClone(value, { maxStringBytes: Math.min(MAX_JSON_STRING_BYTES, jsonLimit) });
+      const { maxJsonValues, mode, fsyncParent, expectedTargetSha256 } = options;
+      const maxCollection = boundedInteger(maxJsonValues, MAX_JSON_COLLECTION, MAX_JSON_INVENTORY_VALUES);
+      const clone = strictJsonClone(value, { maxCollection, maxStringBytes: Math.min(MAX_JSON_STRING_BYTES, jsonLimit) });
       const serialized = `${JSON.stringify(clone, null, 2)}\n`;
       if (Buffer.byteLength(serialized, 'utf8') > jsonLimit) throw new TypeError('JSON byte limit exceeded');
-      return await writeFileAtomicAsync(filePath, serialized, options);
+      return await writeFileAtomicAsync(filePath, serialized, { mode, fsyncParent, expectedTargetSha256 });
     } catch (error) {
       throw commitFailure(error);
     }

@@ -31,6 +31,9 @@ function preparedManifestEvidence(prepared, descriptor, optionalFileIds) {
 }
 const MAX_CLEANUP_ENTRIES = 20000;
 const MAX_CLEANUP_BYTES = 8 * 1024 * 1024;
+// 20,000 inventory objects with eight fields each, plus chunks and ownership
+// metadata. Chunking alone does not reduce strict JSON's total-value count.
+const MAX_CLEANUP_JSON_VALUES = 200_000;
 const exactKeys = (value, keys) => value && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
 const nativeIdentity = value => exactKeys(value, ['volumeSerial', 'fileId']) && typeof value.volumeSerial === 'string' && typeof value.fileId === 'string' && /^[a-f0-9]{1,32}$/.test(value.volumeSerial) && /^[a-f0-9]{1,64}$/.test(value.fileId);
 const validTree = value => exactKeys(value, ['directoryIdentity', 'fingerprint']) && nativeIdentity(value.directoryIdentity) && validSha256(value.fingerprint);
@@ -135,7 +138,7 @@ class ClientPackTransaction {
       proof = { ...owner, entries: chunks };
       if (Buffer.byteLength(`${JSON.stringify(proof, null, 2)}\n`) > MAX_CLEANUP_BYTES) proof = { ...owner, retentionReason: 'inventory-byte-limit' };
     }
-    await this.durableFs.writeJsonAtomicAsync(paths.proofPath, proof, { expectedTargetSha256: null });
+    await this.durableFs.writeJsonAtomicAsync(paths.proofPath, proof, { expectedTargetSha256: null, maxJsonValues: MAX_CLEANUP_JSON_VALUES });
   }
   async _write(context, record) {
     const internal = this.contexts.get(context);

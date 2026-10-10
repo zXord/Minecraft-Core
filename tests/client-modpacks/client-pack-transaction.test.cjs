@@ -172,6 +172,47 @@ test('unknown writer quiescence retains candidate and durable preparing evidence
   assert.equal(fs.existsSync(context.candidatePath), true);
   assert.equal((await f.tx.status(f.target)).phase, 'preparing');
 });
+for (const settlement of ['abandon', 'recover']) test(`large candidate inventory survives ${settlement} with unchanged old live files`, async t => {
+  const f = fixture(t);
+  const packPaths = Array.from({ length: 1200 }, (_, index) => `config/large/file-${String(index).padStart(4, '0')}.cfg`);
+  for (const file of packPaths) {
+    write(f.prepared.path, file, 'x');
+    f.prepared.manifest.entries.push({ path: file, pathKey: file, sha256: hash('x'), size: '1', policy: 'managed' });
+  }
+  const baseline = await captureServerDirectoryCopySource(f.live, { reparseInspector });
+  const context = await stage(f, { baseline });
+  assert.equal((await f.tx.status(f.target)).phase, 'preparing');
+  const result = settlement === 'abandon'
+    ? await f.tx.abandon(context, { quiescent: true })
+    : await new ClientPackTransaction(f.dependencies).recover(f.target, { quiescent: true });
+  assert.deepEqual(result, { phase: 'abandoned', operationId: context.operationId });
+  assert.deepEqual(await new ClientPackTransaction(f.dependencies).recover(f.target), result);
+  const after = await captureServerDirectoryCopySource(f.live, { reparseInspector });
+  assert.deepEqual(after.directoryIdentity, baseline.directoryIdentity); assert.equal(after.fingerprint, baseline.fingerprint);
+  for (const [file, bytes] of Object.entries({ 'options.txt': 'mine', 'saves/world.dat': 'save', 'client-config.json': 'auth', 'mods/user.jar': 'user' })) {
+    assert.equal(fs.readFileSync(path.join(f.live, file), 'utf8'), bytes);
+  }
+  assert.equal(await f.stateStore.read(f.live), null);
+  assert.equal(fs.existsSync(path.join(f.live, 'mods/new.jar')), false);
+  assert.equal(fs.existsSync(path.join(f.live, 'config')), false);
+
+  const proofName = fs.readdirSync(f.dependencies.journalRoot).find(name => name.endsWith(`.retained-proof-${context.operationId}-candidate.json`));
+  assert.ok(proofName, 'abandonment must durably retain the full candidate inventory');
+  const proof = JSON.parse(fs.readFileSync(path.join(f.dependencies.journalRoot, proofName), 'utf8'));
+  assert.equal(proof.operationId, context.operationId); assert.equal(proof.role, 'candidate');
+  assert.equal(Object.hasOwn(proof, 'retentionReason'), false);
+  const inventory = proof.entries.flat();
+  assert.equal(inventory.length, 1211); assert.equal(inventory.filter(item => item.type === 'file').length, 1206);
+  assert.deepEqual(inventory.filter(item => item.path.startsWith('config/large/file-')).map(item => item.path).sort(), packPaths);
+  for (const item of inventory.filter(item => item.path.startsWith('config/large/file-'))) {
+    assert.equal(item.size, '1'); assert.equal(item.sha256, hash('x'));
+  }
+  assert.equal(fs.readFileSync(path.join(context.candidatePath, 'config/large/file-0000.cfg'), 'utf8'), 'x');
+  assert.equal(fs.readFileSync(path.join(context.candidatePath, 'config/large/file-1199.cfg'), 'utf8'), 'x');
+  const record = JSON.parse(fs.readFileSync(context.journalPath, 'utf8'));
+  assert.equal(record.phase, 'abandoned'); assert.deepEqual(record.candidateTree, proof.tree);
+  assert.deepEqual(record.candidateIdentity, proof.tree.directoryIdentity);
+});
 test('committed recovery accepts later user save edits while checking native live identity', async t => {
   const f = fixture(t); const context = await stage(f); await f.tx.seal(context); await f.tx.publish(context);
   write(f.live, 'saves/world.dat', 'later user save');

@@ -30,6 +30,42 @@ const readyDescriptor = { schemaVersion: 1, status: 'ready', serverFingerprint: 
   runtime: { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.3.12', javaMajor: 17, os: 'win32', architecture: 'x64' } };
 const multiManifest = () => ({ schemaVersion: 2, descriptor: readyDescriptor, optionalFileIds: [], entries: [entry('mods/pack.jar')],
   contentFormat: 'multimc', runtimeConstraints: { lwjglVersion: '3.3.1' } });
+const largeManifest = schemaVersion => ({
+  ...(schemaVersion === 2 ? multiManifest() : { schemaVersion: 1, descriptor: readyDescriptor, optionalFileIds: [] }),
+  entries: Array.from({ length: 12926 }, (_, index) => entry(`mods/pack-${String(index).padStart(5, '0')}.jar`))
+});
+
+for (const schemaVersion of [1, 2]) test(`schema${schemaVersion} normalizes a 12926-entry ownership manifest without losing entries`, () => {
+  const value = largeManifest(schemaVersion);
+  const actual = normalizeClientPackManifest(value);
+  assert.deepEqual(actual, value);
+  assert.equal(actual.entries.length, 12926);
+  assert.equal(actual.entries[0].path, 'mods/pack-00000.jar');
+  assert.equal(actual.entries.at(-1).path, 'mods/pack-12925.jar');
+});
+
+for (const schemaVersion of [1, 2]) test(`schema${schemaVersion} state store atomically round trips a 12926-entry ownership manifest`, async t => {
+  const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');
+  const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
+  const { ClientPackStateStore, MANIFEST_NAME } = require('../../electron/services/client-modpacks/client-pack-state.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'client-state-large-'));
+  t.after(() => {
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir())); assert.match(path.basename(root), /^client-state-large-[A-Za-z0-9]+$/);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const durableFs = createDurableFs({ allowedRoots: [root], durableClient: { moveWriteThrough: fs.renameSync, replaceFileWriteThrough: fs.renameSync,
+    flushDirectory() {}, moveWriteThroughAsync: fs.promises.rename, replaceFileWriteThroughAsync: fs.promises.rename, async flushDirectoryAsync() {} } });
+  const value = largeManifest(schemaVersion);
+  assert.deepEqual(await new ClientPackStateStore({ durableFs }).write(root, value), value);
+  assert.deepEqual(await new ClientPackStateStore({ durableFs }).read(root), value);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, MANIFEST_NAME), 'utf8')), value);
+  assert.deepEqual(fs.readdirSync(root), [MANIFEST_NAME]);
+
+  const before = fs.readFileSync(path.join(root, MANIFEST_NAME));
+  const invalid = largeManifest(schemaVersion); invalid.entries[12925] = entry('saves/world.dat');
+  await assert.rejects(new ClientPackStateStore({ durableFs }).write(root, invalid), { code: schemaVersion === 2 ? 'RECOVERY_REQUIRED' : 'UNSAFE_ARCHIVE_ENTRY' });
+  assert.deepEqual(fs.readFileSync(path.join(root, MANIFEST_NAME)), before);
+});
 
 test('schema2 retains exact GitHub-bound constraints and schema1 remains unchanged', () => {
   const value = multiManifest(); const actual = normalizeClientPackManifest(value);
