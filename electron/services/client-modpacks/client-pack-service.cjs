@@ -26,7 +26,7 @@ class ClientPackService {
   constructor({ resolveClient, managementClient, candidatePreparer, sourceResolver, artifactAcquisition, archiveInspector,
     processGuard, transaction, stateStore, runtimeInstaller, reparseInspector, clock = Date.now } = {}) {
     if (typeof resolveClient !== 'function') throw fail();
-    for (const [object, methods] of [[managementClient, ['getRequirement']], [candidatePreparer, ['inspect', 'prepare', 'release', 'forgetInspection']],
+    for (const [object, methods] of [[managementClient, ['readRequirement']], [candidatePreparer, ['inspect', 'prepare', 'release', 'forgetInspection']],
       [sourceResolver, ['resolveArtifactSetPlan']], [artifactAcquisition, ['downloadSet']], [archiveInspector, ['inspectArchive']],
       [archiveInspector?.materializer?.workspaceRegistry, ['releaseOwner']], [processGuard, ['withMutation']],
       [transaction, ['stage', 'seal', 'publish', 'abandon', 'status', 'recover', 'cleanup', 'candidatePathFor']], [stateStore, ['read']],
@@ -41,7 +41,8 @@ class ClientPackService {
     return { clientId, clientPath: target.clientPath };
   }
   _run(clientId, options, work) {
-    request(options, ['signal', 'onProgress'], []);
+    request(options, ['signal', 'onProgress', 'deadline'], []);
+    if (options.deadline !== undefined && (!Number.isFinite(options.deadline) || options.deadline <= 0)) return Promise.reject(fail());
     if (this.closed || [...this.operations.values()].some(op => op.clientId === clientId)) return Promise.reject(fail('OPERATION_IN_PROGRESS'));
     if (options.onProgress !== undefined && typeof options.onProgress !== 'function') return Promise.reject(fail());
     const controller = new AbortController(); const operationId = crypto.randomUUID();
@@ -59,14 +60,14 @@ class ClientPackService {
     };
     const operation = { clientId, controller, operationId, promise: null };
     this.operations.set(operationId, operation);
-    operation.promise = Promise.resolve().then(() => { progress({ phase: 'preparing' }); cancelled(controller.signal); return work({ signal: controller.signal, onProgress: progress, operationId }); })
+    operation.promise = Promise.resolve().then(() => { progress({ phase: 'preparing' }); cancelled(controller.signal); return work({ signal: controller.signal, deadline: options.deadline, onProgress: progress, operationId }); })
       .finally(() => { this.operations.delete(operationId); options.signal?.removeEventListener('abort', abort); });
     return operation.promise;
   }
-  async _requirement(clientId) {
-    const value = await this.managementClient.getRequirement(clientId);
-    if (!value) return null;
-    return normalizeCompanionDescriptor(value);
+  async _requirement(clientId, options = {}) {
+    const { descriptor, binding } = await this.managementClient.readRequirement(clientId, options);
+    if (!binding || typeof binding.generation !== 'string' || !binding.generation) throw fail('CLIENT_PACK_UNAVAILABLE');
+    return { descriptor: descriptor === null ? null : normalizeCompanionDescriptor(descriptor), binding };
   }
   async _resolved(descriptor, options) {
     const source = descriptor.source;
@@ -107,12 +108,12 @@ class ClientPackService {
       if (this.plans.size >= 4) throw fail('OPERATION_IN_PROGRESS');
       const status = await this.transaction.status(target);
       if (status && !['committed', 'abandoned'].includes(status.phase)) throw fail('RECOVERY_REQUIRED');
-      const descriptor = await this._requirement(value.clientId);
+      const { descriptor, binding } = await this._requirement(value.clientId, { signal: operation.signal, deadline: operation.deadline });
       if (descriptor?.status !== 'ready') throw fail('CLIENT_PACK_UNAVAILABLE');
       // Recheck/reserve after the awaited requirement lookup. In-flight previews
       // count against retention, not just completed plans.
       if (this.plans.size >= 4) throw fail('OPERATION_IN_PROGRESS');
-      const plan = { target, descriptor, planId: crypto.randomUUID(), createdAt: this.clock(), active: true, inspectionId: null, prepared: null };
+      const plan = { target, descriptor, binding, planId: crypto.randomUUID(), createdAt: this.clock(), active: true, inspectionId: null, prepared: null };
       this.plans.set(plan.planId, plan);
       try {
         const verified = await this._resolved(descriptor, operation);
@@ -146,7 +147,7 @@ class ClientPackService {
         return await this.processGuard.withMutation(target, async () => {
           let context; let runtimeStarted = false; let publicationStarted = false; let reservationAttempted = false; let cleanupAttempted = false;
           try {
-            if (!equal(await this._requirement(value.clientId), plan.descriptor)) throw fail('PLAN_STALE');
+            if (!equal((await this._requirement(value.clientId, { signal: operation.signal, deadline: operation.deadline, expectedBinding: plan.binding })).descriptor, plan.descriptor)) throw fail('PLAN_STALE');
             await this._resolved(plan.descriptor, operation); cancelled(operation.signal);
             reservationAttempted = true;
             await this.runtimeInstaller.reserveOperation({ operationId: operation.operationId, clientPath: this.transaction.candidatePathFor(target, operation.operationId) });
@@ -161,7 +162,7 @@ class ClientPackService {
             await this._runtime(context.candidatePath, plan.descriptor.runtime);
             const runtimeSnapshot = await captureServerDirectoryCopySource(context.candidatePath, this.reparseInspector ? { reparseInspector: this.reparseInspector } : {});
             if (!equal(nonRuntimeFiles(preservedSnapshot), nonRuntimeFiles(runtimeSnapshot))) throw fail('PLAN_STALE');
-            if (!equal(await this._requirement(value.clientId), plan.descriptor)) throw fail('PLAN_STALE');
+            if (!equal((await this._requirement(value.clientId, { signal: operation.signal, deadline: operation.deadline, expectedBinding: plan.binding })).descriptor, plan.descriptor)) throw fail('PLAN_STALE');
             cancelled(operation.signal);
             await this.transaction.seal(context);
             // Cancellation stops at the durable ready marker; publication must now settle or recover.
@@ -239,7 +240,7 @@ class ClientPackService {
         }
         throw fail('RECOVERY_REQUIRED');
       }
-      descriptor = await this._requirement(value.clientId);
+      descriptor = (await this._requirement(value.clientId)).descriptor;
       const result = await this._verify(target, descriptor);
       return deepFreeze({ clientId: value.clientId, status: result.status, verified: result.verified, descriptor });
     } catch (cause) {
@@ -249,9 +250,10 @@ class ClientPackService {
     }
   }
   async verify(value) { return this.getState(value); }
-  async getLaunchAuthority(value) {
+  async getLaunchAuthority(value, options = {}) {
     request(value, ['clientId']); const target = await this._target(value.clientId);
-    const result = await this._verify(target, await this._requirement(value.clientId));
+    const result = await this._verify(target, (await this._requirement(value.clientId, options)).descriptor);
+    cancelled(options.signal);
     if (!result.verified) throw fail(result.status === 'update-required' ? 'PLAN_STALE' : 'RUNTIME_INCOMPLETE');
     return deepFreeze({ ...target, runtime: result.manifest.descriptor.runtime, profileId: result.runtime.profileId,
       ...(result.runtime.javaPath ? { javaPath: result.runtime.javaPath } : {}), serverFingerprint: result.manifest.descriptor.serverFingerprint, artifactSha256: result.manifest.descriptor.artifactSha256 });

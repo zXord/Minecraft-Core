@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
+const { EventEmitter } = require('node:events');
 
 const {
   createProductionDurableFsFactory,
@@ -517,6 +518,8 @@ test('startup recovery composes and initializes the complete modpack IPC graph b
   };
   const composition = fakeModpackComposition({
     providers: composedProviders,
+    managementSessionBroker: { async acquire() { return { token: 'synthetic' }; } },
+    async resolveClientByPath() { return { clientId: 'local' }; },
     async initialize() { order.push('modpacks:initialize'); },
     releaseMonitor: {
       async checkAll() {}, async checkOne() {},
@@ -552,6 +555,8 @@ test('startup recovery composes and initializes the complete modpack IPC graph b
   await graph.startup.initializeRecovery(graph);
   assert.equal(factoryCalls, 1);
   assert.equal(graph.modpacks.lifecycleService, composition.lifecycleService);
+  assert.equal((await graph.modpacks.managementSessionBroker.acquire('local')).token, 'synthetic');
+  assert.equal((await graph.modpacks.resolveClientByPath('synthetic')).clientId, 'local');
   assert.equal(graph.modpacks.providers, composedProviders);
   assert.equal(graph.modpacks.localArtifactSource, composition.localArtifactSource);
   assert.equal(graph.modpacks.destinationReservationService, composition.destinationReservationService);
@@ -930,7 +935,7 @@ test('service graph rejects a relative userData path before constructing service
   );
 });
 
-test('IPC setup consumes the graph store, filesystem, and mutation policy', () => {
+test('IPC setup consumes the graph store, filesystem, and mutation policy', async () => {
   const modulePath = path.resolve(__dirname, '../../electron/ipc-handlers.cjs');
   const originalLoad = Module._load;
   const registered = new Set();
@@ -939,8 +944,9 @@ test('IPC setup consumes the graph store, filesystem, and mutation policy', () =
   let nativeNotificationStartEnabled = null;
   let receivedModpackDependencies = null;
   let receivedLaunchOptions = null;
+  let settingsSessionOptions; const invoked = new Map(); const disposers = []; const invalidated = [];
   const ipcMain = {
-    handle(channel) { registered.add(channel); },
+    handle(channel, handler) { registered.add(channel); invoked.set(channel, handler); },
     removeHandler(channel) { registered.delete(channel); }
   };
   const fallbackStore = { get() { throw new Error('fallback store used'); } };
@@ -1015,15 +1021,23 @@ test('IPC setup consumes the graph store, filesystem, and mutation policy', () =
         createClientPackHandlers: () => ({ handlers: {}, async dispose() {} }) } }
     }), /main.*launch|launch.*authority/i);
     const clientPackLaunchOptions = { async beginManagedLaunch() {} };
-    setupIpcHandlers({ webContents: { on: () => {} } }, {
+    const sender = new EventEmitter(); sender.mainFrame = {}; sender.isDestroyed = () => false;
+    const win = new EventEmitter(); win.webContents = sender;
+    const managementSessionBroker = { invalidate: id => invalidated.push(id), async acquire(id) {
+      assert.equal(id, 'local'); return { token: 'synthetic-token', baseOrigin: 'https://saved.example:25566', bindingGeneration: 'generation', binding: { generation: 'generation' }, revision: 0 };
+    } };
+    setupIpcHandlers(win, {
       store: graphStore,
       filesystem: { sync: graphFs },
       serverMutationPolicy: graphPolicy,
       clientPackLaunchOptions,
-      modpacks: { lifecycleService: { marker: 'lifecycle' }, clientPackService: {}, companionService: {} },
+      modpacks: { lifecycleService: { marker: 'lifecycle' }, clientPackService: {}, companionService: {}, managementSessionBroker,
+        resolveClientByPath: async value => { assert.equal(value, path.resolve('synthetic-client')); return { clientId: 'local' }; } },
+      registerClientPackIpcDisposer: dispose => disposers.push(dispose),
       ipc: {
         nativeNotificationsEnabled: false,
         handlerFactories: {
+          createSettingsHandlers(options) { settingsSessionOptions = options; return {}; },
           createMinecraftLauncherHandlers(_win, options) { receivedLaunchOptions = options; return {}; },
           createClientPackHandlers() { return { handlers: { 'client-packs:get-state': () => ({ ok: true }) }, async dispose() {} }; },
           createModAvailabilityHandlers(options) {
@@ -1046,6 +1060,13 @@ test('IPC setup consumes the graph store, filesystem, and mutation policy', () =
     assert.equal(wrapped.includes('modpacks:get-job'), true);
     assert.equal(registered.has('client-packs:get-state'), true);
     assert.equal(receivedLaunchOptions, clientPackLaunchOptions);
+    assert.equal(registered.has('management-session:acquire'), true);
+    const acquire = invoked.get('management-session:acquire');
+    const session = await acquire({ sender, senderFrame: sender.mainFrame }, { clientPath: path.resolve('synthetic-client'), reason: 'reuse' });
+    assert.equal(session.value.sessionToken, 'synthetic-token'); assert.equal(session.value.baseOrigin, 'https://saved.example:25566');
+    assert.equal((await acquire({ sender, senderFrame: {} }, { clientInstanceId: 'local', reason: 'reuse' })).ok, false);
+    settingsSessionOptions.invalidateManagementSession('local'); assert.deepEqual(invalidated, ['local']);
+    await Promise.all(disposers.map(dispose => dispose())); assert.equal(sender.listenerCount('destroyed'), 0);
   } finally {
     delete require.cache[modulePath];
     Module._load = originalLoad;

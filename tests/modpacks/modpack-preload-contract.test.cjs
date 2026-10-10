@@ -4,6 +4,7 @@ const Module = require('node:module');
 const test = require('node:test');
 
 const INVOKES = [
+  'management-session:acquire',
   'client-packs:get-companion', 'client-packs:list-companion-assets', 'client-packs:inspect-companion',
   'client-packs:accept-companion', 'client-packs:get-state', 'client-packs:preview', 'client-packs:install',
   'client-packs:cancel', 'client-packs:verify', 'client-packs:recover',

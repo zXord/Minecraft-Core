@@ -14,7 +14,7 @@ function fixture(t) {
   const integration = createClientPackIntegration({ resolveClient: async () => target, resolveClientByPath: async () => target,
     processGuard: { withMutation: async (_target, work) => { state.guards++; return work(); } },
     transaction: { status: async () => null }, stateStore: { read: async () => null },
-    managementClient: { getRequirement: async () => state.requirement }, clientPackService: {} });
+    managementClient: { readRequirement: async () => ({ descriptor: state.requirement, binding: { generation: 'writer-fixture' } }) }, clientPackService: {} });
   const policy = createServerMutationPolicy({ coordinator, getInstances: () => [{ id: 'registered', type: 'client', path: root }],
     getClientPackIntegration: () => integration });
   return { root, mod, state, policy, coordinator, write: async () => { state.calls++; fs.writeFileSync(mod, 'changed'); return true; } };

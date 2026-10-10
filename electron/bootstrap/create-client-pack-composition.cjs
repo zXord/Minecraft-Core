@@ -12,6 +12,7 @@ const { ClientProcessGuard } = require('../services/client-modpacks/client-proce
 const { ClientRuntimeOwnership } = require('../services/client-modpacks/client-runtime-ownership.cjs');
 const { ClientRuntimeInstaller } = require('../services/client-modpacks/client-runtime-installer.cjs');
 const { ManagementPackClient } = require('../services/client-modpacks/management-pack-client.cjs');
+const { ManagementSessionBroker } = require('../services/management-session-broker.cjs');
 const { createClientPackIntegration } = require('../services/client-modpacks/client-pack-integration.cjs');
 const fail = () => new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client pack services are unavailable');
 const key = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
@@ -92,9 +93,12 @@ function createClientPackComposition(input) {
   const processGuard = new ClientProcessGuard({ root: processRoot, durableFs: authorityFs, randomUUID });
   const ownership = new ClientRuntimeOwnership({ root: runtimeRoot, durableFs: authorityFs, workerDurableConfig: clientWorkerDurableConfig });
   const runtimeInstaller = new ClientRuntimeInstaller({ ownership });
-  const managementClient = new ManagementPackClient({ resolveClient,
-    readClientConfig: value => require('../utils/config-manager.cjs').readClientConfig(value),
-    getPinnedHttpsAgent: (...args) => require('../utils/tls-utils.cjs').getPinnedHttpsAgent(...args) });
+  const sessionClock = () => { const value = clock.now(); return value instanceof Date ? value.getTime() : value; };
+  const managementSessionBroker = new ManagementSessionBroker({ resolveClient,
+    readClientConfig: input.readClientConfig || (value => require('../utils/config-manager.cjs').readClientConfig(value)),
+    getPinnedHttpsAgent: input.getPinnedHttpsAgent || ((...args) => require('../utils/tls-utils.cjs').getPinnedHttpsAgent(...args)),
+    requestJson: input.managementSessionRequestJson, randomUUID, clock: sessionClock });
+  const managementClient = new ManagementPackClient({ sessionBroker: managementSessionBroker, clock: sessionClock });
   const clientPackService = new ClientPackService({ resolveClient, managementClient, candidatePreparer: clientCandidatePreparer,
     sourceResolver, artifactAcquisition, archiveInspector, processGuard, transaction, stateStore, runtimeInstaller,
     reparseInspector, clock: () => clock.now() });
@@ -109,13 +113,14 @@ function createClientPackComposition(input) {
       } catch { /* Retain unproven/running work; never block a healthy server. */ }
     }
   }
-  return Object.freeze({ companionService, clientPackService, clientPackIntegration,
+  return Object.freeze({ companionService, clientPackService, clientPackIntegration, managementSessionBroker, resolveClientByPath,
     async initialize() {
       if (initialized) return;
       try { await companionStore.initialize(); } catch { /* Corruption remains explicit in companion requests; never reset. */ }
       await cleanupRegisteredClients(); initialized = true;
     },
     dispose() {
+      managementSessionBroker.dispose();
       if (!disposal) disposal = (async () => {
         const results = await Promise.allSettled([clientPackService.dispose(), companionService.dispose(), managedServerModHealth.dispose()]);
         await cleanupRegisteredClients();

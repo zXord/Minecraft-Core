@@ -10,7 +10,7 @@ const { createClientPackIntegration } = require('../../electron/services/client-
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'client-pack-integration-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const state = { journal: null, manifest: null, requirement: null, held: false, writes: 0 };
+  const state = { journal: null, manifest: null, requirement: null, held: false, writes: 0, binding: Object.freeze({ generation: 'launch-binding' }), reads: [] };
   const target = { clientId: 'client-a', clientPath: root };
   const reservation = { jvmArgument: '-Dmain=marker', abortBeforeSpawn: async () => { state.held = false; }, attach() {}, close() {} };
   const integration = createClientPackIntegration({ resolveClient: async id => id === target.clientId ? target : null,
@@ -21,8 +21,9 @@ function fixture(t) {
     transaction: { status: async () => state.journal,
       async assertNoUnsettledAtPath() { if (state.ownershipError) throw state.ownershipError; } }, stateStore: { read: async () => state.manifest },
     managementClient: { getRequirement: async () => { assert.equal(state.held, true); if (state.error) throw state.error; return state.requirement; },
-      getLaunchConnection: async () => ({ serverIp: 'saved.example', serverPort: 25575 }) },
-    clientPackService: { getLaunchAuthority: async () => { assert.equal(state.held, true); if (state.launchError) throw state.launchError;
+      readRequirement: async (_id, options = {}) => { state.reads.push(options); assert.equal(state.held, true); if (state.error) throw state.error; return { descriptor: state.requirement, binding: state.binding }; },
+      getLaunchConnection: async (_id, _authority, options = {}) => { state.reads.push(options); if (state.changed && options.expectedBinding !== state.binding) throw Object.assign(new Error('changed binding'), { code: 'PLAN_STALE' }); return { serverIp: 'saved.example', serverPort: 25575 }; } },
+    clientPackService: { getLaunchAuthority: async (_request, options = {}) => { state.reads.push(options); assert.equal(state.held, true); if (state.launchError) throw state.launchError; state.beforeAuthorityReturn?.();
       return { ...target, runtime: { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.4.13' }, profileId: '1.20.1-forge-47.4.13', javaPath: path.join(root, 'java', 'javaw.exe') }; } }
   });
   return { state, integration, target, reservation, write: () => ++state.writes };
@@ -77,7 +78,7 @@ test('running unmanaged client blocks first managed import before and after appl
   const guard = makeGuard();
   const integration = createClientPackIntegration({ resolveClient: async () => f.target, resolveClientByPath: async () => f.target,
     processGuard: guard, transaction: { status: async () => null }, stateStore: { read: async () => null },
-    managementClient: { getRequirement: async () => f.state.requirement },
+    managementClient: { readRequirement: async () => ({ descriptor: f.state.requirement, binding: f.state.binding }) },
     clientPackService: { getLaunchAuthority: () => assert.fail('unmanaged launch requested managed runtime') }
   });
   const reservation = await integration.beginManagedLaunch({ clientPath: f.target.clientPath });
@@ -102,6 +103,18 @@ test('managed launch carries fresh main authority and saved endpoint inside proc
   assert.equal(result.authority.serverIp, 'saved.example'); assert.equal(result.authority.serverPort, 25575);
   assert.equal(result.jvmArgument, '-Dmain=marker'); assert.equal(f.state.held, true);
   await result.abortBeforeSpawn();
+});
+test('managed launch retains its first binding through verification and connection reads', async t => {
+  const f = fixture(t); f.state.requirement = { status: 'ready' };
+  await f.integration.beginManagedLaunch({ clientPath: f.target.clientPath });
+  assert.equal(f.state.reads.length, 3);
+  assert.equal(f.state.reads[1].expectedBinding, f.state.binding); assert.equal(f.state.reads[2].expectedBinding, f.state.binding);
+});
+test('managed launch fails closed when verification and connection disagree on retained binding', async t => {
+  const f = fixture(t); f.state.requirement = { status: 'ready' }; f.state.changed = true;
+  f.state.beforeAuthorityReturn = () => { f.state.binding = Object.freeze({ generation: 'replacement-binding' }); };
+  await assert.rejects(f.integration.beginManagedLaunch({ clientPath: f.target.clientPath }), { code: 'PLAN_STALE' });
+  assert.equal(f.state.held, false);
 });
 test('stale or unpaired managed launch settles pre-spawn reservation without launch authority', async t => {
   const f = fixture(t); f.state.requirement = { status: 'unpaired' };

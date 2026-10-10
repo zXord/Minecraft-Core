@@ -579,6 +579,8 @@ async function createProductionModpackComposition(input = {}) {
       companionService: clientPacks.companionService,
       clientPackService: clientPacks.clientPackService,
       clientPackIntegration: clientPacks.clientPackIntegration,
+      managementSessionBroker: clientPacks.managementSessionBroker,
+      resolveClientByPath: clientPacks.resolveClientByPath,
       providers,
       artifactAcquisition,
       workspaceRegistry,

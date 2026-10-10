@@ -198,6 +198,8 @@ test('production composition exposes guarded client services and unavailable pai
   assert.equal(typeof composition.clientPackService?.preview, 'function');
   assert.equal(typeof composition.clientPackIntegration?.beginManagedLaunch, 'function');
   assert.equal(typeof composition.companionService?.getStatus, 'function');
+  await assert.rejects(composition.managementSessionBroker.acquire('unregistered'), { code: 'INVALID_REQUEST' });
+  await assert.rejects(composition.resolveClientByPath(path.join(f.input.userDataPath, 'unregistered')), { code: 'INVALID_REQUEST' });
   assert.equal(fs.readFileSync(path.join(registryRoot, 'companions.json'), 'utf8'), '{bad registry');
   const unregisteredPath = path.join(f.input.userDataPath, 'unregistered-client');
   fs.mkdirSync(unregisteredPath);
@@ -599,10 +601,25 @@ test('client operation settlement precedes shared hash and workspace shutdown', 
   const originalDispose = composition.workspaceRegistry.dispose.bind(composition.workspaceRegistry);
   composition.workspaceRegistry.dispose = async () => { order.push('workspace'); await originalDispose(); };
   const pending = composition.dispose();
+  assert.equal(composition.managementSessionBroker.disposed, true, 'broker cancellation begins before operation settlement');
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(order, ['client-cancel']);
   settle(); await pending;
   assert.deepEqual(order, ['client-cancel', 'client-settled', 'hash', 'workspace']);
+});
+test('production shutdown cancels a pending session before releasing existing workspace ownership', async t => {
+  const context = fixture(t); let enter; let release; const ready = new Promise(resolve => { enter = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const clientPath = path.join(context.input.userDataPath, 'synthetic-client');
+  const storeGet = context.input.store.get.bind(context.input.store);
+  context.input.store.get = key => key === 'instances' ? [{ id: 'local', type: 'client', path: clientPath }] : storeGet(key);
+  context.input.readClientConfig = async () => { enter(); await gate; return { serverProtocol: 'http', serverIp: 'saved.example', serverPort: '25566', clientId: 'remote', clientName: 'Synthetic', inviteSecret: 'invite', sessionToken: 'seed' }; };
+  context.input.managementSessionRequestJson = () => assert.fail('shutdown never dispatches management network');
+  const composition = await createProductionModpackComposition(context.input);
+  const pending = composition.managementSessionBroker.acquire('local').catch(error => error); await ready;
+  const workspaceDispose = composition.workspaceRegistry.dispose.bind(composition.workspaceRegistry);
+  composition.workspaceRegistry.dispose = async () => { assert.equal((await pending).code, 'CANCELLED'); return workspaceDispose(); };
+  try { await composition.dispose(); assert.equal((await pending).code, 'CANCELLED'); } finally { release(); }
 });
 
 test('production disposal is cached and attempts every stage after lifecycle and plan disposal throw', async t => {

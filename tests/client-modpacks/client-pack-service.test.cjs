@@ -9,6 +9,9 @@ const { ClientPackStateStore } = require('../../electron/services/client-modpack
 const { ClientPackTransaction } = require('../../electron/services/client-modpacks/client-pack-transaction.cjs');
 const { ClientProcessGuard } = require('../../electron/services/client-modpacks/client-process-guard.cjs');
 const { ClientPackService } = require('../../electron/services/client-modpacks/client-pack-service.cjs');
+const { ManagementSessionBroker } = require('../../electron/services/management-session-broker.cjs');
+const { ManagementPackClient } = require('../../electron/services/client-modpacks/management-pack-client.cjs');
+const { createClientPackIntegration } = require('../../electron/services/client-modpacks/client-pack-integration.cjs');
 const runtime = { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.3.12', javaMajor: 17, os: 'win32', architecture: 'x64' };
 const descriptor = { schemaVersion: 1, status: 'ready', serverFingerprint: 'a'.repeat(64), serverVersion: 'v1', source: { provider: 'modrinth', projectId: 'p', versionId: 'v' }, artifactSha256: 'b'.repeat(64), runtime };
 const reparseInspector = { async isReparsePoint() { return false; } };
@@ -31,7 +34,7 @@ function fixture(t) {
   const runtimeOperations = new Map(); const forgottenOperations = [];
   const dependencies = {
     resolveClient: async id => id === 'one' ? target : null,
-    managementClient: { async getRequirement() { return external.requirement; } },
+    managementClient: { async readRequirement() { return { descriptor: external.requirement, binding: Object.freeze({ generation: 'fixture-binding' }) }; } },
     sourceResolver: { async resolveArtifactSetPlan() { return { artifactSetPlan: { artifactSet: { kind: 'single', parts: [part] } } }; } },
     artifactAcquisition: { async downloadSet(plan) { return { artifactSet: { ...plan.artifactSet, parts: [{ ...part, calculatedDigests: { sha256: external.digest } }] } }; } },
     archiveInspector: { async inspectArchive() { return { inspectionId: 'inspection-1' }; }, materializer: { workspaceRegistry: { async releaseOwner() {} } } },
@@ -55,6 +58,115 @@ function fixture(t) {
   });
   return { service, dependencies, external, live, target, guard, transaction, runtimeOperations, forgottenOperations };
 }
+function sessionFixture(t) {
+  const f = fixture(t);
+  const configFile = path.join(f.live, 'client-config.json');
+  const config = { serverProtocol: 'https', serverIp: 'saved.example', serverPort: '25566', clientId: 'remote-one',
+    clientName: 'Synthetic client', inviteSecret: 'synthetic-invite', sessionToken: 'a'.repeat(64), managementCertFingerprint: 'd'.repeat(64) };
+  const bytes = Buffer.from(JSON.stringify(config, null, 2)); fs.writeFileSync(configFile, bytes);
+  const state = { token: config.sessionToken, registrations: 0, requests: [], sealed: false, now: 1000 };
+  const broker = new ManagementSessionBroker({ resolveClient: f.dependencies.resolveClient,
+    readClientConfig: async () => ({ ...JSON.parse(fs.readFileSync(configFile, 'utf8')), ...state.authorityPatch }), clock: () => state.now,
+    getPinnedHttpsAgent: async () => ({}), requestJson: async (url, options) => {
+      assert.equal(state.sealed, false, 'no management network after seal');
+      state.requests.push({ origin: url.origin, method: options.method, token: options.headers['X-Session-Token'] });
+      if (state.wait) await state.wait(options);
+      if (options.method === 'POST') { state.registrations++; state.token = 'b'.repeat(64); return { statusCode: 200, body: { success: true, token: state.token } }; }
+      return { statusCode: options.headers['X-Session-Token'] === state.token ? 200 : 401,
+        body: { clientModpack: f.external.requirement, minecraftPort: 25575 } };
+    } });
+  t.after(() => broker.dispose());
+  f.service.managementClient = new ManagementPackClient({ sessionBroker: broker, clock: () => state.now });
+  const seal = f.transaction.seal.bind(f.transaction);
+  f.transaction.seal = async context => { state.sealed = true; return seal(context); };
+  return { ...f, broker, state, configFile, bytes, edit: patch => fs.writeFileSync(configFile, JSON.stringify({ ...config, ...patch }, null, 2)) };
+}
+for (const boundary of ['before-install', 'runtime-preparation', 'server-restart']) test(`memory recovery at ${boundary} preserves exact config through real publication`, async t => {
+  const f = sessionFixture(t); const first = await f.broker.acquire('one');
+  const preview = await f.service.preview({ clientId: 'one' });
+  assert.equal(JSON.stringify(preview).includes(first.bindingGeneration), false);
+  const expire = () => { f.state.token = 'c'.repeat(64); f.state.now += 150001; };
+  if (boundary === 'before-install') expire();
+  else f.external.prepare = async () => { expire(); return f.external.runtimeResult; };
+  const result = await f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} });
+  assert.equal(result.status, 'ready'); assert.equal(f.state.registrations, 1);
+  assert.deepEqual(fs.readFileSync(f.configFile), f.bytes); assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'settings');
+  assert.equal((await f.broker.acquire('one')).binding, first.binding);
+});
+for (const patch of [{ serverIp: 'replacement.example' }, { managementCertFingerprint: 'e'.repeat(64) }, { clientId: 'remote-two' }, { clientName: 'Renamed client' }, { inviteSecret: 'changed-invite' }]) {
+  test(`identical descriptor from changed saved ${Object.keys(patch)[0]} cannot replace preview binding`, async t => {
+    const f = sessionFixture(t); const preview = await f.service.preview({ clientId: 'one' }); const before = f.state.requests.length;
+    f.edit(patch);
+    await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'PLAN_STALE' });
+    assert.equal(f.state.requests.length, before); assert.equal(f.state.registrations, 0); assert.equal(f.state.sealed, false);
+    assert.equal(fs.existsSync(path.join(f.live, 'mods/pack.jar')), false);
+  });
+}
+test('same descriptor authority change during runtime refuses before seal without publication', async t => {
+  const f = sessionFixture(t); const preview = await f.service.preview({ clientId: 'one' });
+  f.external.prepare = async () => { f.edit({ serverIp: 'replacement.example' }); return f.external.runtimeResult; };
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(f.state.sealed, false); assert.equal(f.state.requests.some(r => r.origin.includes('replacement')), false);
+});
+test('changed registered client path cannot reuse a retained review', async t => {
+  const f = sessionFixture(t); const preview = await f.service.preview({ clientId: 'one' }); const before = f.state.requests.length;
+  f.target.clientPath = path.join(path.dirname(f.live), 'replacement-client');
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'PLAN_STALE' });
+  assert.equal(f.state.requests.length, before); assert.equal(f.state.sealed, false); assert.deepEqual(fs.readFileSync(f.configFile), f.bytes);
+});
+for (const phase of ['preview', 'install']) test(`caller cancellation reaches a pending ${phase} requirement`, async t => {
+  const f = sessionFixture(t); const preview = phase === 'install' ? await f.service.preview({ clientId: 'one' }) : null;
+  let entered; const ready = new Promise(resolve => { entered = resolve; });
+  let observed;
+  f.state.wait = options => new Promise((_resolve, reject) => { observed = options.signal; entered(); options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }); });
+  const controller = new AbortController(); const request = phase === 'install' ? { clientId: 'one', planId: preview.planId, conflictChoices: {} } : { clientId: 'one' };
+  const pending = f.service[phase](request, { signal: controller.signal });
+  await ready; controller.abort();
+  await assert.rejects(pending, { code: 'CANCELLED' }); assert.equal(observed.aborted, true);
+  assert.equal(f.state.sealed, false);
+});
+test('an explicit shorter preview read deadline stops dispatch rather than being discarded', async t => {
+  const f = sessionFixture(t);
+  await assert.rejects(f.service.preview({ clientId: 'one' }, { deadline: f.state.now - 1 }), { code: 'CLIENT_PACK_UNAVAILABLE' });
+  assert.equal(f.state.requests.length, 0);
+});
+test('peer recovery during runtime preparation adopts current revision without changing reviewed bytes or binding', async t => {
+  const f = sessionFixture(t); const preview = await f.service.preview({ clientId: 'one' }); const first = await f.broker.acquire('one');
+  f.external.prepare = async () => {
+    await f.broker.acquire('one', { reason: 'authorization-rejected', observedBindingGeneration: first.bindingGeneration, observedRevision: first.revision });
+    return f.external.runtimeResult;
+  };
+  assert.equal((await f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} })).verified, true);
+  assert.equal(f.state.registrations, 1); assert.deepEqual(fs.readFileSync(f.configFile), f.bytes);
+  assert.equal(f.state.requests.at(-1).token, 'b'.repeat(64)); assert.equal((await f.broker.acquire('one')).binding, first.binding);
+});
+test('synthetic authority drift without live-byte edits during runtime fails plan-stale', async t => {
+  const f = sessionFixture(t); const preview = await f.service.preview({ clientId: 'one' });
+  f.external.prepare = async () => { f.state.authorityPatch = { serverIp: 'replacement.example' }; return f.external.runtimeResult; };
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'PLAN_STALE' });
+  assert.equal(f.state.sealed, false); assert.deepEqual(fs.readFileSync(f.configFile), f.bytes);
+});
+for (const drift of [false, true]) test(`full managed launch retains binding through real file/runtime verification (drift ${drift})`, async t => {
+  const f = sessionFixture(t); const preview = await f.service.preview({ clientId: 'one' });
+  await f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }); f.state.sealed = false;
+  const first = await f.broker.acquire('one'); const reads = [];
+  const read = f.broker.readServerInfo.bind(f.broker);
+  f.broker.readServerInfo = async (id, options) => { reads.push(options); return read(id, options); };
+  const verify = f.dependencies.runtimeInstaller.verify.bind(f.dependencies.runtimeInstaller);
+  f.dependencies.runtimeInstaller.verify = async (...args) => { const result = await verify(...args); if (drift) f.state.authorityPatch = { serverIp: 'replacement.example' }; return result; };
+  const integration = createClientPackIntegration({ resolveClient: f.dependencies.resolveClient,
+    resolveClientByPath: async value => value === f.live ? f.target : null, processGuard: f.guard, transaction: f.transaction,
+    stateStore: f.dependencies.stateStore, managementClient: f.service.managementClient, clientPackService: f.service });
+  if (drift) {
+    await assert.rejects(integration.beginManagedLaunch({ clientPath: f.live }), { code: 'PLAN_STALE' });
+    await f.guard.withMutation(f.target, async () => 'reservation settled');
+  } else {
+    const launch = await integration.beginManagedLaunch({ clientPath: f.live }); assert.equal(launch.authority.serverIp, 'saved.example');
+    assert.equal(launch.authority.serverPort, 25575); assert.equal(launch.authority.binding, undefined); await launch.abortBeforeSpawn();
+  }
+  assert.equal(reads.length, 3); assert.equal(reads[1].expectedBinding, first.binding); assert.equal(reads[2].expectedBinding, first.binding);
+  assert.equal(f.state.requests.some(request => request.origin.includes('replacement')), false); assert.deepEqual(fs.readFileSync(f.configFile), f.bytes);
+});
 test('preview and install publish verified main-owned plan with path-free DTOs', async t => {
   const f = fixture(t); const preview = await f.service.preview({ clientId: 'one' });
   assert.deepEqual(preview.additions, ['mods/pack.jar']);

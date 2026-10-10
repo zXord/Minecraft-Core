@@ -319,7 +319,13 @@ function resolveServerPathFromPayload(payload = {}) {
 /**
  * Create settings IPC handlers
  */
-function createSettingsHandlers() {
+function createSettingsHandlers({ invalidateManagementSession = () => {} } = {}) {
+  function invalidateClientPath(clientPath) {
+    const key = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+    for (const instance of appStore.get('instances') || []) {
+      if (instance?.type === 'client' && typeof instance.path === 'string' && key(instance.path) === key(clientPath)) invalidateManagementSession(instance.id);
+    }
+  }
   logger.info('Settings handlers initialized', {
     category: 'settings',
     data: { handler: 'createSettingsHandlers' }
@@ -1436,6 +1442,7 @@ function createSettingsHandlers() {
         const oldName = instances[idx].name;
         const instanceToRename = instances[idx];
         const isClientInstance = instanceToRename?.type === 'client';
+        if (isClientInstance) invalidateManagementSession(id);
         instances[idx].name = newName;
         if (isClientInstance) {
           instances[idx].clientName = newName;
@@ -1600,6 +1607,7 @@ function createSettingsHandlers() {
         }
         
         const remaining = instances.filter(i => i.id !== id);
+        if (inst.type === 'client') invalidateManagementSession(id);
         
         logger.debug('Starting instance configuration persistence', {
           category: 'settings',
@@ -1950,6 +1958,7 @@ function createSettingsHandlers() {
           ...(config.inviteSecret ? { inviteSecret: packSecret(config.inviteSecret) } : {})
         };
         markCurrentServerMutationDirty(clientPath);
+        invalidateClientPath(clientPath);
         await writeClientConfigAtomic(configFile, configForDisk);
 
         logger.info('Client configuration file saved successfully', {

@@ -28,6 +28,7 @@ const { createUtilityHandlers } = require('./ipc/utility-handlers.cjs');
 const { createModAvailabilityHandlers } = require('./ipc/mod-availability-handlers.cjs');
 const { createModpackHandlers } = require('./ipc/modpack-handlers.cjs');
 const { createClientPackHandlers } = require('./ipc/client-pack-handlers.cjs');
+const { createManagementSessionHandlers } = require('./ipc/management-session-handlers.cjs');
 const { createServerMutationPolicy } = require('./services/server-mutation-policy.cjs');
 
 // Import auto-restart services for the one remaining handler
@@ -83,6 +84,7 @@ function setupIpcHandlers(win, dependencies = {}) {
     createModAvailabilityHandlers,
     createModpackHandlers,
     createClientPackHandlers,
+    createManagementSessionHandlers,
     ...(ipcDependencies.handlerFactories || {})
   };
 
@@ -109,7 +111,9 @@ function setupIpcHandlers(win, dependencies = {}) {
     const configHandlers = handlerFactories.createConfigHandlers();
     const playerHandlers = handlerFactories.createPlayerHandlers();
     const serverHandlers = handlerFactories.createServerHandlers(win);
-    const settingsHandlers = handlerFactories.createSettingsHandlers();
+    const settingsHandlers = handlerFactories.createSettingsHandlers({
+      invalidateManagementSession: clientId => dependencies.modpacks?.managementSessionBroker?.invalidate(clientId)
+    });
     const backupHandlers = handlerFactories.createBackupHandlers();
     const managementServerHandlers = handlerFactories.createManagementServerHandlers(win);
   const browserPanelHandlers = handlerFactories.createBrowserPanelHandlers(win);
@@ -133,6 +137,13 @@ function setupIpcHandlers(win, dependencies = {}) {
   if (clientPackIpc) {
     dependencies.registerClientPackIpcDisposer?.(() => clientPackIpc.dispose());
     win.once?.('closed', () => { void clientPackIpc.dispose().catch(() => {}); });
+  }
+  const managementSessionIpc = dependencies.modpacks?.managementSessionBroker && dependencies.modpacks?.resolveClientByPath
+    ? handlerFactories.createManagementSessionHandlers({ win, broker: dependencies.modpacks.managementSessionBroker,
+      resolveClientByPath: dependencies.modpacks.resolveClientByPath }) : null;
+  if (managementSessionIpc) {
+    dependencies.registerClientPackIpcDisposer?.(() => managementSessionIpc.dispose());
+    win.once?.('closed', () => { void managementSessionIpc.dispose().catch(() => {}); });
   }
   if (dependencies.modpacks?.clientPackIntegration) {
     require('./services/management-server.cjs').configureClientModpackResolver(serverId =>
@@ -178,6 +189,7 @@ function setupIpcHandlers(win, dependencies = {}) {
   modAvailabilityHandlers,
   modpackHandlers,
   clientPackIpc?.handlers,
+  managementSessionIpc?.handlers,
       loggerHandlers
     ].forEach((handlers) => {
       if (!handlers) {

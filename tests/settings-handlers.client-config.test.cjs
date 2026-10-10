@@ -4,8 +4,9 @@ const fs = require('node:fs/promises');
 const Module = require('node:module');
 const os = require('node:os');
 const path = require('node:path');
+const { ManagementSessionBroker } = require('../electron/services/management-session-broker.cjs');
 
-async function withSettingsHandlers(initialInstances, fn, { serverConfig = null } = {}) {
+async function withSettingsHandlers(initialInstances, fn, { serverConfig = null, invalidateManagementSession = () => {}, writeGate = null } = {}) {
   const originalLoad = Module._load;
   const modulePath = require.resolve('../electron/ipc/settings-handlers.cjs');
   const store = new Map([['instances', initialInstances]]);
@@ -32,7 +33,8 @@ async function withSettingsHandlers(initialInstances, fn, { serverConfig = null 
     if (typeof request === 'string' && request.endsWith('logger-handlers.cjs')) {
       return { getLoggerHandlers: () => logger };
     }
-    if (typeof request === 'string' && request.endsWith('utils/instance-context.cjs')) return {};
+    if (typeof request === 'string' && request.endsWith('utils/instance-context.cjs')) return { updateInstances() {} };
+    if (request === 'fs/promises' && writeGate) return { ...fs, async rename(...args) { await writeGate(); return fs.rename(...args); } };
     if (typeof request === 'string' && request.endsWith('utils/config-manager.cjs')) {
       return {
         getDefaultServerConfig: value => value,
@@ -65,7 +67,7 @@ async function withSettingsHandlers(initialInstances, fn, { serverConfig = null 
   delete require.cache[modulePath];
   try {
     const settingsHandlers = require(modulePath);
-    return await fn(settingsHandlers.createSettingsHandlers(), store, {
+    return await fn(settingsHandlers.createSettingsHandlers({ invalidateManagementSession }), store, {
       serversDatCalls,
       writeClientConfigAtomic: settingsHandlers.writeClientConfigAtomic
     });
@@ -74,6 +76,65 @@ async function withSettingsHandlers(initialInstances, fn, { serverConfig = null 
     Module._load = originalLoad;
   }
 }
+test('explicit client save, rename and removal invalidate local instance identity without serialization changes', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'client-session-settings-')); const calls = [];
+  try {
+    await withSettingsHandlers([{ id: 'local', clientId: 'remote', type: 'client', path: root, name: 'Client' }], async handlers => {
+      const event = { sender: { id: 1 } };
+      assert.equal((await handlers['save-client-config'](event, { path: root, serverIp: 'saved.example', serverPort: '25566', clientId: 'remote', clientName: 'Client', sessionToken: 'seed', inviteSecret: 'invite', initializeMultiplayer: false })).success, true);
+      assert.deepEqual(calls, ['local']);
+      const saved = JSON.parse(await fs.readFile(path.join(root, 'client-config.json'), 'utf8'));
+      assert.equal(saved.sessionToken, 'packed:seed'); assert.equal(saved.inviteSecret, 'packed:invite');
+      assert.equal((await handlers['rename-instance'](event, { id: 'local', newName: 'Renamed' })).success, true);
+      assert.deepEqual(calls, ['local', 'local']);
+      assert.equal((await handlers['delete-instance'](event, { id: 'local', deleteFiles: false })).success, true);
+      assert.deepEqual(calls, ['local', 'local', 'local']);
+      assert.equal((await fs.stat(root)).isDirectory(), true);
+    }, { invalidateManagementSession: id => calls.push(id) });
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+test('save invalidates before its asynchronous atomic-write boundary, not after completion', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'client-session-write-race-')); const calls = [];
+  let enter; let finish; const ready = new Promise(resolve => { enter = resolve; }); const gate = new Promise(resolve => { finish = resolve; });
+  try {
+    await withSettingsHandlers([{ id: 'local', type: 'client', path: root }], async handlers => {
+      const pending = handlers['save-client-config']({ sender: { id: 1 } }, { path: root, serverIp: 'saved.example', clientId: 'remote', clientName: 'Client', initializeMultiplayer: false });
+      await ready; const observed = [...calls]; finish(); await pending; assert.deepEqual(observed, ['local']);
+    }, { invalidateManagementSession: id => calls.push(id), writeGate: () => { enter(); return gate; } });
+  } finally { finish(); await fs.rm(root, { recursive: true, force: true }); }
+});
+test('settings invalidation rejects old registration during a pending atomic config write', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'client-session-save-invalidation-'));
+  const configFile = path.join(root, 'client-config.json'); let enter; let release;
+  const ready = new Promise(resolve => { enter = resolve; }); const gate = new Promise(resolve => { release = resolve; });
+  let writeEnter; let writeRelease; const writing = new Promise(resolve => { writeEnter = resolve; }); const writeGate = new Promise(resolve => { writeRelease = resolve; });
+  const broker = new ManagementSessionBroker({ resolveClient: async id => ({ clientId: id, clientPath: root }),
+    readClientConfig: async () => JSON.parse(await fs.readFile(configFile, 'utf8')),
+    requestJson: async () => { enter(); await gate; return { statusCode: 200, body: { success: true, token: 'b'.repeat(64) } }; } });
+  try {
+    await fs.writeFile(configFile, JSON.stringify({ serverProtocol: 'http', serverIp: 'old.example', serverPort: '25566', clientId: 'remote', clientName: 'Synthetic', inviteSecret: 'invite', sessionToken: 'seed' }));
+    const snapshot = await broker.acquire('local');
+    const rotating = broker.acquire('local', { reason: 'authorization-rejected', observedBindingGeneration: snapshot.bindingGeneration, observedRevision: 0 }).catch(error => error); await ready;
+    await withSettingsHandlers([{ id: 'local', clientId: 'remote', type: 'client', path: root }], async handlers => {
+      const saving = handlers['save-client-config']({ sender: { id: 1 } }, { path: root, serverIp: 'new.example', serverPort: '25566', serverProtocol: 'http', clientId: 'remote', clientName: 'Synthetic', sessionToken: 'seed', inviteSecret: 'invite', initializeMultiplayer: false });
+      await writing; assert.equal((await rotating).code, 'PLAN_STALE');
+      const duringWrite = await broker.acquire('local'); assert.notEqual(duringWrite.bindingGeneration, snapshot.bindingGeneration);
+      writeRelease(); assert.equal((await saving).success, true); release();
+      await assert.rejects(broker.acquire('local', { expectedBinding: duringWrite.binding }), { code: 'PLAN_STALE' });
+      assert.equal(JSON.parse(await fs.readFile(configFile, 'utf8')).serverIp, 'new.example');
+    }, { invalidateManagementSession: id => broker.invalidate(id), writeGate: () => { writeEnter(); return writeGate; } });
+  } finally { writeRelease(); release(); broker.dispose(); await fs.rm(root, { recursive: true, force: true }); }
+});
+test('invalid requests and server-only rename do not invalidate client sessions', async () => {
+  const calls = [];
+  await withSettingsHandlers([{ id: 'server-one', name: 'Server', type: 'server' }], async handlers => {
+    const event = { sender: { id: 1 } };
+    assert.equal((await handlers['rename-instance'](event, { id: 'server-one', newName: 'Renamed server' })).success, true);
+    assert.equal((await handlers['rename-instance'](event, { id: 'server-one', newName: '' })).success, false);
+    assert.equal((await handlers['save-client-config'](event, { serverIp: 'saved.example' })).success, false);
+    assert.deepEqual(calls, []);
+  }, { invalidateManagementSession: id => calls.push(id) });
+});
 
 test('get-settings exposes the durable read-only server content revision', async () => {
   const serverPath = path.join(os.tmpdir(), 'minecraft-core-settings-content-revision-test');

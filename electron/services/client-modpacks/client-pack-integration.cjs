@@ -10,12 +10,12 @@ const fail = code => new ModpackError(code, code === 'CLIENT_PACK_UNAVAILABLE'
 function createClientPackIntegration({ resolveClient, resolveClientByPath, processGuard, transaction,
   stateStore, managementClient, clientPackService } = {}) {
   if (typeof resolveClient !== 'function' || typeof resolveClientByPath !== 'function') throw fail('INVALID_REQUEST');
-  async function classify(target) {
+  async function classify(target, options) {
     const journal = await transaction.status(target);
     if (journal && !['committed', 'abandoned'].includes(journal.phase)) throw fail('RECOVERY_REQUIRED');
     const manifest = await stateStore.read(target.clientPath);
-    const requirement = await managementClient.getRequirement(target.clientId);
-    return { managed: Boolean(manifest || requirement), requirement };
+    const { descriptor: requirement, binding } = await managementClient.readRequirement(target.clientId, options);
+    return { managed: Boolean(manifest || requirement), requirement, binding };
   }
   return Object.freeze({
     async assertServerDestination(serverPath) {
@@ -44,18 +44,19 @@ function createClientPackIntegration({ resolveClient, resolveClientByPath, proce
         return work();
       });
     },
-    async beginManagedLaunch({ clientPath }) {
+    async beginManagedLaunch({ clientPath }, options = {}) {
       const target = await resolveClientByPath(clientPath);
       if (!target) throw fail('INVALID_REQUEST');
       const reservation = await processGuard.beginLaunch(target);
       try {
-        const status = await classify(target);
+        const status = await classify(target, options);
         // Process lifetime ownership is independent of managed runtime authority:
         // connection preferences can change while an ordinary client is running.
         if (!status.managed) return reservation;
         if (status.requirement?.status !== 'ready') throw fail('CLIENT_PACK_UNAVAILABLE');
-        const authority = await clientPackService.getLaunchAuthority({ clientId: target.clientId });
-        const connection = await managementClient.getLaunchConnection(target.clientId, authority);
+        const internalOptions = { signal: options.signal, deadline: options.deadline, expectedBinding: status.binding };
+        const authority = await clientPackService.getLaunchAuthority({ clientId: target.clientId }, internalOptions);
+        const connection = await managementClient.getLaunchConnection(target.clientId, authority, internalOptions);
         return Object.freeze({ ...reservation, authority: Object.freeze({ ...authority, ...connection }) });
       } catch (error) {
         await reservation.abortBeforeSpawn();
