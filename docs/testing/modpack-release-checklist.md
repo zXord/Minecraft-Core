@@ -2,6 +2,22 @@
 
 Updated 10 October 2026 after the successful normal Repair retry, Asia/Riyadh. **Not release ready.** This is the restart checklist for normal, visible app testing. Automated tests support these checks; they do not replace installing the real pack, running Minecraft, and joining the server.
 
+## Current working summary — 10 October, 14:30
+
+The disposable b1 app has been closed normally since12:56. Its invite was already created with approval; do not recreate it. Real profiles/instances and a1 recovery evidence remain excluded.
+
+| Area | Actual status / next gate |
+| --- | --- |
+| Exact0.13.4 ServerPack | Normal Repair completed; Start → Stop → Start passed. Do not repeat merely because the session resumed. |
+| Browsing / update notice | Exact notification navigation and Modrinth cross-runtime browsing/inspection passed; no version update installed. |
+| Matching MRPACK client | Registered through normal UI; preview failed before install. Required resourcepack URL currently404; no missing-file skip or cache injection. |
+| Idle-session recovery fix | Main integration committed; renderer integration has four review corrections in progress. First combined run:4359pass/3inventory failures/8platform skips; rendered76pass/2fixture failures; build passed. Not an accepted final gate. |
+| Complete client alternative | Same-release MultiMC ZIP support designed/reviewed and tasks prepared, not implemented. Pairing must be an explicit native selection after source gates. |
+| Client acceptance | Install, Verify, reopen, idle/restart recovery, Microsoft authentication and actual world join remain unpassed. |
+| Remaining release checks | Upgrade/downgrade/rollback, drift/conflicts and server-mod/client reactions; real local formats; cleanup/failed-target reuse; notification controls; packaged startup/icon; remaining UI/recovery/backup-retirement gaps. |
+
+Next source sequence: finish the bounded session review corrections and fresh gates, then MRPACK exact-GitHub redirect correction and MultiMC support. Startup partition instrumentation is prepared only, not an optimization or completed speed fix. Return to the normal b1 app only with coherent reviewed source. Detailed evidence and historical attempts follow below.
+
 ## Pause and resume
 
 Read this section newest-first; dated entries below are historical evidence, not simultaneous instructions. The latest source checkpoint supersedes earlier statements that a correction is unimplemented or a native job is still running. The user's firewall-prompt dismissal has already been handled for Repair573; it is not a pending handoff.
@@ -87,7 +103,7 @@ Never select, install into, edit, or delete the user's real Server, Client, or T
 | --- | --- |
 | Repository | `TerraFirmaGreg-Team/Modpack-Modern` on GitHub |
 | Required baseline | Release **0.13.4**, `TerraFirmaGreg-Modern-0.13.4-serverpack.zip`, asset `477754820` |
-| Matching client | Same release, `TerraFirmaGreg-Modern-0.13.4-modrinth.mrpack`, asset `477754823`; not the MultiMC ZIP |
+| Matching client | Current pairing: same-release `TerraFirmaGreg-Modern-0.13.4-modrinth.mrpack`, asset `477754823` (preview blocked). Planned explicit alternative after support ships locally: official MultiMC ZIP asset `477754821`; not yet selected/installed. |
 | Runtime | Minecraft 1.20.1, Forge 47.4.13, Java 17 |
 | QA profile | `C:\Users\s3eed\AppData\Local\Temp\minecraft-core-native-qa-20261008-control-b1\user-data` |
 | QA server | `C:\Users\s3eed\SynologyDrive\Desktop\ET\Minecraft\Codex QA TFG 0.13.4 2026-10-08-b1` |
