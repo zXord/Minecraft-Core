@@ -4,10 +4,79 @@ const assert = require('node:assert/strict');
 const { validateMrpackManifest } = require('../../electron/services/modpacks/mrpack/mrpack-parser.cjs');
 const {
   buildMrpackServerPlan,
+  buildMrpackClientPlan,
   listOptionalFileChoices,
   resolveOptionalFileChoiceIds
 } = require('../../electron/services/modpacks/mrpack/mrpack-file-plan.cjs');
 const { ARCHIVE_LIMITS } = require('../../electron/services/modpacks/limits.cjs');
+
+test('MRPACK client and server derive exact redirect authority from only the first candidate', () => {
+  const base = ['cdn.modrinth.com', 'github.com', 'raw.githubusercontent.com', 'gitlab.com'];
+  const expanded = [...base, 'release-assets.githubusercontent.com', 'objects.githubusercontent.com', 'github-releases.githubusercontent.com'];
+  const github = 'https://github.com/owner/pack/releases/download/v1/example.jar';
+  for (const builder of [buildMrpackClientPlan, buildMrpackServerPlan]) {
+    for (const [first, second, expected] of [
+      [github, 'https://cdn.modrinth.com/example.jar', expanded],
+      ['HTTPS://GITHUB.COM/owner/example.jar', 'https://gitlab.com/example.jar', expanded],
+      ['https://github.com./owner/example.jar', github, base],
+      ...['cdn.modrinth.com', 'raw.githubusercontent.com', 'gitlab.com'].map(host => [`https://${host}/example.jar`, github, base])
+    ]) {
+      const download = builder({ manifest: manifest([file('mods/example.jar', 'required', { downloads: [first, second] })]) }).downloads[0];
+      assert.deepEqual(download.allowedHosts, expected);
+      assert.equal(download.allowSubdomains, false);
+      assert.equal(download.provider, 'modrinth');
+      assert.deepEqual(download.providerDigest, { algorithm: 'sha512', value: 'b'.repeat(128) });
+      assert.deepEqual(download.requiredProviderDigests, { sha1: 'a'.repeat(40), sha512: 'b'.repeat(128) });
+      assert.deepEqual(download.downloadUrlCandidates, [new URL(first).href, second]);
+      assert.equal(download.downloadUrl, new URL(first).href);
+      assert.ok(Object.isFrozen(download.allowedHosts));
+      assert.ok(Object.isFrozen(download.downloadUrlCandidates));
+    }
+  }
+});
+
+test('MRPACK admitted Unicode and space hrefs over 4096 remain plannable on all four initial hosts', async t => {
+  const base = ['cdn.modrinth.com', 'github.com', 'raw.githubusercontent.com', 'gitlab.com'];
+  const expanded = [...base, 'release-assets.githubusercontent.com', 'objects.githubusercontent.com', 'github-releases.githubusercontent.com'];
+  for (const [side, builder] of [['client', buildMrpackClientPlan], ['server', buildMrpackServerPlan]]) {
+    for (const host of base) {
+      for (const [kind, rawPath, encodedPath] of [
+        ['Unicode', '中'.repeat(500), '%E4%B8%AD'.repeat(500)],
+        ['space', ' '.repeat(1500), '%20'.repeat(1500)]
+      ]) await t.test(`${side}: ${host} ${kind}`, () => {
+        const prefix = `https://${host}/owner/releases/download/v1/`;
+        const rawUrl = `${prefix}${rawPath}.jar`;
+        const expectedHref = `${prefix}${encodedPath}.jar`;
+        assert.ok(rawUrl.length < 4096); assert.ok(expectedHref.length > 4096);
+        const admitted = manifest([file('mods/example.jar', 'required', { downloads: [rawUrl] })]);
+        assert.equal(admitted.files[0].downloads[0], expectedHref);
+        const download = builder({ manifest: admitted }).downloads[0];
+        assert.equal(download.downloadUrl, expectedHref);
+        assert.deepEqual(download.downloadUrlCandidates, [expectedHref]);
+        assert.deepEqual(download.allowedHosts, host === 'github.com' ? expanded : base);
+        assert.equal(download.allowSubdomains, false);
+        assert.equal(download.provider, 'modrinth');
+        assert.deepEqual(download.requiredProviderDigests, { sha1: 'a'.repeat(40), sha512: 'b'.repeat(128) });
+      });
+    }
+  }
+});
+
+test('MRPACK raw manifest URLs over 4096 remain refused by both builders on every initial host', async t => {
+  for (const [side, builder] of [['client', buildMrpackClientPlan], ['server', buildMrpackServerPlan]]) {
+    for (const host of ['cdn.modrinth.com', 'github.com', 'raw.githubusercontent.com', 'gitlab.com']) await t.test(`${side}: ${host}`, () => {
+      const rawUrl = `https://${host}/${'a'.repeat(4096)}.jar`;
+      assert.ok(rawUrl.length > 4096);
+      const rawManifest = {
+        formatVersion: 1, game: 'minecraft', versionId: 'v1', name: 'Raw length fixture',
+        dependencies: { minecraft: '1.21.1' }, files: [file('mods/example.jar', 'required', { downloads: [rawUrl] })]
+      };
+      const invalid = error => error.code === 'INVALID_RELEASE_URL' && error.details?.reasonCode === 'malformed-url';
+      assert.throws(() => validateMrpackManifest(rawManifest), invalid);
+      assert.throws(() => builder({ manifest: rawManifest }), invalid);
+    });
+  }
+});
 
 function archiveFile(path, size) {
   return { path, type: 'file', ...(size === undefined ? {} : { size }) };

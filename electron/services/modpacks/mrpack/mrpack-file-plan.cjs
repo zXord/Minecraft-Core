@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const { ARCHIVE_LIMITS } = require('../limits.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
 const {
-  MRPACK_DOWNLOAD_HOSTS,
+  getMrpackDownloadHosts,
   canonicalWindowsPath,
   ensureValidatedMrpackManifest,
   normalizeMrpackPath,
@@ -211,7 +211,7 @@ function buildMrpackPlan({ manifest: sourceManifest, selectedOptionalFiles, arch
       selected: isSelected,
       downloadUrl: file.downloads[0],
       downloadUrlCandidates: [...file.downloads],
-      allowedHosts: [...MRPACK_DOWNLOAD_HOSTS],
+      allowedHosts: getMrpackDownloadHosts(file.downloads[0]),
       allowSubdomains: false,
       size: file.fileSize,
       provider: 'modrinth',

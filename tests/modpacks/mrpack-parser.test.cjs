@@ -7,6 +7,47 @@ const {
   validateMrpackManifest
 } = require('../../electron/services/modpacks/mrpack/mrpack-parser.cjs');
 const { ARCHIVE_LIMITS } = require('../../electron/services/modpacks/limits.cjs');
+const { MRPACK_DOWNLOAD_HOSTS, getMrpackDownloadHosts } = require('../../electron/services/modpacks/mrpack/mrpack-schema.cjs');
+const { GITHUB_ASSET_HOSTS } = require('../../electron/services/modpacks/providers/github-releases-source.cjs');
+
+test('MRPACK request host closure validates initial admission and expands only exact parsed GitHub', () => {
+  const base = ['cdn.modrinth.com', 'github.com', 'raw.githubusercontent.com', 'gitlab.com'];
+  const cdns = ['release-assets.githubusercontent.com', 'objects.githubusercontent.com', 'github-releases.githubusercontent.com'];
+  assert.deepEqual(GITHUB_ASSET_HOSTS.filter(host => host !== 'api.github.com'), cdns);
+  assert.deepEqual(MRPACK_DOWNLOAD_HOSTS, base);
+  for (const [url, expected] of [
+    ['https://github.com/owner/file.jar', [...base, ...cdns]],
+    ['HTTPS://GITHUB.COM/owner/file.jar', [...base, ...cdns]],
+    ['https://github.com./owner/file.jar', base],
+    ...['cdn.modrinth.com', 'raw.githubusercontent.com', 'gitlab.com'].map(host => [`https://${host}/owner/file.jar`, base])
+  ]) {
+    const first = getMrpackDownloadHosts(url); const second = getMrpackDownloadHosts(url);
+    assert.deepEqual(first, expected, url);
+    assert.notEqual(first, second); assert.notEqual(first, MRPACK_DOWNLOAD_HOSTS);
+    assert.ok(Object.isFrozen(first)); assert.ok(Object.isFrozen(second));
+    assert.throws(() => first.push('evil.example'), TypeError);
+    assert.equal(validateMrpackManifest(manifest({ files: [{ ...manifest().files[0], downloads: [url] }] })).files.length, 1);
+  }
+  for (const url of [
+    ...[...cdns, 'api.github.com', 'sub.github.com', 'github.com.evil.example', 'arbitrary.githubusercontent.com', 'evil.example']
+      .map(host => `https://${host}/file.jar`),
+    'http://github.com/file.jar', 'https://user:secret@github.com/file.jar',
+    'https://github.com:444/file.jar', 'https://127.0.0.1/file.jar', 'not-a-url', ''
+  ]) {
+    assert.throws(() => getMrpackDownloadHosts(url), error => error.code === 'INVALID_RELEASE_URL');
+    assert.throws(() => validateMrpackManifest(manifest({ files: [{ ...manifest().files[0], downloads: [url] }] })), error => error.code === 'INVALID_RELEASE_URL');
+  }
+  assert.deepEqual(MRPACK_DOWNLOAD_HOSTS, base);
+});
+
+test('MRPACK host policy refuses non-string input without URL coercion', () => {
+  let coercions = 0;
+  const urlLike = { toString() { coercions += 1; return 'https://github.com/owner/file.jar'; } };
+  for (const value of [undefined, null, 1, [], {}, new URL('https://github.com/owner/file.jar'), urlLike]) {
+    assert.throws(() => getMrpackDownloadHosts(value), error => error.code === 'INVALID_RELEASE_URL');
+  }
+  assert.equal(coercions, 0);
+});
 
 function manifest(overrides = {}) {
   return {

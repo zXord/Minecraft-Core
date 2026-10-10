@@ -7,6 +7,17 @@ const https = require('node:https');
 const selfsigned = require('selfsigned');
 
 const { PinnedHttpsClient } = require('../../electron/services/modpacks/network/pinned-https-client.cjs');
+const { buildMrpackClientPlan, buildMrpackServerPlan } = require('../../electron/services/modpacks/mrpack/mrpack-file-plan.cjs');
+
+function githubMrpackDownload(builder) {
+  return builder({ manifest: {
+    formatVersion: 1, game: 'minecraft', versionId: 'v1', name: 'Pinned MRPACK fixture',
+    dependencies: { minecraft: '1.21.1' }, files: [{
+      path: 'mods/example.jar', fileSize: 0, hashes: { sha1: 'a'.repeat(40), sha512: 'b'.repeat(128) },
+      downloads: ['https://github.com/owner/pack/releases/download/v1/example.jar']
+    }]
+  } }).downloads[0];
+}
 
 class TrackedResponse extends Readable {
   constructor({ statusCode = 200, headers = {}, body = '', peer = '8.8.8.8' } = {}) {
@@ -45,6 +56,55 @@ function timedOut(error) {
     error.safeMessage === 'Remote release request timed out' &&
     JSON.stringify(error.toPublicResult().error.details) === '{}';
 }
+
+test('MRPACK GitHub CDN policy still enforces public-only DNS and vetted peers on each hop', async t => {
+  const target = 'https://release-assets.githubusercontent.com/asset?token=fixture-secret';
+  for (const [side, builder] of [['client', buildMrpackClientPlan], ['server', buildMrpackServerPlan]]) {
+    for (const [name, answers, peer, expectedRequests] of [
+      ['private', [{ address: '127.0.0.1', family: 4 }], '8.8.8.8', 1],
+      ['mixed public/private', [{ address: '8.8.8.8', family: 4 }, { address: '127.0.0.1', family: 4 }], '8.8.8.8', 1],
+      ['unvetted peer', [{ address: '8.8.8.8', family: 4 }], '1.1.1.1', 2]
+    ]) await t.test(`${side}: ${name}`, async () => {
+      const download = githubMrpackDownload(builder);
+      const h = harness({
+        [download.downloadUrl]: { statusCode: 302, headers: { location: target } }, [target]: { peer }
+      }, { 'release-assets.githubusercontent.com': answers });
+      await assert.rejects(h.client.request(download.downloadUrl, download), error => {
+        assert.doesNotMatch(JSON.stringify(error.toPublicResult()), /fixture-secret|https:/);
+        return invalid(error);
+      });
+      assert.deepEqual(h.lookupCalls.map(call => call.hostname), ['github.com', 'release-assets.githubusercontent.com']);
+      assert.equal(h.calls.length, expectedRequests);
+    });
+  }
+});
+
+test('MRPACK GitHub CDN redirects keep GET TLS exact-host policy and cross-origin secret stripping', async () => {
+  const download = githubMrpackDownload(buildMrpackServerPlan);
+  const target = 'https://objects.githubusercontent.com/asset';
+  const h = harness({
+    [download.downloadUrl]: { statusCode: 302, headers: { location: target } }, [target]: { body: 'ok' }
+  });
+  const response = await h.client.request(download.downloadUrl, {
+    ...download, headers: { accept: 'application/octet-stream', authorization: 'Bearer secret', cookie: 'sid=secret', 'proxy-authorization': 'Basic secret' }
+  });
+  response.destroy();
+  assert.deepEqual(h.calls.map(call => call.options.method), ['GET', 'GET']);
+  assert.deepEqual(h.calls[1].options.headers, { accept: 'application/octet-stream' });
+  assert.equal(h.calls[1].options.servername, 'objects.githubusercontent.com');
+  assert.equal(h.calls[1].options.rejectUnauthorized, true);
+  assert.ok(h.calls[1].options.checkServerIdentity('objects.githubusercontent.com', { subjectaltname: 'DNS:wrong.example' }) instanceof Error);
+});
+
+test('MRPACK GitHub CDN redirects remain bounded by the unchanged default hop cap', async () => {
+  const download = githubMrpackDownload(buildMrpackServerPlan);
+  const cdn = 'https://github-releases.githubusercontent.com';
+  const routes = { [download.downloadUrl]: { statusCode: 302, headers: { location: `${cdn}/0` } } };
+  for (let index = 0; index < 6; index += 1) routes[`${cdn}/${index}`] = { statusCode: 302, headers: { location: `${cdn}/${index + 1}` } };
+  const h = harness(routes);
+  await assert.rejects(h.client.request(download.downloadUrl, download), invalid);
+  assert.deepEqual(h.calls.map(call => call.url), [download.downloadUrl, ...[0, 1, 2, 3, 4].map(index => `${cdn}/${index}`)]);
+});
 
 test('a redirect to a private address is rejected before a body is read', async () => {
   const publicUrl = 'https://public.example/start';

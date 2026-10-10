@@ -5,9 +5,12 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { Readable, PassThrough } = require('node:stream');
+const { EventEmitter } = require('node:events');
 
 const { ArtifactDownloader } = require('../../electron/services/modpacks/artifacts/artifact-downloader.cjs');
 const { ArtifactCache } = require('../../electron/services/modpacks/artifacts/artifact-cache.cjs');
+const { PinnedHttpsClient } = require('../../electron/services/modpacks/network/pinned-https-client.cjs');
+const { buildMrpackClientPlan, buildMrpackServerPlan } = require('../../electron/services/modpacks/mrpack/mrpack-file-plan.cjs');
 const {
   createArtifactSetPlan,
   isAppIssuedVerifiedArtifactSet
@@ -111,6 +114,216 @@ async function issuedGitHubPlan(content, { includeDigest = true } = {}) {
 async function partialFiles(root) {
   try { return (await fs.readdir(root, { recursive: true })).filter(name => String(name).endsWith('.partial')); } catch { return []; }
 }
+
+const MRPACK_GITHUB_URL = 'https://github.com/example/pack/releases/download/v1/example.jar';
+const MRPACK_CDN_HOSTS = [
+  'release-assets.githubusercontent.com', 'objects.githubusercontent.com', 'github-releases.githubusercontent.com'
+];
+
+function mrpackDownload(builder, content, { url = MRPACK_GITHUB_URL, hashes, fileSize = content.length, candidates = [] } = {}) {
+  return builder({ manifest: {
+    formatVersion: 1, game: 'minecraft', versionId: 'v1', name: 'Redirect fixture',
+    dependencies: { minecraft: '1.21.1' },
+    files: [{
+      path: 'mods/example.jar', fileSize,
+      hashes: hashes || { sha1: digest(content, 'sha1'), sha512: digest(content, 'sha512') },
+      env: { client: 'required', server: 'required' }, downloads: [url, ...candidates]
+    }]
+  } }).downloads[0];
+}
+
+async function mrpackRedirectFixture(routes) {
+  const f = await fixture();
+  const calls = []; const lookupCalls = []; const responses = [];
+  const client = new PinnedHttpsClient({
+    lookup: async hostname => { lookupCalls.push(hostname); return [{ address: '8.8.8.8', family: 4 }]; },
+    request(url, options, callback) {
+      const req = new EventEmitter();
+      req.destroy = error => { if (error) queueMicrotask(() => req.emit('error', error)); };
+      req.end = () => options.lookup(url.hostname, {}, (error, address, family) => {
+        if (error) return req.emit('error', error);
+        calls.push({ url: url.href, options, address, family });
+        const route = routes.get(url.href);
+        if (!route) return req.emit('error', new Error('Unexpected injected MRPACK route'));
+        const response = route.response || new Readable({ read() {
+          this.bodyReads += 1;
+          this.push(route.body || Buffer.alloc(0)); this.push(null);
+        } });
+        response.bodyReads = 0;
+        response.statusCode = route.statusCode ?? 200;
+        response.headers = route.headers || {};
+        response.socket = { remoteAddress: '8.8.8.8' };
+        responses.push(response); callback(response);
+      });
+      return req;
+    }
+  });
+  const downloader = new ArtifactDownloader({ client, cache: f.cache, partialRoot: f.cache.root });
+  return { ...f, client, downloader, calls, lookupCalls, responses };
+}
+
+test('MRPACK client and server GitHub releases follow each approved CDN with measured dual-hash verification', async t => {
+  const content = Buffer.from('MRPACK redirected verified bytes');
+  for (const [side, builder] of [['client', buildMrpackClientPlan], ['server', buildMrpackServerPlan]]) {
+    for (const host of MRPACK_CDN_HOSTS) await t.test(`${side}: ${host}`, async t => {
+      const target = `https://${host}/asset?signature=fixture-secret`;
+      const f = await mrpackRedirectFixture(new Map([
+        [MRPACK_GITHUB_URL, { statusCode: 302, headers: { location: target } }],
+        [target, { body: content, headers: { 'content-length': String(content.length) } }]
+      ]));
+      try {
+        const download = mrpackDownload(builder, content);
+        let verified;
+        try { verified = await f.downloader.downloadPart(download); }
+        catch (error) {
+          t.diagnostic(`download rejected: ${error.code}/${error.details?.reasonCode}; requests=${f.calls.length}; lookups=${f.lookupCalls.length}`);
+          throw error;
+        }
+        assert.equal(verified.measuredSize, String(content.length));
+        assert.equal(verified.sha256, digest(content, 'sha256'));
+        assert.equal(verified.sha512, digest(content, 'sha512'));
+        assert.deepEqual(await fs.readFile(f.cache.pathForSha256(verified.sha256)), content);
+        assert.deepEqual(f.calls.map(call => call.url), [MRPACK_GITHUB_URL, target]);
+        assert.deepEqual(f.lookupCalls, ['github.com', host]);
+        assert.equal(f.responses[0].bodyReads, 0);
+        assert.deepEqual(await partialFiles(f.cache.root), []);
+      } finally { await f.cleanup(); }
+    });
+  }
+});
+
+async function assertNoMrpackPublication(f, content) {
+  assert.deepEqual(await partialFiles(f.cache.root), []);
+  await assert.rejects(fs.stat(f.cache.pathForSha256(digest(content, 'sha256'))), error => error.code === 'ENOENT');
+}
+
+function redactedMrpackFailure(error, code = 'INVALID_RELEASE_URL') {
+  assert.equal(error.code, code);
+  const rendered = JSON.stringify({ message: error.message, details: error.details, public: error.toPublicResult() });
+  assert.doesNotMatch(rendered, /fixture-secret|signed-secret|user-secret|password-secret|https:|upstream-secret/);
+  return true;
+}
+
+test('MRPACK GitHub redirects reject disallowed targets before their DNS or request and redact secrets', async t => {
+  const content = Buffer.from('rejected redirect bytes');
+  const targets = [
+    'https://release-assets.githubusercontent.com.evil.example/asset?token=signed-secret',
+    'https://cdn.release-assets.githubusercontent.com/asset?token=signed-secret',
+    'https://api.github.com/asset?token=signed-secret', 'https://evil.example/asset?token=signed-secret',
+    'http://release-assets.githubusercontent.com/asset?token=signed-secret',
+    'https://user-secret:password-secret@release-assets.githubusercontent.com/asset?token=signed-secret',
+    'https://release-assets.githubusercontent.com:444/asset?token=signed-secret',
+    'https://127.0.0.1/asset?token=signed-secret'
+  ];
+  for (const [side, builder] of [['client', buildMrpackClientPlan], ['server', buildMrpackServerPlan]]) {
+    for (const [index, target] of targets.entries()) await t.test(`${side}: target ${index}`, async () => {
+      const f = await mrpackRedirectFixture(new Map([
+        [MRPACK_GITHUB_URL, { statusCode: 302, headers: { location: target }, body: Buffer.from('upstream-secret') }],
+        [target, { body: content }]
+      ]));
+      try {
+        await assert.rejects(f.downloader.downloadPart(mrpackDownload(builder, content)), redactedMrpackFailure);
+        assert.deepEqual(f.calls.map(call => call.url), [MRPACK_GITHUB_URL]);
+        assert.deepEqual(f.lookupCalls, ['github.com']);
+        assert.equal(f.responses[0].bodyReads, 0);
+        await assertNoMrpackPublication(f, content);
+      } finally { await f.cleanup(); }
+    });
+  }
+});
+
+test('MRPACK non-GitHub initial downloads cannot acquire CDN authority from mirrors or later GitHub hops', async t => {
+  const content = Buffer.from('non-GitHub authority bytes');
+  const target = 'https://objects.githubusercontent.com/asset?token=signed-secret';
+  for (const [side, builder] of [['client', buildMrpackClientPlan], ['server', buildMrpackServerPlan]]) {
+    for (const host of ['cdn.modrinth.com', 'raw.githubusercontent.com', 'gitlab.com', 'github.com.']) {
+      for (const viaGithub of [false, true]) await t.test(`${side}: ${host} ${viaGithub ? 'via GitHub' : 'direct'}`, async () => {
+        const initial = `https://${host}/example.jar`;
+        const f = await mrpackRedirectFixture(new Map([
+          [initial, { statusCode: 302, headers: { location: viaGithub ? MRPACK_GITHUB_URL : target } }],
+          [MRPACK_GITHUB_URL, { statusCode: 302, headers: { location: target } }],
+          [target, { body: content }]
+        ]));
+        try {
+          const download = mrpackDownload(builder, content, { url: initial, candidates: [MRPACK_GITHUB_URL] });
+          await assert.rejects(f.downloader.downloadPart(download), error => {
+            assert.equal(error.details.reasonCode, 'host-not-allowed');
+            return redactedMrpackFailure(error);
+          });
+          assert.deepEqual(f.calls.map(call => call.url), viaGithub ? [initial, MRPACK_GITHUB_URL] : [initial]);
+          assert.deepEqual(f.lookupCalls, viaGithub ? [host, 'github.com'] : [host]);
+          await assertNoMrpackPublication(f, content);
+        } finally { await f.cleanup(); }
+      });
+    }
+  }
+});
+
+test('MRPACK admitted CDN hops still reject a disallowed later redirect with no publication', async t => {
+  const content = Buffer.from('chained authority bytes');
+  const cdn = 'https://github-releases.githubusercontent.com/asset?token=fixture-secret';
+  const denied = 'https://evil.example/asset?token=signed-secret';
+  for (const [side, builder] of [['client', buildMrpackClientPlan], ['server', buildMrpackServerPlan]]) await t.test(side, async () => {
+    const f = await mrpackRedirectFixture(new Map([
+      [MRPACK_GITHUB_URL, { statusCode: 302, headers: { location: cdn } }],
+      [cdn, { statusCode: 302, headers: { location: denied } }], [denied, { body: content }]
+    ]));
+    try {
+      await assert.rejects(f.downloader.downloadPart(mrpackDownload(builder, content)), redactedMrpackFailure);
+      assert.deepEqual(f.calls.map(call => call.url), [MRPACK_GITHUB_URL, cdn]);
+      assert.deepEqual(f.lookupCalls, ['github.com', 'github-releases.githubusercontent.com']);
+      await assertNoMrpackPublication(f, content);
+    } finally { await f.cleanup(); }
+  });
+});
+
+test('MRPACK redirected bytes retain independent SHA-1 SHA-512 and measured-size enforcement', async t => {
+  const content = Buffer.from('dual hash CDN content');
+  const target = 'https://release-assets.githubusercontent.com/asset?token=fixture-secret';
+  for (const [side, builder] of [['client', buildMrpackClientPlan], ['server', buildMrpackServerPlan]]) {
+    for (const [name, options, headers, algorithm] of [
+      ['sha1 mismatch', { hashes: { sha1: 'a'.repeat(40), sha512: digest(content, 'sha512') } }, {}, 'sha1'],
+      ['sha512 mismatch', { hashes: { sha1: digest(content, 'sha1'), sha512: 'b'.repeat(128) } }, {}, 'sha512'],
+      ['short body', { fileSize: content.length + 1 }, {}],
+      ['long body', { fileSize: content.length - 1 }, {}],
+      ['declared size mismatch', {}, { 'content-length': String(content.length + 1) }]
+    ]) await t.test(`${side}: ${name}`, async () => {
+      const f = await mrpackRedirectFixture(new Map([
+        [MRPACK_GITHUB_URL, { statusCode: 302, headers: { location: target } }], [target, { body: content, headers }]
+      ]));
+      try {
+        await assert.rejects(f.downloader.downloadPart(mrpackDownload(builder, content, options)), error => {
+          assert.equal(error.details?.algorithm, algorithm);
+          return redactedMrpackFailure(error, 'HASH_MISMATCH');
+        });
+        assert.deepEqual(f.calls.map(call => call.url), [MRPACK_GITHUB_URL, target]);
+        await assertNoMrpackPublication(f, content);
+      } finally { await f.cleanup(); }
+    });
+  }
+});
+
+test('MRPACK abort after a redirected CDN body chunk destroys the response and removes partials', { timeout: 2000 }, async t => {
+  const content = Buffer.from('cancelled CDN content');
+  const target = 'https://objects.githubusercontent.com/asset?token=fixture-secret';
+  for (const [side, builder] of [['client', buildMrpackClientPlan], ['server', buildMrpackServerPlan]]) await t.test(side, async () => {
+    const controller = new AbortController(); const body = new PassThrough(); const progress = [];
+    const f = await mrpackRedirectFixture(new Map([
+      [MRPACK_GITHUB_URL, { statusCode: 302, headers: { location: target } }], [target, { response: body }]
+    ]));
+    try {
+      const pending = f.downloader.downloadPart(mrpackDownload(builder, content), {
+        signal: controller.signal, onProgress(event) { progress.push(event); controller.abort(); }
+      });
+      body.write(content.subarray(0, 3));
+      await assert.rejects(pending, error => redactedMrpackFailure(error, 'CANCELLED'));
+      assert.deepEqual(progress.map(event => event.partBytes), ['3']);
+      assert.equal(body.destroyed, true);
+      assert.deepEqual(f.calls.map(call => call.url), [MRPACK_GITHUB_URL, target]);
+      await assertNoMrpackPublication(f, content);
+    } finally { body.destroy(); await f.cleanup(); }
+  });
+});
 
 test('GitHub plans retain permanent IDs without caller-carried request policy', async () => {
   const { artifactPlan } = await issuedGitHubPlan(Buffer.from('issued plan bytes'));

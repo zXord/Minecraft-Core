@@ -101,6 +101,18 @@ function normalizeDownload(value) {
   return url.href;
 }
 
+function getMrpackDownloadHosts(value) {
+  // Manifest admission bounds raw input; its normalized href may expand beyond that limit.
+  if (typeof value !== 'string') throw new ModpackError('INVALID_RELEASE_URL', 'Pack download address is not allowed', { details: { reasonCode: 'malformed-url' } });
+  const url = validateRemoteUrl(value, { allowedHosts: MRPACK_DOWNLOAD_HOSTS, allowSubdomains: false });
+  return Object.freeze(url.hostname === 'github.com' ? [
+    ...MRPACK_DOWNLOAD_HOSTS,
+    'release-assets.githubusercontent.com',
+    'objects.githubusercontent.com',
+    'github-releases.githubusercontent.com'
+  ] : [...MRPACK_DOWNLOAD_HOSTS]);
+}
+
 function normalizeFile(value, index) {
   if (!plainObject(value)) throw manifestInvalid();
   const allowed = new Set(['path', 'hashes', 'env', 'downloads', 'fileSize']);
@@ -166,6 +178,7 @@ module.exports = {
   MRPACK_MANIFEST_MAX_BYTES,
   canonicalWindowsPath,
   ensureValidatedMrpackManifest,
+  getMrpackDownloadHosts,
   manifestInvalid,
   normalizeMrpackPath,
   validateMrpackManifest
