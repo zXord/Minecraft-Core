@@ -556,6 +556,99 @@ test('recovery remains explicit and never reports ready after recovery failure',
   await expect(page.getByRole('alert')).toContainText('Writer still active');
   await expect(page.getByText('Matching pack ready')).toHaveCount(0);
 });
+
+for (const viewport of [{width:1280,height:900}, {width:390,height:844}]) test(`task8: recovery stays visibly busy until authoritative refresh settles at ${viewport.width}px`, async ({page}) => {
+  // Catches a missing initial recovery phase or clearing it when only recover has settled.
+  await page.setViewportSize(viewport);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => { if (['error','warning'].includes(message.type())) errors.push(message.text()); });
+  await start(page,'recovery-required');
+  await page.evaluate(() => { window.pending['client-packs:recover']=[]; window.pending['client-packs:get-state']=[]; });
+  await page.getByRole('button',{name:'Retry recovery'}).click();
+  await expect.poll(() => page.evaluate(() => window.pending['client-packs:recover'].length)).toBe(1);
+  const panel = page.getByRole('region',{name:'Matching client modpack'});
+  const working = panel.getByRole('status');
+  await expect(working).toContainText(/checking.*recovering.*interrupted installation/i);
+  await expect(panel).toHaveAttribute('aria-busy','true');
+  await expect(working.getByRole('progressbar')).not.toHaveAttribute('value');
+  await expect(working).not.toContainText(/\d|%|ETA|complete/i);
+  await expect(page.getByRole('button',{name:'Retry recovery'})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'Refresh requirement'})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'Cancel request'})).toHaveCount(0);
+  await expect(page.getByText('Matching pack ready',{exact:true})).toHaveCount(0);
+  expect(await page.evaluate(() => window.calls.filter(call => call.channel==='client-packs:recover').map(call => call.input))).toEqual([{clientId:'a'}]);
+  expect(page.url()).toBe('about:blank');
+  expect(await page.locator('vite-error-overlay, nextjs-portal, #webpack-dev-server-client-overlay').count()).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  if (process.env.RECOVERY_WORKING_EVIDENCE) await page.screenshot({path:path.join(process.env.RECOVERY_WORKING_EVIDENCE,`task-8-recovery-${viewport.width}.png`),fullPage:true});
+  await page.evaluate(() => window.pending['client-packs:recover'][0].resolve({ok:true,value:{phase:'committed',operationId:'recovered-operation'}}));
+  await expect.poll(() => page.evaluate(() => window.pending['client-packs:get-state'].length)).toBe(1);
+  await expect(working).toContainText(/checking.*recovering.*interrupted installation/i);
+  await expect(working.getByRole('progressbar')).not.toHaveAttribute('value');
+  await expect(page.getByText('Matching pack ready',{exact:true})).toHaveCount(0);
+  await page.evaluate(() => window.pending['client-packs:get-state'][0].resolve({ok:true,value:{clientId:'a',status:'ready',verified:true,descriptor:window.descriptor}}));
+  await expect(page.getByText('Matching pack ready',{exact:true})).toBeVisible();
+  await expect(panel).toHaveAttribute('aria-busy','false');
+  await expect(working).toHaveCount(0);
+  await expect(page.getByRole('progressbar')).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Refresh requirement'})).toBeEnabled();
+  expect(errors).toEqual([]);
+});
+
+test('task8: recovery failure keeps working feedback through its error-state refresh', async ({page}) => {
+  // Catches a catch-path early clear, false Ready, or newly advertised cancellation.
+  await start(page,'recovery-required');
+  await page.evaluate(() => { window.pending['client-packs:recover']=[]; window.pending['client-packs:get-state']=[]; });
+  await page.getByRole('button',{name:'Retry recovery'}).click();
+  await page.evaluate(() => window.pending['client-packs:recover'][0].resolve({ok:false,error:{code:'RECOVERY_REQUIRED',message:'Recovery remains blocked'}}));
+  await expect.poll(() => page.evaluate(() => window.pending['client-packs:get-state'].length)).toBe(1);
+  await expect(page.getByRole('status')).toContainText(/checking.*recovering.*interrupted installation/i);
+  await expect(page.getByRole('progressbar')).not.toHaveAttribute('value');
+  await expect(page.getByRole('alert')).toContainText('Recovery remains blocked');
+  await expect(page.getByRole('button',{name:'Retry recovery'})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'Cancel request'})).toHaveCount(0);
+  await expect(page.getByText('Matching pack ready',{exact:true})).toHaveCount(0);
+  await page.evaluate(() => window.pending['client-packs:get-state'][0].resolve({ok:true,value:{clientId:'a',status:'recovery-required',verified:false,descriptor:window.descriptor,recoveryReason:'restart-required'}}));
+  await expect(page.getByRole('status')).toHaveCount(0);
+  await expect(page.getByRole('progressbar')).toHaveCount(0);
+  await expect(page.getByRole('alert')).toContainText('Recovery remains blocked');
+  await expect(page.getByText(/Save your work.*restart Windows/i)).toBeVisible();
+  await expect(page.getByRole('button',{name:'Retry recovery'})).toBeEnabled();
+  await expect(page.getByText('Matching pack ready',{exact:true})).toHaveCount(0);
+});
+
+for (const outcome of ['success','error']) test(`task8: stale recovery ${outcome} refresh cannot clear another instance's working state`, async ({page}) => {
+  // Catches removal of the current-instance/operation fence in apply or finally.
+  await start(page,'recovery-required');
+  await page.evaluate(() => { window.pending['client-packs:recover']=[]; window.pending['client-packs:get-state']=[]; });
+  await page.getByRole('button',{name:'Retry recovery'}).click();
+  await page.evaluate(outcome => window.pending['client-packs:recover'][0].resolve(outcome==='success'
+    ? {ok:true,value:{phase:'abandoned',operationId:'old-operation'}}
+    : {ok:false,error:{code:'RECOVERY_REQUIRED',message:'Old recovery failure'}}), outcome);
+  await expect.poll(() => page.evaluate(() => window.pending['client-packs:get-state'].length)).toBe(1);
+  await expect(page.getByRole('status')).toContainText(/checking.*recovering.*interrupted installation/i);
+  await page.evaluate(() => window.show('client','b'));
+  await expect.poll(() => page.evaluate(() => window.pending['client-packs:get-state'].length)).toBe(2);
+  await expect(page.getByRole('status')).toHaveCount(0);
+  await page.evaluate(() => window.pending['client-packs:get-state'][1].resolve({ok:true,value:{clientId:'b',status:'recovery-required',verified:false,descriptor:window.descriptor}}));
+  await page.getByRole('button',{name:'Retry recovery'}).click();
+  await expect.poll(() => page.evaluate(() => window.pending['client-packs:recover'].length)).toBe(2);
+  await page.evaluate(() => window.pending['client-packs:get-state'][0].resolve({ok:true,value:{clientId:'a',status:'ready',verified:true,descriptor:window.descriptor}}));
+  await expect(page.getByRole('status')).toContainText(/checking.*recovering.*interrupted installation/i);
+  await expect(page.getByRole('progressbar')).not.toHaveAttribute('value');
+  await expect(page.getByRole('button',{name:'Retry recovery'})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'Cancel request'})).toHaveCount(0);
+  await expect(page.getByText('Matching pack ready',{exact:true})).toHaveCount(0);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await page.evaluate(() => window.pending['client-packs:recover'][1].resolve({ok:true,value:{phase:'abandoned',operationId:'new-operation'}}));
+  await expect.poll(() => page.evaluate(() => window.pending['client-packs:get-state'].length)).toBe(3);
+  await page.evaluate(() => window.pending['client-packs:get-state'][2].resolve({ok:true,value:{clientId:'b',status:'install-required',verified:false,descriptor:window.descriptor}}));
+  await expect(page.getByRole('button',{name:'Review matching pack'})).toBeEnabled();
+  await expect(page.getByRole('status')).toHaveCount(0);
+  await expect(page.getByText('Matching pack ready',{exact:true})).toHaveCount(0);
+});
+
 test('instance switch ignores delayed classification from the previous instance', async ({page}) => {
   await start(page);
   await page.evaluate(() => window.pending['client-packs:get-state']=[]);

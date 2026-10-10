@@ -31,6 +31,7 @@ function preparedManifestEvidence(prepared, descriptor, optionalFileIds) {
   return { schemaVersion: 2, contentFormat: manifest.contentFormat, runtimeConstraints: manifest.runtimeConstraints };
 }
 const MAX_CLEANUP_ENTRIES = 20000;
+const MAX_CLEANUP_BATCH = 256;
 const MAX_CLEANUP_BYTES = 8 * 1024 * 1024;
 // 20,000 inventory objects with eight fields each, plus chunks and ownership
 // metadata. Chunking alone does not reduce strict JSON's total-value count.
@@ -403,14 +404,23 @@ class ClientPackTransaction {
   _cleanupIntent(value, record, role, sourceRecordSha256) {
     const noCandidate = record.phase === 'abandoned' && record.candidateIdentity === null && record.candidateTree === null;
     if (!exactKeys(value, ['schemaVersion', 'operationId', 'clientId', 'clientPath', 'role', 'sourceRecordSha256', 'proofSha256', 'rootIdentity', 'parentIdentity', 'entryCount', 'cursor', 'pending', 'phase']) ||
-        value.schemaVersion !== 1 || value.operationId !== record.operationId || value.clientId !== record.clientId || value.clientPath !== record.clientPath || value.role !== role ||
+        ![1, 2].includes(value.schemaVersion) || value.operationId !== record.operationId || value.clientId !== record.clientId || value.clientPath !== record.clientPath || value.role !== role ||
         value.sourceRecordSha256 !== sourceRecordSha256 || (noCandidate ? value.proofSha256 !== null : !validSha256(value.proofSha256)) ||
         !equal(value.parentIdentity, record.parentIdentity) || !equal(value.rootIdentity, noCandidate ? null : (role === 'previous' ? record.oldTree : record.candidateTree)?.directoryIdentity) ||
         !Number.isSafeInteger(value.entryCount) || (noCandidate ? value.entryCount !== 0 || value.phase !== 'complete' : value.entryCount < 1 || value.entryCount > MAX_CLEANUP_ENTRIES) ||
         !Number.isSafeInteger(value.cursor) || value.cursor < 0 || value.cursor > value.entryCount ||
-        (value.pending !== null && (value.pending !== value.cursor || value.cursor >= value.entryCount)) ||
+        (value.pending !== null && (value.schemaVersion === 1 ? value.pending !== value.cursor || value.cursor >= value.entryCount :
+          !exactKeys(value.pending, ['endExclusive']) || !Number.isSafeInteger(value.pending.endExclusive) ||
+          value.pending.endExclusive <= value.cursor || value.pending.endExclusive > value.entryCount || value.pending.endExclusive - value.cursor > MAX_CLEANUP_BATCH)) ||
         !['cleaning', 'complete'].includes(value.phase) || (value.phase === 'complete' && (value.cursor !== value.entryCount || value.pending !== null))) throw fail();
     return value;
+  }
+  _cleanupRangeEnd(state) {
+    return state.intent.pending === null ? state.intent.cursor : state.intent.schemaVersion === 1 ? state.intent.pending + 1 : state.intent.pending.endExclusive;
+  }
+  _cleanupMayBeAbsent(state, entry) {
+    const index = state.indexByPath.get(entry.pathKey);
+    return index >= state.intent.cursor && index < this._cleanupRangeEnd(state);
   }
   async _writeCleanup(state, next) {
     await this.durableFs.writeJsonAtomicAsync(state.paths.cleanupPath, next, { expectedTargetSha256: state.sha256 });
@@ -463,7 +473,7 @@ class ClientPackTransaction {
     let stat;
     try { stat = await fs.lstat(state.paths.retainedPath, { bigint: true }); } catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
     if (!stat) {
-      const pendingRoot = state.intent.pending === state.entries.length - 1 && state.intent.cursor === state.entries.length - 1;
+      const pendingRoot = state.intent.pending !== null && this._cleanupRangeEnd(state) === state.entries.length;
       const deletedRoot = state.intent.pending === null && state.intent.cursor === state.entries.length;
       if (!pendingRoot && !deletedRoot) throw fail();
       await assertServerDirectoryIdentity(path.dirname(state.paths.clientPath), state.intent.parentIdentity, this._options());
@@ -471,20 +481,20 @@ class ClientPackTransaction {
     }
     await assertServerDirectoryIdentity(state.paths.retainedPath, state.intent.rootIdentity, this._options());
     const snapshot = await captureServerDirectoryCopySource(state.paths.retainedPath, this._cleanupSnapshotOptions(state));
-    const root = state.entries.find(entry => entry.path === '');
+    const root = state.byPath.get('');
     if (!statMatches(stat, root)) throw fail();
     const actual = new Map([...snapshot.entries, root].map(entry => [entry.pathKey, entry]));
     const remaining = state.entries.slice(state.intent.cursor);
     for (let index = 0; index < remaining.length; index++) {
       const expected = remaining[index]; const current = actual.get(expected.pathKey);
-      if (!current && index === 0 && state.intent.pending === state.intent.cursor) continue;
+      if (!current && this._cleanupMayBeAbsent(state, expected)) continue;
       if (!current || !equal(current, expected)) throw fail();
       actual.delete(expected.pathKey);
     }
     if (actual.size) throw fail();
     return snapshot;
   }
-  async _cleanupAncestry(state, entry) {
+  async _cleanupAncestry(state, entry, allowMissing = false) {
     await assertServerDirectoryIdentity(path.dirname(state.paths.clientPath), state.intent.parentIdentity, this._options());
     const ancestors = [];
     if (entry.path !== '') {
@@ -494,20 +504,28 @@ class ClientPackTransaction {
         const expected = state.byPath.get(relative.toLowerCase());
         if (!expected || expected.type !== 'directory') throw fail();
         const absolute = relative ? path.join(state.paths.retainedPath, ...relative.split('/')) : state.paths.retainedPath;
-        if (await this.reparseInspector.isReparsePoint(absolute) !== false) throw fail();
-        if (!statMatches(await fs.lstat(absolute, { bigint: true }), expected)) throw fail();
+        let stat;
+        try { stat = await fs.lstat(absolute, { bigint: true }); } catch (cause) {
+          if (cause.code !== 'ENOENT' || !allowMissing || !this._cleanupMayBeAbsent(state, expected)) throw cause;
+          // Existing ancestors have been checked root-to-leaf. Never traverse a
+          // missing directory: its descendants can only be interrupted absences.
+          return null;
+        }
+        if (!statMatches(stat, expected) || await this.reparseInspector.isReparsePoint(absolute) !== false) throw fail();
         ancestors.push({ absolute, expected });
       }
     }
     return ancestors;
   }
-  async _deleteCleanupEntry(state, entry) {
+  async _deleteCleanupEntry(state, entry, budget) {
     const absolute = entry.path ? path.join(state.paths.retainedPath, ...entry.path.split('/')) : state.paths.retainedPath;
-    const ancestors = await this._cleanupAncestry(state, entry);
+    const ancestors = await this._cleanupAncestry(state, entry, true);
+    if (ancestors === null) { if (!this._cleanupMayBeAbsent(state, entry)) throw fail(); return 'absent'; }
     let before;
     try { before = await fs.lstat(absolute, { bigint: true }); } catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
-    if (!before) { if (state.intent.pending !== state.intent.cursor) throw fail(); return; }
+    if (!before) { if (!this._cleanupMayBeAbsent(state, entry)) throw fail(); return 'absent'; }
     if (!statMatches(before, entry) || await this.reparseInspector.isReparsePoint(absolute) !== false) throw fail();
+    if (budget.remaining <= 0) return 'budget';
     if (entry.type === 'file') {
       const handle = await fs.open(absolute, nativeFs.constants.O_RDONLY | (nativeFs.constants.O_NOFOLLOW || 0));
       try {
@@ -525,6 +543,33 @@ class ClientPackTransaction {
     const final = nativeFs.lstatSync(absolute, { bigint: true });
     if (!statMatches(final, entry) || (entry.type === 'file' && (final.mtimeNs !== before.mtimeNs || final.size !== before.size))) throw fail();
     if (entry.type === 'file') nativeFs.unlinkSync(absolute); else nativeFs.rmdirSync(absolute);
+    budget.remaining--;
+    return 'deleted';
+  }
+  _cleanupBoundaries(state, endExclusive) {
+    const boundaries = new Map();
+    for (let index = state.intent.cursor; index < endExclusive; index++) {
+      let relative = state.entries[index].path;
+      for (;;) {
+        relative = relative === '' ? null : relative.split('/').slice(0, -1).join('/');
+        if (relative === null) { boundaries.set(null, null); break; }
+        const entry = state.byPath.get(relative.toLowerCase());
+        if (!entry || entry.type !== 'directory') throw fail();
+        if (!this._cleanupMayBeAbsent(state, entry)) { boundaries.set(entry.pathKey, entry); break; }
+      }
+    }
+    // Distinct nested surviving parents must both be flushed: a directory flush
+    // is not recursive. Range membership, not this run's deletions, selects them.
+    return [...boundaries.values()];
+  }
+  async _assertCleanupBoundaries(state, boundaries) {
+    await assertServerDirectoryIdentity(path.dirname(state.paths.clientPath), state.intent.parentIdentity, this._options());
+    for (const entry of boundaries) {
+      if (entry === null) continue;
+      await this._cleanupAncestry(state, entry);
+      const absolute = entry.path ? path.join(state.paths.retainedPath, ...entry.path.split('/')) : state.paths.retainedPath;
+      if (!statMatches(await fs.lstat(absolute, { bigint: true }), entry) || await this.reparseInspector.isReparsePoint(absolute) !== false) throw fail();
+    }
   }
   async _cleanupOne(target, record, options, budget) {
     const role = record.phase === 'committed' ? 'previous' : 'candidate';
@@ -544,7 +589,7 @@ class ClientPackTransaction {
       if (await this._retainedExists(paths)) return 'retained';
       await assertServerDirectoryIdentity(path.dirname(paths.clientPath), record.parentIdentity, this._options());
       await this.durableFs.flushDirectoryAsync(path.dirname(paths.retainedPath));
-      await this._writeCleanup(state, { schemaVersion: 1, operationId: record.operationId, clientId: target.clientId, clientPath: paths.clientPath, role,
+      await this._writeCleanup(state, { schemaVersion: 2, operationId: record.operationId, clientId: target.clientId, clientPath: paths.clientPath, role,
         sourceRecordSha256, proofSha256: null, rootIdentity: null, parentIdentity: record.parentIdentity,
         entryCount: 0, cursor: 0, pending: null, phase: 'complete' });
       budget.operations--;
@@ -556,10 +601,11 @@ class ClientPackTransaction {
     const inventory = await this._validateProof(target, record, role, proofBytes);
     if (inventory.retained) return 'retained';
     state.entries = inventory.entries; state.byPath = new Map(state.entries.map(entry => [entry.pathKey, entry]));
+    state.indexByPath = new Map(state.entries.map((entry, index) => [entry.pathKey, index]));
     if (state.intent && (state.intent.proofSha256 !== inventory.sha256 || state.intent.entryCount !== state.entries.length)) throw fail();
     if (!state.intent) {
       const exists = await this._retainedExists(paths);
-      state.intent = { schemaVersion: 1, operationId: record.operationId, clientId: target.clientId, clientPath: paths.clientPath, role,
+      state.intent = { schemaVersion: 2, operationId: record.operationId, clientId: target.clientId, clientPath: paths.clientPath, role,
         sourceRecordSha256, proofSha256: inventory.sha256, rootIdentity: inventory.proof.tree.directoryIdentity, parentIdentity: record.parentIdentity,
         entryCount: state.entries.length, cursor: exists ? 0 : state.entries.length, pending: null, phase: exists ? 'cleaning' : 'complete' };
       if (exists) { if (!sameTree(await this._assertCleanupRemainder(state), inventory.proof.tree)) throw fail(); }
@@ -570,19 +616,28 @@ class ClientPackTransaction {
       await this._assertCleanupRemainder(state);
       budget.operations--;
     }
-    while (state.intent.cursor < state.entries.length && budget.remaining > 0) {
-      const entry = state.entries[state.intent.cursor];
-      if (state.intent.pending === null) await this._writeCleanup(state, { ...state.intent, pending: state.intent.cursor });
-      await this._deleteCleanupEntry(state, entry);
-      const parent = entry.path ? path.dirname(path.join(paths.retainedPath, ...entry.path.split('/'))) : path.dirname(paths.retainedPath);
-      await this.durableFs.flushDirectoryAsync(parent);
-      await this._writeCleanup(state, { ...state.intent, cursor: state.intent.cursor + 1, pending: null });
-      budget.remaining--; await new Promise(resolve => setImmediate(resolve));
+    while (state.intent.cursor < state.entries.length) {
+      if (state.intent.pending === null) {
+        if (budget.remaining <= 0) return 'pending';
+        const endExclusive = Math.min(state.entries.length, state.intent.cursor + MAX_CLEANUP_BATCH, state.intent.cursor + budget.remaining);
+        await this._writeCleanup(state, { ...state.intent, schemaVersion: 2, pending: { endExclusive } });
+      }
+      const endExclusive = this._cleanupRangeEnd(state);
+      const boundaries = this._cleanupBoundaries(state, endExclusive);
+      for (let index = state.intent.cursor; index < endExclusive; index++) {
+        if (await this._deleteCleanupEntry(state, state.entries[index], budget) === 'budget') return 'pending';
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      await this._assertCleanupBoundaries(state, boundaries);
+      await this.durableFs.flushDirectoriesAsync(boundaries.map(entry => entry === null ? path.dirname(paths.retainedPath) :
+        entry.path ? path.join(paths.retainedPath, ...entry.path.split('/')) : paths.retainedPath));
+      await this._assertCleanupBoundaries(state, boundaries);
+      await this._writeCleanup(state, { ...state.intent, schemaVersion: 2, cursor: endExclusive, pending: null });
     }
     if (state.intent.cursor !== state.entries.length) return 'pending';
     if (await this._retainedExists(paths)) throw fail();
     await this.durableFs.flushDirectoryAsync(path.dirname(paths.retainedPath));
-    if (state.intent.phase !== 'complete') await this._writeCleanup(state, { ...state.intent, phase: 'complete' });
+    if (state.intent.phase !== 'complete') await this._writeCleanup(state, { ...state.intent, schemaVersion: 2, phase: 'complete' });
     // Keep compact terminal ownership evidence; the full native inventory is no
     // longer needed after durable completion and is not reused for any deletion.
     await this._compactProofs(target, record, sourceRecordSha256);

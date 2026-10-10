@@ -264,6 +264,189 @@ for (const after of [false, true]) test(`failure ${after ? 'after' : 'before'} o
 });
 function cleanupOptions(overrides = {}) { return { isQuiescent: async () => true, ...overrides }; }
 function insideFixture(f, value) { const relative = path.relative(f.root, path.resolve(value)); assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative)); return value; }
+async function cleanupBatchFixture(t, { role = 'candidate', files = 0 } = {}) {
+  const f = fixture(t);
+  for (let index = 0; index < files; index++) write(f.live, `bulk/${String(index).padStart(4, '0')}.txt`, 'owned');
+  const context = await stage(f);
+  if (role === 'previous') { await f.tx.seal(context); await f.tx.publish(context); }
+  else await f.tx.abandon(context, { quiescent: true });
+  const paths = f.tx._retainedPaths(f.target, context.operationId, role);
+  const record = JSON.parse(fs.readFileSync(f.tx._paths(f.target).journalPath));
+  const proofBytes = fs.readFileSync(paths.proofPath); const proof = JSON.parse(proofBytes);
+  const entries = proof.entries.flat();
+  const intent = { schemaVersion: 2, operationId: context.operationId, clientId: record.clientId, clientPath: record.clientPath, role,
+    sourceRecordSha256: hash(JSON.stringify(record)), proofSha256: hash(proofBytes), rootIdentity: proof.tree.directoryIdentity,
+    parentIdentity: record.parentIdentity, entryCount: entries.length, cursor: 0, pending: null, phase: 'cleaning' };
+  return { ...f, context, paths, record, proofBytes, entries, intent };
+}
+function persistCleanupFixture(f, intent) { fs.writeFileSync(f.paths.cleanupPath, JSON.stringify(intent)); }
+function removeCleanupEntries(f, indexes) {
+  for (const index of indexes) {
+    const entry = f.entries[index]; const absolute = entry.path ? path.join(f.paths.retainedPath, ...entry.path.split('/')) : f.paths.retainedPath;
+    if (entry.type === 'file') fs.unlinkSync(absolute); else fs.rmdirSync(absolute);
+  }
+}
+function assertCleanupLive(f) {
+  for (const [file, value] of [['saves/world.dat', 'save'], ['client-config.json', 'auth'], ['options.txt', 'mine']]) assert.equal(fs.readFileSync(path.join(f.live, file), 'utf8'), value);
+}
+for (const role of ['candidate', 'previous']) test(`cleanup batch amortizes 520 files for ${role} without changing live state`, async t => {
+  const f = await cleanupBatchFixture(t, { role, files: 520 }); const writes = [], flushes = [];
+  f.tx.durableFs = { ...f.durableFs,
+    async writeJsonAtomicAsync(file, value, options) { if (file === f.paths.cleanupPath) writes.push(structuredClone(value)); return f.durableFs.writeJsonAtomicAsync(file, value, options); },
+    async flushDirectoriesAsync(directories) { flushes.push([...directories]); return f.durableFs.flushDirectoriesAsync(directories); }
+  };
+  assert.deepEqual((await f.tx.cleanup(f.target, cleanupOptions())).completed, [f.context.operationId]);
+  const pending = writes.filter(value => value.pending !== null);
+  assert.deepEqual(pending.map(value => [value.schemaVersion, value.cursor, value.pending]), [[2, 0, { endExclusive: 256 }], [2, 256, { endExclusive: 512 }], [2, 512, { endExclusive: f.entries.length }]]);
+  assert.equal(writes.length, 8); assert.equal(flushes.length, 3);
+  assert.deepEqual(flushes[0], [path.join(f.paths.retainedPath, 'bulk')]);
+  assert.deepEqual(flushes[1], [path.join(f.paths.retainedPath, 'bulk')]); assert.deepEqual(flushes[2], [f.root]);
+  assert.equal(fs.existsSync(f.paths.retainedPath), false); assertCleanupLive(f);
+});
+for (const pending of [null, 85]) test(`cleanup v1 literal cursor 85 pending ${pending} settles before v2 ranges`, async t => {
+  const f = await cleanupBatchFixture(t, { files: 100 }); removeCleanupEntries(f, Array.from({ length: pending === 85 ? 86 : 85 }, (_, index) => index));
+  persistCleanupFixture(f, { ...f.intent, schemaVersion: 1, cursor: 85, pending }); const writes = [];
+  f.tx.durableFs = { ...f.durableFs, async writeJsonAtomicAsync(file, value, options) { if (file === f.paths.cleanupPath) writes.push(structuredClone(value)); return f.durableFs.writeJsonAtomicAsync(file, value, options); } };
+  assert.deepEqual((await f.tx.cleanup(f.target, cleanupOptions())).completed, [f.context.operationId]);
+  if (pending === 85) { assert.equal(writes[0].cursor, 86); assert.equal(writes[0].pending, null); }
+  const batch = writes.find(value => value.pending !== null); assert.equal(batch.schemaVersion, 2);
+  assert.deepEqual(batch.pending, { endExclusive: f.entries.length }); assert.equal(batch.cursor, pending === 85 ? 86 : 85);
+  for (const value of writes) for (const key of ['sourceRecordSha256', 'proofSha256', 'rootIdentity', 'parentIdentity']) assert.deepEqual(value[key], f.intent[key]);
+  assertCleanupLive(f);
+});
+test('cleanup v1 numeric 85 never authorizes absence at 86', async t => {
+  const f = await cleanupBatchFixture(t, { files: 100 }); removeCleanupEntries(f, Array.from({ length: 87 }, (_, index) => index));
+  persistCleanupFixture(f, { ...f.intent, schemaVersion: 1, cursor: 85, pending: 85 }); const before = fs.readFileSync(f.paths.cleanupPath);
+  assert.deepEqual((await new ClientPackTransaction(f.dependencies).cleanup(f.target, cleanupOptions())).retained, [f.context.operationId]);
+  assert.deepEqual(fs.readFileSync(f.paths.cleanupPath), before); assertCleanupLive(f);
+});
+test('cleanup v1 complete compacted marker is accepted without rewriting its proof or marker', async t => {
+  const f = await cleanupBatchFixture(t); assert.deepEqual((await f.tx.cleanup(f.target, cleanupOptions())).completed, [f.context.operationId]);
+  const terminal = JSON.parse(fs.readFileSync(f.paths.cleanupPath)); persistCleanupFixture(f, { ...terminal, schemaVersion: 1 });
+  const markerBytes = fs.readFileSync(f.paths.cleanupPath), proofBytes = fs.readFileSync(f.paths.proofPath);
+  assert.deepEqual((await new ClientPackTransaction(f.dependencies).cleanup(f.target, cleanupOptions({ isQuiescent: async () => false }))).completed, [f.context.operationId]);
+  assert.deepEqual(fs.readFileSync(f.paths.cleanupPath), markerBytes); assert.deepEqual(fs.readFileSync(f.paths.proofPath), proofBytes); assertCleanupLive(f);
+});
+for (const role of ['candidate', 'previous']) test(`cleanup v1 final cursor crash publishes a new v2 terminal for ${role}`, async t => {
+  const f = await cleanupBatchFixture(t, { role }); removeCleanupEntries(f, Array.from({ length: f.entries.length }, (_, index) => index));
+  persistCleanupFixture(f, { ...f.intent, schemaVersion: 1, cursor: f.entries.length, pending: null, phase: 'cleaning' }); const writes = [];
+  const reopened = new ClientPackTransaction({ ...f.dependencies, durableFs: { ...f.durableFs,
+    async writeJsonAtomicAsync(file, value, options) { if (file === f.paths.cleanupPath) writes.push(structuredClone(value)); return f.durableFs.writeJsonAtomicAsync(file, value, options); }
+  } });
+  assert.deepEqual((await reopened.cleanup(f.target, cleanupOptions())).completed, [f.context.operationId]);
+  assert.deepEqual(writes.map(value => [value.schemaVersion, value.cursor, value.pending, value.phase]), [[2, f.entries.length, null, 'complete']]);
+  for (const key of ['sourceRecordSha256', 'proofSha256', 'rootIdentity', 'parentIdentity']) assert.deepEqual(writes[0][key], f.intent[key]);
+  assert.equal(fs.existsSync(f.paths.retainedPath), false); assertCleanupLive(f);
+});
+for (const [label, change] of [
+  ['zero', { pending: { endExclusive: 0 } }], ['negative', { pending: { endExclusive: -1 } }],
+  ['reversed', { cursor: 2, pending: { endExclusive: 1 } }], ['fraction', { pending: { endExclusive: 1.5 } }],
+  ['unsafe', { pending: { endExclusive: Number.MAX_SAFE_INTEGER + 1 } }], ['past count', { pending: { endExclusive: 999 } }],
+  ['257 wide', { pending: { endExclusive: 257 } }], ['extra key', { pending: { endExclusive: 1, extra: true } }],
+  ['numeric', { pending: 0 }], ['array', { pending: [1] }], ['unknown schema', { schemaVersion: 3, pending: null }],
+  ['v1 object', { schemaVersion: 1, pending: { endExclusive: 1 } }]
+]) test(`cleanup range refuses invalid ${label} without checkpoint or deletion`, async t => {
+  const f = await cleanupBatchFixture(t, { files: label === '257 wide' ? 260 : 0 }); const invalid = { ...f.intent, ...change };
+  assert.throws(() => f.tx._cleanupIntent(invalid, f.record, 'candidate', f.intent.sourceRecordSha256)); persistCleanupFixture(f, invalid);
+  const before = fs.readFileSync(f.paths.cleanupPath); const names = fs.readdirSync(f.paths.retainedPath);
+  assert.deepEqual((await new ClientPackTransaction(f.dependencies).cleanup(f.target, cleanupOptions())).retained, [f.context.operationId]);
+  assert.deepEqual(fs.readFileSync(f.paths.cleanupPath), before); assert.deepEqual(fs.readdirSync(f.paths.retainedPath), names); assertCleanupLive(f);
+});
+test('cleanup range validator refuses nonfinite endpoints and malformed JSON retains authority', async t => {
+  const f = await cleanupBatchFixture(t);
+  for (const endExclusive of [NaN, Infinity, -Infinity]) assert.throws(() => f.tx._cleanupIntent({ ...f.intent, pending: { endExclusive } }, f.record, 'candidate', f.intent.sourceRecordSha256));
+  fs.writeFileSync(f.paths.cleanupPath, '{invalid');
+  assert.deepEqual((await f.tx.cleanup(f.target, cleanupOptions())).retained, [f.context.operationId]); assert.equal(fs.readFileSync(f.paths.cleanupPath, 'utf8'), '{invalid'); assertCleanupLive(f);
+});
+for (const absent of [[0, 1, 2], [0, 2]]) test(`cleanup range nonprefix replay ${absent} flushes whole persisted boundary`, async t => {
+  const f = await cleanupBatchFixture(t); assert.deepEqual(f.entries.slice(0, 3).map(entry => entry.path), ['mods/new.jar', 'mods/user.jar', 'saves/world.dat']);
+  persistCleanupFixture(f, { ...f.intent, pending: { endExclusive: 3 } }); removeCleanupEntries(f, absent); const flushes = [];
+  const reopened = new ClientPackTransaction({ ...f.dependencies, durableFs: { ...f.durableFs, async flushDirectoriesAsync(directories) { flushes.push([...directories]); return f.durableFs.flushDirectoriesAsync(directories); } } });
+  const result = await reopened.cleanup(f.target, cleanupOptions({ maxDeletes: 1 })); assert.deepEqual(result.pending, [f.context.operationId]);
+  assert.deepEqual(flushes[0], [path.join(f.paths.retainedPath, 'mods'), path.join(f.paths.retainedPath, 'saves')]);
+  assert.equal(JSON.parse(fs.readFileSync(f.paths.cleanupPath)).cursor >= 3, true); assertCleanupLive(f);
+});
+test('cleanup range larger pending resumes with one actual deletion and trailing absences cost no budget', async t => {
+  const f = await cleanupBatchFixture(t); persistCleanupFixture(f, { ...f.intent, pending: { endExclusive: 3 } }); removeCleanupEntries(f, [2]);
+  for (const cursor of [0, 3]) {
+    let deletes = 0; const unlink = fs.unlinkSync; t.mock.method(fs, 'unlinkSync', function(file) { if (file.startsWith(f.paths.retainedPath + path.sep)) deletes++; return unlink(file); });
+    const result = await new ClientPackTransaction(f.dependencies).cleanup(f.target, cleanupOptions({ maxDeletes: 1 }));
+    assert.deepEqual(result.pending, [f.context.operationId]); assert.equal(deletes, 1); assert.equal(JSON.parse(fs.readFileSync(f.paths.cleanupPath)).cursor, cursor); t.mock.restoreAll();
+  }
+  assert.deepEqual((await new ClientPackTransaction(f.dependencies).cleanup(f.target, cleanupOptions())).completed, [f.context.operationId]); assertCleanupLive(f);
+});
+for (const mode of ['whole suffix', 'root only']) test(`cleanup range ${mode} absence flushes outer parent`, async t => {
+  const f = await cleanupBatchFixture(t); const cursor = mode === 'root only' ? f.entries.length - 1 : 0;
+  removeCleanupEntries(f, Array.from({ length: f.entries.length }, (_, index) => index)); persistCleanupFixture(f, { ...f.intent, cursor, pending: { endExclusive: f.entries.length } }); const flushes = [];
+  const reopened = new ClientPackTransaction({ ...f.dependencies, durableFs: { ...f.durableFs, async flushDirectoriesAsync(directories) { flushes.push([...directories]); return f.durableFs.flushDirectoriesAsync(directories); } } });
+  assert.deepEqual((await reopened.cleanup(f.target, cleanupOptions())).completed, [f.context.operationId]); assert.deepEqual(flushes, [[f.root]]); assertCleanupLive(f);
+});
+test('cleanup range cross-depth absent ancestor is tolerated only inside its pending range', async t => {
+  const f = await cleanupBatchFixture(t); const modsIndex = f.entries.findIndex(entry => entry.path === 'mods');
+  persistCleanupFixture(f, { ...f.intent, pending: { endExclusive: modsIndex + 1 } }); removeCleanupEntries(f, [0, 1, modsIndex]);
+  const lstat = fs.promises.lstat; let traversedMissingAncestor = false;
+  t.mock.method(fs.promises, 'lstat', async function(file, ...args) { if (file.startsWith(path.join(f.paths.retainedPath, 'mods') + path.sep)) traversedMissingAncestor = true; return lstat(file, ...args); });
+  assert.deepEqual((await new ClientPackTransaction(f.dependencies).cleanup(f.target, cleanupOptions())).completed, [f.context.operationId]);
+  assert.equal(traversedMissingAncestor, false); assertCleanupLive(f);
+});
+test('cleanup range unexpected ancestor stat error is not interpreted as an authorized absence', async t => {
+  const f = await cleanupBatchFixture(t); const modsIndex = f.entries.findIndex(entry => entry.path === 'mods');
+  persistCleanupFixture(f, { ...f.intent, pending: { endExclusive: modsIndex + 1 } }); removeCleanupEntries(f, [0, 1, modsIndex]);
+  const before = fs.readFileSync(f.paths.cleanupPath); const lstat = fs.promises.lstat; let injected = false;
+  t.mock.method(fs.promises, 'lstat', async function(file, ...args) { if (file === path.join(f.paths.retainedPath, 'mods')) { injected = true; throw Object.assign(new Error('access denied'), { code: 'EACCES' }); } return lstat(file, ...args); });
+  assert.deepEqual((await new ClientPackTransaction(f.dependencies).cleanup(f.target, cleanupOptions())).retained, [f.context.operationId]);
+  assert.equal(injected, true); assert.deepEqual(fs.readFileSync(f.paths.cleanupPath), before); assert.equal(fs.readFileSync(path.join(f.paths.retainedPath, 'saves/world.dat'), 'utf8'), 'save'); assertCleanupLive(f);
+});
+for (const mutation of ['missing outside', 'missing ancestor outside', 'resurrected', 'unexpected', 'changed', 'substituted', 'hard link', 'junction']) test(`cleanup range retains ${mutation} without changing authority`, async t => {
+  const f = await cleanupBatchFixture(t); let intent = { ...f.intent, pending: { endExclusive: 2 } };
+  if (mutation === 'missing outside') removeCleanupEntries(f, [2]);
+  if (mutation === 'missing ancestor outside') removeCleanupEntries(f, [0, 1, f.entries.findIndex(entry => entry.path === 'mods')]);
+  if (mutation === 'resurrected') { removeCleanupEntries(f, [0]); write(f.paths.retainedPath, 'mods/new.jar', 'new'); intent = { ...f.intent, cursor: 1, pending: { endExclusive: 2 } }; }
+  if (mutation === 'unexpected') write(f.paths.retainedPath, 'foreign.txt', 'foreign');
+  const victim = path.join(f.paths.retainedPath, 'mods/new.jar');
+  if (mutation === 'changed') fs.writeFileSync(victim, 'changed');
+  if (mutation === 'substituted') { fs.renameSync(victim, path.join(f.root, 'original')); fs.writeFileSync(victim, 'new'); }
+  if (mutation === 'hard link') fs.linkSync(victim, path.join(f.root, 'linked'));
+  if (mutation === 'junction') fs.symlinkSync(f.live, path.join(f.paths.retainedPath, 'foreign-link'), 'junction');
+  persistCleanupFixture(f, intent); const before = fs.readFileSync(f.paths.cleanupPath);
+  assert.deepEqual((await new ClientPackTransaction(f.dependencies).cleanup(f.target, cleanupOptions())).retained, [f.context.operationId]);
+  assert.deepEqual(fs.readFileSync(f.paths.cleanupPath), before); assert.equal(fs.existsSync(f.paths.retainedPath), true); assertCleanupLive(f);
+});
+for (const boundary of ['pending before', 'pending after', 'delete', 'flush partial', 'cursor before', 'cursor after', 'terminal', 'compaction']) test(`cleanup batch resumes interruption at ${boundary}`, async t => {
+  const f = await cleanupBatchFixture(t); let injected = false;
+  if (boundary === 'flush partial') persistCleanupFixture(f, { ...f.intent, pending: { endExclusive: 3 } });
+  f.tx.durableFs = { ...f.durableFs,
+    async writeJsonAtomicAsync(file, value, options) {
+      const hit = file === f.paths.cleanupPath && (boundary.startsWith('pending') ? value.pending !== null : boundary.startsWith('cursor') ? value.pending === null && value.cursor > 0 && value.phase === 'cleaning' : boundary === 'terminal' && value.phase === 'complete') || boundary === 'compaction' && file === f.paths.proofPath;
+      if (hit && !injected) { injected = true; if (boundary.endsWith('after')) await f.durableFs.writeJsonAtomicAsync(file, value, options); throw new Error(`injected ${boundary}`); }
+      return f.durableFs.writeJsonAtomicAsync(file, value, options);
+    },
+    async flushDirectoriesAsync(directories) { if (boundary === 'flush partial' && !injected) { injected = true; assert.deepEqual(directories, [path.join(f.paths.retainedPath, 'mods'), path.join(f.paths.retainedPath, 'saves')]); await f.durableFs.flushDirectoryAsync(directories[0]); throw new Error('partial flush'); } return f.durableFs.flushDirectoriesAsync(directories); }
+  };
+  if (boundary === 'delete') { const unlink = fs.unlinkSync; t.mock.method(fs, 'unlinkSync', function(file) { const result = unlink(file); if (file.startsWith(f.paths.retainedPath + path.sep) && !injected) { injected = true; throw new Error('interrupted after unlink'); } return result; }); }
+  assert.deepEqual((await f.tx.cleanup(f.target, cleanupOptions())).retained, [f.context.operationId]); assert.equal(injected, true); t.mock.restoreAll();
+  const persisted = JSON.parse(fs.readFileSync(f.paths.cleanupPath));
+  if (['pending after', 'delete', 'flush partial', 'cursor before'].includes(boundary)) { assert.equal(persisted.cursor, 0); assert.deepEqual(persisted.pending, { endExclusive: boundary === 'flush partial' ? 3 : f.entries.length }); }
+  if (boundary === 'pending before') { assert.equal(persisted.cursor, 0); assert.equal(persisted.pending, null); assert.equal(fs.existsSync(path.join(f.paths.retainedPath, 'mods/new.jar')), true); }
+  assertCleanupLive(f);
+  assert.deepEqual((await new ClientPackTransaction(f.dependencies).cleanup(f.target, cleanupOptions())).completed, [f.context.operationId]); assertCleanupLive(f);
+});
+test('cleanup range preserves nested surviving boundaries rather than collapsing them', async t => {
+  const f = fixture(t); write(f.live, 'nest/child/deep.txt', 'deep'); write(f.live, 'nest/shallow.txt', 'shallow');
+  const context = await stage(f); await f.tx.abandon(context, { quiescent: true }); const paths = f.tx._retainedPaths(f.target, context.operationId, 'candidate'); const proofBytes = fs.readFileSync(paths.proofPath); const entries = JSON.parse(proofBytes).entries.flat();
+  assert.deepEqual(entries.slice(0, 5).map(entry => entry.path), ['nest/child/deep.txt', 'mods/new.jar', 'mods/user.jar', 'nest/shallow.txt', 'saves/world.dat']);
+  const flushes = []; f.tx.durableFs = { ...f.durableFs, async flushDirectoriesAsync(directories) { flushes.push([...directories]); return f.durableFs.flushDirectoriesAsync(directories); } };
+  assert.deepEqual((await f.tx.cleanup(f.target, cleanupOptions({ maxDeletes: 5 }))).pending, [context.operationId]);
+  assert.deepEqual(flushes, [[path.join(paths.retainedPath, 'nest/child'), path.join(paths.retainedPath, 'mods'), path.join(paths.retainedPath, 'nest'), path.join(paths.retainedPath, 'saves')]]); assertCleanupLive(f);
+});
+for (const when of ['before', 'after']) test(`cleanup range substituted boundary ${when} flush cannot advance cursor`, async t => {
+  const f = await cleanupBatchFixture(t); persistCleanupFixture(f, { ...f.intent, pending: { endExclusive: 2 } }); let substituted = false;
+  const replace = () => { if (!substituted) { substituted = true; fs.renameSync(path.join(f.paths.retainedPath, 'mods'), path.join(f.root, 'moved-mods')); fs.mkdirSync(path.join(f.paths.retainedPath, 'mods')); } };
+  if (when === 'before') { const unlink = fs.unlinkSync; t.mock.method(fs, 'unlinkSync', function(file) { const result = unlink(file); if (file === path.join(f.paths.retainedPath, 'mods/user.jar')) replace(); return result; }); }
+  f.tx.durableFs = { ...f.durableFs, async flushDirectoriesAsync(directories) { await f.durableFs.flushDirectoriesAsync(directories); if (when === 'after') replace(); } };
+  assert.deepEqual((await f.tx.cleanup(f.target, cleanupOptions())).retained, [f.context.operationId]); assert.equal(substituted, true);
+  assert.equal(JSON.parse(fs.readFileSync(f.paths.cleanupPath)).cursor, 0); assert.equal(fs.existsSync(path.join(f.paths.retainedPath, 'mods')), true); assertCleanupLive(f);
+});
 test('settled cleanup deletes only exact committed previous tree and keeps live saves', async t => {
   const f = fixture(t); const context = await stage(f); await f.tx.seal(context); await f.tx.publish(context);
   const result = await f.tx.cleanup(f.target, cleanupOptions());
@@ -317,7 +500,7 @@ test('interruption after exact deletion before progress commit resumes the singl
     if (file.includes('.cleanup-') && record.cursor === 1 && record.pending === null && !failed) { failed = true; throw new Error('injected progress commit failure'); }
     return f.durableFs.writeJsonAtomicAsync(file, record, options);
   } };
-  const first = await f.tx.cleanup(f.target, cleanupOptions()); assert.equal(failed, true); assert.deepEqual(first.retained, [context.operationId]);
+  const first = await f.tx.cleanup(f.target, cleanupOptions({ maxDeletes: 1 })); assert.equal(failed, true); assert.deepEqual(first.retained, [context.operationId]);
   const reopened = new ClientPackTransaction(f.dependencies);
   assert.deepEqual((await reopened.cleanup(f.target, cleanupOptions())).completed, [context.operationId]);
   assert.equal(fs.existsSync(context.previousPath), false);
@@ -404,6 +587,8 @@ test('abandoned before candidate mkdir completes only with positive quiescence a
   const reopened = new ClientPackTransaction(f.dependencies);
   assert.deepEqual((await reopened.cleanup(f.target, cleanupOptions({ isQuiescent: async () => false }))).retained, [operationId]);
   assert.deepEqual((await reopened.cleanup(f.target, cleanupOptions())).completed, [operationId]);
+  const cleanupPath = reopened._retainedPaths(f.target, operationId, 'candidate').cleanupPath;
+  const terminal = JSON.parse(fs.readFileSync(cleanupPath)); fs.writeFileSync(cleanupPath, JSON.stringify({ ...terminal, schemaVersion: 1 }));
   assert.deepEqual((await reopened.cleanup(f.target, cleanupOptions({ isQuiescent: async () => false }))).completed, [operationId]);
   assert.equal(fs.readFileSync(path.join(f.live, 'saves/world.dat'), 'utf8'), 'save');
 });

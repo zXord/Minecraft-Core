@@ -8,12 +8,18 @@ const path = require('node:path');
 const { PassThrough } = require('node:stream');
 const test = require('node:test');
 
-const { encodeFrame } = require('../electron/services/modpacks/archive/archive-worker-client.cjs');
+const { MAX_FRAME_BYTES, encodeFrame } = require('../electron/services/modpacks/archive/archive-worker-client.cjs');
 const { WindowsDurableFsClient } = require('../electron/utils/windows-durable-fs-client.cjs');
 
 function rootFixture(t, label) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), label));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    const resolved = path.resolve(root);
+    assert.equal(path.dirname(resolved).toLocaleLowerCase('en-US'), path.resolve(os.tmpdir()).toLocaleLowerCase('en-US'));
+    assert.ok(path.basename(resolved).startsWith(label));
+    assert.equal(fs.lstatSync(resolved).isSymbolicLink(), false);
+    fs.rmSync(resolved, { recursive: true, force: true });
+  });
   return root;
 }
 
@@ -46,6 +52,246 @@ function fixtureWorkerClient(root, overrides = {}) {
     ...overrides
   });
 }
+
+// Native child behavior and executable verifier callbacks are injected. Path
+// ownership, filesystem identities, request framing, verification dispatch and
+// close handling exercise the production client.
+function flushFrameBoundary(onRequest = (_request, child) => completeFlushChild(child)) {
+  const requests = [];
+  const frames = [];
+  const children = [];
+  const killSignals = [];
+  const received = new EventEmitter();
+  function spawn() {
+    const child = new EventEmitter();
+    child.pid = 7000 + children.length;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = signal => { killSignals.push(signal); return true; };
+    children.push(child);
+    const chunks = [];
+    child.stdin.on('data', chunk => chunks.push(chunk));
+    child.stdin.on('finish', () => {
+      const frame = Buffer.concat(chunks);
+      const request = JSON.parse(frame.subarray(4).toString('utf8'));
+      frames.push(frame);
+      requests.push(request);
+      received.emit('request');
+      setImmediate(() => onRequest(request, child, requests.length));
+    });
+    return child;
+  }
+  async function waitForRequests(count) {
+    while (requests.length < count) await new Promise(resolve => received.once('request', resolve));
+  }
+  return { spawn, requests, frames, children, killSignals, waitForRequests };
+}
+
+function completeFlushChild(child, response = { ok: true }) {
+  child.stdout.end(encodeFrame(response));
+  child.stderr.end();
+  child.emit('close', 0, null);
+}
+
+function longFlushFixture(t) {
+  const root = rootFixture(t, 'minecraft-core-flush-frames-');
+  let parent = root;
+  for (let index = 0; index < 7; index += 1) {
+    parent = path.join(parent, `${index}-${'界'.repeat(240)}`);
+    fs.mkdirSync(parent);
+  }
+  const directories = Array.from({ length: 512 }, (_, index) => path.join(parent, `directory-${index}`));
+  for (const directory of directories) fs.mkdirSync(directory);
+  const identities = directories.map(directory => identityExpectation(directory, 'directory'));
+  return { root, directories, identities };
+}
+
+function assertFlushFrames(boundary, directories, identities) {
+  const emitted = boundary.requests.flatMap(request => request.directories);
+  assert.deepEqual(emitted.map(directory => directory.directoryPath), directories);
+  assert.deepEqual(emitted.map(directory => directory.directoryIdentity),
+    identities.map(identity => ({ fileType: 'directory', ...identity })));
+  for (let index = 0; index < boundary.requests.length; index += 1) {
+    const request = boundary.requests[index];
+    const frame = boundary.frames[index];
+    assert.equal(request.operation, 'flush-directories');
+    assert.ok(request.directories.length > 0 && request.directories.length <= 512);
+    assert.equal(frame.readUInt32LE(0), frame.length - 4);
+    assert.ok(frame.length - 4 <= MAX_FRAME_BYTES);
+    assert.equal(Buffer.byteLength(JSON.stringify(request), 'utf8'), frame.length - 4);
+  }
+}
+
+test('flush frame keeps a small validated set in one native request', async t => {
+  const root = rootFixture(t, 'minecraft-core-flush-frame-small-');
+  const directories = ['first', 'second'].map(name => path.join(root, name));
+  directories.forEach(directory => fs.mkdirSync(directory));
+  const identities = directories.map(directory => identityExpectation(directory, 'directory'));
+  const boundary = flushFrameBoundary();
+  await fixtureWorkerClient(root, { spawn: boundary.spawn }).flushDirectoriesAsync(directories, { directoryIdentities: identities });
+  assert.equal(boundary.requests.length, 1);
+  assertFlushFrames(boundary, directories, identities);
+});
+
+test('flush frame partitions actual multibyte paths before dispatch and preserves each captured identity', async t => {
+  const { root, directories, identities } = longFlushFixture(t);
+  const boundary = flushFrameBoundary();
+  let verifications = 0;
+  const client = fixtureWorkerClient(root, {
+    spawn: boundary.spawn,
+    verifyWorkerAsync: async () => { verifications += 1; }
+  });
+
+  await client.flushDirectoriesAsync(directories, { directoryIdentities: identities });
+
+  assert.ok(boundary.requests.length >= 3, 'valid long paths need multiple bounded native frames');
+  assertFlushFrames(boundary, directories, identities);
+  assert.equal(verifications, boundary.requests.length, 'every native request must receive fresh verification');
+  const combined = { ...boundary.requests[0], directories: boundary.requests.flatMap(request => request.directories) };
+  assert.ok(JSON.stringify(combined).length < MAX_FRAME_BYTES, 'character-count sizing would incorrectly allow this fixture');
+  assert.ok(Buffer.byteLength(JSON.stringify(combined), 'utf8') > MAX_FRAME_BYTES);
+
+  for (const failedChunk of [1, 2]) {
+    await t.test(`native failure in chunk ${failedChunk} stops without a smaller retry`, async () => {
+      const failing = flushFrameBoundary((_request, child, number) => completeFlushChild(child,
+        number === failedChunk ? { ok: false, failureKind: 'io-failure', failureStage: 'completion-flush' } : { ok: true }));
+      await assert.rejects(fixtureWorkerClient(root, { spawn: failing.spawn }).flushDirectoriesAsync(directories),
+        error => error.code === 'COMMIT_FAILED' && error.durableFailureKind === 'io-failure');
+      assert.equal(failing.requests.length, failedChunk, 'never dispatch another chunk or retry a failed chunk');
+      assert.deepEqual(failing.requests.map(request => request.directories),
+        boundary.requests.slice(0, failedChunk).map(request => request.directories));
+    });
+  }
+
+  await t.test('serial dispatch awaits each successful child close', async () => {
+    const serial = flushFrameBoundary(() => {});
+    let settled = false;
+    const pending = fixtureWorkerClient(root, { spawn: serial.spawn }).flushDirectoriesAsync(directories)
+      .finally(() => { settled = true; });
+    await serial.waitForRequests(1);
+    serial.children[0].stdout.end(encodeFrame({ ok: true }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(serial.requests.length, 1, 'successful response bytes alone must not release the next request');
+    assert.equal(settled, false);
+    serial.children[0].emit('close', 0, null);
+    for (let count = 2; count <= boundary.requests.length; count += 1) {
+      await serial.waitForRequests(count);
+      completeFlushChild(serial.children[count - 1]);
+    }
+    await pending;
+    assertFlushFrames(serial, directories, identities);
+  });
+
+  await t.test('configured failed-close policy retains authority until exact child close', async () => {
+    const timedOut = flushFrameBoundary(() => {});
+    let settled = false;
+    const pending = fixtureWorkerClient(root, {
+      spawn: timedOut.spawn, timeoutMs: 10, terminationGraceMs: 10, requireConfirmedClose: true
+    }).flushDirectoriesAsync(directories).then(() => null, error => error).finally(() => { settled = true; });
+    await timedOut.waitForRequests(1);
+    await new Promise(resolve => setTimeout(resolve, 45));
+    assert.deepEqual(timedOut.killSignals, ['SIGKILL'], 'the worker really reached its timeout before the close check');
+    assert.equal(settled, false, 'an unclosed timed-out helper must retain the awaited operation');
+    assert.equal(timedOut.requests.length, 1);
+    timedOut.children[0].emit('close', null, 'SIGKILL');
+    assert.equal((await pending).code, 'COMMIT_FAILED');
+    assert.equal(timedOut.requests.length, 1);
+  });
+
+  await t.test('a later chunk must verify the worker again and refuse fresh verification failure', async () => {
+    const guarded = flushFrameBoundary();
+    let calls = 0;
+    await assert.rejects(fixtureWorkerClient(root, {
+      spawn: guarded.spawn,
+      verifyWorkerAsync: async () => { if (++calls === 2) throw new Error('fresh verification refusal'); }
+    }).flushDirectoriesAsync(directories), { code: 'COMMIT_FAILED' });
+    assert.equal(calls, 2);
+    assert.equal(guarded.requests.length, 1);
+  });
+
+  await t.test('final revalidation still checks directories from the first chunk', async () => {
+    const original = `${directories[0]}-original`;
+    const changed = flushFrameBoundary((_request, child, number) => {
+      if (number === boundary.requests.length) {
+        fs.renameSync(directories[0], original);
+        fs.mkdirSync(directories[0]);
+      }
+      completeFlushChild(child);
+    });
+    try {
+      await assert.rejects(fixtureWorkerClient(root, { spawn: changed.spawn }).flushDirectoriesAsync(directories), { code: 'COMMIT_FAILED' });
+      assert.equal(changed.requests.length, boundary.requests.length);
+    } finally {
+      if (fs.existsSync(original)) {
+        fs.rmdirSync(directories[0]);
+        fs.renameSync(original, directories[0]);
+      }
+    }
+  });
+});
+
+test('flush frame refuses a late unfit singleton with the full allowed-root envelope before any spawn', async t => {
+  const root = rootFixture(t, 'minecraft-core-flush-frame-envelope-');
+  const short = path.join(root, 'short');
+  fs.mkdirSync(short);
+  let parent = root;
+  for (let index = 0; index < 49; index += 1) {
+    parent = path.join(parent, `${index}-${'界'.repeat(230)}`);
+    fs.mkdirSync(parent);
+  }
+  const allowedRoots = [root];
+  for (let index = 0; index < 15; index += 1) {
+    const allowedRoot = path.join(parent, `root-${index}`);
+    fs.mkdirSync(allowedRoot);
+    allowedRoots.push(allowedRoot);
+  }
+  let long = allowedRoots[1];
+  for (let index = 0; index < 70; index += 1) {
+    long = path.join(long, `${index}-${'界'.repeat(230)}`);
+    fs.mkdirSync(long);
+  }
+  const boundary = flushFrameBoundary();
+  let spawnCalls = 0;
+  const client = fixtureWorkerClient(root, { allowedRoots, spawn() { spawnCalls += 1; return boundary.spawn(); } });
+  const envelope = {
+    operation: 'flush-directories',
+    allowedRoots,
+    allowedRootIdentities: allowedRoots.map(candidate => ({ path: candidate,
+      identity: { fileType: 'directory', ...identityExpectation(candidate, 'directory') } }))
+  };
+  const singletonBytes = candidate => Buffer.byteLength(JSON.stringify({ ...envelope,
+    directories: [{ directoryPath: candidate, directoryIdentity: { fileType: 'directory', ...identityExpectation(candidate, 'directory') } }]
+  }), 'utf8');
+  assert.ok(singletonBytes(short) <= MAX_FRAME_BYTES, 'the first directory is independently feasible');
+  assert.ok(singletonBytes(long) > MAX_FRAME_BYTES, 'a later valid long singleton cannot fit its full root envelope');
+  assert.ok(Buffer.byteLength(JSON.stringify({ directories: [{ directoryPath: long,
+    directoryIdentity: { fileType: 'directory', ...identityExpectation(long, 'directory') } }] }), 'utf8') < MAX_FRAME_BYTES,
+  'the directory alone fits; the private root envelope is load-bearing');
+
+  await assert.rejects(client.flushDirectoriesAsync([short, long]), { code: 'COMMIT_FAILED' });
+  assert.equal(spawnCalls, 0, 'all singleton envelopes must be feasible before even the first native spawn');
+});
+
+test('flush frame final revalidation refuses replacement of an allowed root after native success', async t => {
+  const fixture = rootFixture(t, 'minecraft-core-flush-frame-root-change-');
+  const root = path.join(fixture, 'owned');
+  const original = path.join(fixture, 'owned-original');
+  fs.mkdirSync(root);
+  const directory = path.join(root, 'directory');
+  fs.mkdirSync(directory);
+  const boundary = flushFrameBoundary((_request, child) => {
+    fs.renameSync(root, original);
+    fs.mkdirSync(root);
+    // Keep the requested directory present with its original identity so the
+    // allowed-root check, not a missing-directory error, must refuse success.
+    fs.renameSync(path.join(original, 'directory'), directory);
+    completeFlushChild(child);
+  });
+  await assert.rejects(fixtureWorkerClient(root, { spawn: boundary.spawn,
+    appOwnedRoot: path.join(fixture, 'broker') }).flushDirectoriesAsync([directory]), { code: 'COMMIT_FAILED' });
+  assert.equal(boundary.requests.length, 1);
+});
 
 test('async durable flush keeps parent timers responsive while a real child is synchronously busy', async t => {
   const root = rootFixture(t, 'minecraft-core-durable-async-live-');

@@ -6,7 +6,9 @@ const path = require('node:path');
 
 const { ModpackError } = require('../services/modpacks/errors.cjs');
 const { isSafeWindowsBasename } = require('../services/modpacks/windows-basename.cjs');
+const { WindowsReparseInspector } = require('../services/modpacks/local/windows-reparse-inspector.cjs');
 const {
+  MAX_FRAME_BYTES,
   createExtractionBlockedEnvironment,
   encodeFrame,
   parseStrictJson,
@@ -265,8 +267,13 @@ class WindowsDurableFsClient {
     this.spawnSync = spawnSync;
     this.spawn = spawn;
     this.verifyWorker = verifyWorker;
+    // Reuse only the read-only probe transport. Every invocation still verifies
+    // both paths, the manifest, executable digest and PE header. Its existing
+    // idle shutdown releases the helper without extending mutation authority.
+    let verificationReparseInspector;
     this.verifyWorkerAsync = verifyWorkerAsync || (verifyWorker === verifyArchiveWorkerExecutableSync
-      ? verifyArchiveWorkerExecutable
+      ? options => verifyArchiveWorkerExecutable({ ...options,
+        reparseInspector: verificationReparseInspector ??= new WindowsReparseInspector() })
       : async options => verifyWorker(options));
     this.platform = platform;
     this.timeoutMs = timeoutMs;
@@ -541,8 +548,23 @@ class WindowsDurableFsClient {
       return { directoryPath: directory, directoryIdentity };
     });
     const allowedRootIdentities = this.#revalidateRoots();
-    await this.#invokeAsync({ operation: 'flush-directories', directories,
-      allowedRoots: this.allowedRoots, allowedRootIdentities });
+    const requests = [];
+    let request = { operation: 'flush-directories', directories: [],
+      allowedRoots: this.allowedRoots, allowedRootIdentities };
+    // Plan every full native envelope before dispatch: a later unfit singleton
+    // must not leave an earlier partial flush in flight. Count alone cannot
+    // bound JSON UTF-8 bytes for long or multibyte Windows paths.
+    for (const directory of directories) {
+      request.directories.push(directory);
+      if (Buffer.byteLength(JSON.stringify(request), 'utf8') <= MAX_FRAME_BYTES) continue;
+      request.directories.pop();
+      if (request.directories.length === 0) throw failed();
+      requests.push(request);
+      request = { ...request, directories: [directory] };
+      if (Buffer.byteLength(JSON.stringify(request), 'utf8') > MAX_FRAME_BYTES) throw failed();
+    }
+    requests.push(request);
+    for (const partition of requests) await this.#invokeAsync(partition);
     for (const directory of directories) {
       if (!sameIdentity(directory.directoryIdentity, captureIdentity(directory.directoryPath, 'directory'))) throw failed();
     }

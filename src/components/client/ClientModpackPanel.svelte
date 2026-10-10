@@ -24,6 +24,7 @@
   };
   const phaseLabels = {
     preparing:'Preparing matching client pack', 'downloading-archive':'Downloading client archive',
+    'recovering-installation':'Checking and recovering the interrupted installation…',
     materialize:'Preparing verified archive', list:'Reading archive contents', validate:'Checking archive paths and limits', classify:'Identifying archive format',
     extracting:'Extracting client archive', 'verifying-archive':'Checking extracted archive safety',
     'reading-client-metadata':'Reading client pack metadata', 'checking-bundled-files':'Checking bundled pack files',
@@ -76,13 +77,13 @@
     dispatch('state', {clientId, status:'loading'});
     if (clientId) refresh();
   }
-  async function run(action, apply, cancellable = false, refreshOnError = false) {
+  async function run(action, apply, cancellable = false, refreshOnError = false, initialPhase = cancellable ? 'preparing' : null) {
     const id = clientId, epoch = generation, token = ++operation;
     controller?.abort();
     const ownedController = cancellable ? new AbortController() : null;
     controller = ownedController;
     const current = () => mounted && clientId === id && epoch === generation && token === operation;
-    busy = true; error = null; progress = cancellable ? {phase:'preparing'} : null;
+    busy = true; error = null; progress = initialPhase ? {phase:initialPhase} : null;
     try {
       const result = await action(id, {signal:ownedController?.signal,onProgress:event => {if (current()) progress=event;}});
       if (current()) apply(result);
@@ -146,7 +147,7 @@
   }
   function verify() {return run(id => clientPackApi.verify(id), applyState);}
   function recover() {
-    return run(async id => {await clientPackApi.recover(id);return clientPackApi.getState(id);},applyState,false,true);
+    return run(async id => {await clientPackApi.recover(id);return clientPackApi.getState(id);},applyState,false,true,'recovering-installation');
   }
   onMount(() => {mounted=true;});
   onDestroy(() => {mounted=false;generation+=1;operation+=1;controller?.abort();});
