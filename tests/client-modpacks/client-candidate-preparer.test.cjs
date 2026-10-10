@@ -22,7 +22,7 @@ const mod = (target, bytes, client = 'required') => ({ path: target,
   env: { client, server: client === 'unsupported' ? 'required' : 'unsupported' },
   downloads: ['https://cdn.modrinth.com/fixture.jar'], fileSize: bytes.length });
 
-async function fixture(t, { indexPath = 'modrinth.index.json', extra = {}, downloader, worker } = {}) {
+async function fixture(t, { indexPath = 'modrinth.index.json', extra = {}, downloader, worker, multimc = false, realZip = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'minecraft-core-client-candidate-'));
   const workspaceRoot = path.join(root, 'workspaces');
   const cache = new ArtifactCache({ root: path.join(root, 'cache'), workspaceRoot });
@@ -31,16 +31,28 @@ async function fixture(t, { indexPath = 'modrinth.index.json', extra = {}, downl
   t.after(async () => { await hashService.dispose(); await fs.rm(root, { recursive: true, force: true }); });
   const bytes = Buffer.from('client-only-mod');
   const optional = Buffer.from('optional-mod');
-  const manifest = { formatVersion: 1, game: 'minecraft', versionId: 'v1', name: 'Matching client',
+  const manifest = multimc ? { formatVersion: 1, components: [
+    { uid: 'net.minecraft', version: '1.20.1' }, { uid: 'net.minecraftforge', version: '47.4.13' },
+    { uid: 'org.lwjgl3', version: '3.3.1', dependencyOnly: true }
+  ] } : { formatVersion: 1, game: 'minecraft', versionId: 'v1', name: 'Matching client',
     files: [mod('mods/client.jar', bytes), mod('mods/optional.jar', optional, 'optional'),
       mod('mods/server.jar', Buffer.from('server'), 'unsupported')],
     dependencies: { minecraft: '1.20.1', forge: '47.3.12' } };
-  const payload = new Map([[indexPath, Buffer.from(JSON.stringify(manifest))],
+  const payload = multimc ? new Map([['mmc-pack.json', Buffer.from(JSON.stringify(manifest))],
+    ['instance.cfg', Buffer.from('InstanceType=OneSix\nPreLaunchCommand=never execute\nJavaPath=never import')],
+    ['.minecraft/config/common.toml', Buffer.from('client')], ['.minecraft/options.txt', Buffer.from('setting')],
+    ['icon.png', Buffer.from('icon')], ...Object.entries(extra)]) : new Map([[indexPath, Buffer.from(JSON.stringify(manifest))],
     ['overrides/config/common.toml', Buffer.from('common')],
     ['client-overrides/config/common.toml', Buffer.from('client')],
     ['client-overrides/options.txt', Buffer.from('setting')],
     ['server-overrides/config/server.toml', Buffer.from('server')], ...Object.entries(extra)]);
-  const archiveBytes = Buffer.from('PK fake archive bytes');
+  let archiveBytes = Buffer.from('PK fake archive bytes');
+  if (realZip) {
+    const zip = new (require('adm-zip'))();
+    for (const [name, data] of payload) zip.addFile(name, data);
+    zip.addFile('.minecraft/empty/', Buffer.alloc(0));
+    archiveBytes = zip.toBuffer();
+  }
   async function cacheBytes(data) {
     const sha256 = digest('sha256', data);
     const filePath = cache.pathForSha256(sha256);
@@ -53,7 +65,7 @@ async function fixture(t, { indexPath = 'modrinth.index.json', extra = {}, downl
   await cacheBytes(optional);
   const plan = createArtifactSetPlan({ provider: 'local', artifactSet: { kind: 'single', groupingScheme: 'single',
     primaryPartId: 'archive', providerImmutable: true, attestationStatus: 'verified',
-    parts: [{ partId: 'archive', fileName: 'pack.mrpack', size: String(archiveBytes.length),
+    parts: [{ partId: 'archive', fileName: multimc ? 'pack.zip' : 'pack.mrpack', size: String(archiveBytes.length),
       providerDigest: { algorithm: 'sha256', value: digest('sha256', archiveBytes) } }] } });
   const verified = finalizeVerifiedArtifactSet(plan, [{ partId: 'archive', measuredSize: String(archiveBytes.length),
     sha256: digest('sha256', archiveBytes), sha512: digest('sha512', archiveBytes) }]);
@@ -61,19 +73,33 @@ async function fixture(t, { indexPath = 'modrinth.index.json', extra = {}, downl
     type: 'file', size: String(data.length), packedSize: String(data.length), depth: entryName.split('/').length }));
   const policy = validateArchiveEntries(entries.map(entry => ({ path: entry.entryName, type: entry.type,
     size: entry.size, packedSize: entry.packedSize, encrypted: false, attributes: '' })), ARCHIVE_LIMITS);
-  const result = { type: 'archive-inspection', archiveFamily: 'mrpack', integrity: 'tested',
+  const result = { type: 'archive-inspection', archiveFamily: multimc ? 'zip' : 'mrpack', integrity: 'tested',
     artifactSet: { completeness: 'verified-complete-set', fingerprint: computePlanFingerprint(verified) },
     engineEvidence: { family: 'zip', tested: true, version: '26.02' }, entries,
     rootCandidates: [...new Set(entries.filter(entry => entry.depth > 1).map(entry => entry.entryName.split('/')[0]))].sort(),
     selectedRoot: null, limitEvidence: { policyVersion: 1, totals: policy.totals },
     // Server classification is intentionally blocked: the client projection must parse its own index.
     classification: { kind: 'client-only', confidence: 'exact', blocked: true } };
-  const materializer = new ArchiveInputMaterializer({ workspaceRegistry: registry, workspaceRoot });
-  const context = await materializer.prepare(verified);
-  const inspectionId = materializer.promote(context, result);
-  const extractor = new ArchiveExtractor({ workspaceRegistry: registry, workspaceRoot, reparseInspector: safeReparse,
+  let inspectionId;
+  let nativeWorker;
+  let reparseInspector = safeReparse;
+  if (realZip) {
+    const { ArchiveWorkerClient } = require('../../electron/services/modpacks/archive/archive-worker-client.cjs');
+    const { createArchiveInspector } = require('../../electron/services/modpacks/archive/archive-inspector.cjs');
+    const { WindowsReparseInspector } = require('../../electron/services/modpacks/local/windows-reparse-inspector.cjs');
+    reparseInspector = new WindowsReparseInspector();
+    nativeWorker = new ArchiveWorkerClient({ resourcesRoot: path.resolve(__dirname, '../..'), workspaceRoot,
+      workspaceRegistry: registry, reparseInspector, appOwnedRoot: path.join(root, 'archive-worker') });
+    const inspector = createArchiveInspector({ workspaceRegistry: registry, workspaceRoot, workerClient: nativeWorker });
+    inspectionId = (await inspector.inspectArchive({ verifiedArtifactSet: verified })).inspectionId;
+  } else {
+    const materializer = new ArchiveInputMaterializer({ workspaceRegistry: registry, workspaceRoot });
+    const context = await materializer.prepare(verified);
+    inspectionId = materializer.promote(context, result);
+  }
+  const extractor = new ArchiveExtractor({ workspaceRegistry: registry, workspaceRoot, reparseInspector,
     diskProbe: async () => ({ availableBytes: String(100n * 1024n ** 3n) }), watchdogIntervalMs: 1000,
-    workerClient: { async run(request, { signal }) {
+    workerClient: nativeWorker || { async run(request, { signal }) {
       const output = path.join(workspaceRoot, request.outputDirectoryId);
       if (worker) return worker({ output, signal, payload });
       for (const [relative, data] of payload) {
@@ -85,7 +111,7 @@ async function fixture(t, { indexPath = 'modrinth.index.json', extra = {}, downl
     } } });
   const downloads = [];
   const preparer = new ClientCandidatePreparer({ workspaceRegistry: registry, archiveExtractor: extractor,
-    artifactCache: cache, candidateHashService: hashService, reparseInspector: safeReparse, randomUUID: crypto.randomUUID,
+    artifactCache: cache, candidateHashService: hashService, reparseInspector, randomUUID: crypto.randomUUID,
     artifactDownloader: { async downloadPart(part, options) {
       downloads.push(part);
       if (downloader) return downloader(part, options, { bytes, optional, cache });
@@ -270,4 +296,168 @@ test('pre-aborted client preparation creates no workspaces', async t => {
   controller.abort();
   await assert.rejects(f.preparer.prepare({ inspectionId: f.inspectionId, optionalFileIds: [], signal: controller.signal }), { code: 'CANCELLED' });
   assert.equal(f.registry.records.size, before);
+});
+
+// Treating a bundled export as a download manifest, or copying launcher commands, breaks this result.
+for (const realZip of [false, true]) test(`MultiMC ${realZip ? 'actual ZIP worker' : 'guarded extracted fixture'} prepares bundled content only`, {
+  skip: realZip && (process.platform !== 'win32' || process.arch !== 'x64'), timeout: 120_000
+}, async t => {
+  const f = await fixture(t, { multimc: true, realZip, downloader: async () => assert.fail('MultiMC has no downloads') });
+  const inspected = await f.preparer.inspect({ inspectionId: f.inspectionId });
+  assert.deepEqual(inspected.runtime, { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.4.13', javaMajor: 17, os: 'win32', architecture: 'x64' });
+  assert.equal(inspected.name, 'MultiMC client export');
+  assert.equal(inspected.version, '1.20.1');
+  assert.equal(inspected.contentFormat, 'multimc');
+  assert.deepEqual(inspected.runtimeConstraints, { lwjglVersion: '3.3.1' });
+  assert.deepEqual(inspected.optionalFiles, []);
+  assert.equal(inspected.downloadBytes, '0');
+  const events = [];
+  const result = await f.preparer.prepare({ inspectionId: f.inspectionId, optionalFileIds: [], onProgress: e => events.push(e) });
+  assert.equal(await fs.readFile(path.join(result.path, 'config/common.toml'), 'utf8'), 'client');
+  assert.equal(await fs.readFile(path.join(result.path, 'options.txt'), 'utf8'), 'setting');
+  for (const relative of ['mmc-pack.json', 'instance.cfg', '.minecraft', 'icon.png']) {
+    await assert.rejects(fs.access(path.join(result.path, relative)), { code: 'ENOENT' });
+  }
+  if (realZip) assert.ok((await fs.stat(path.join(result.path, 'empty'))).isDirectory());
+  assert.deepEqual(result.manifest.entries, [
+    { path: 'config/common.toml', pathKey: 'config/common.toml', sha256: digest('sha256', Buffer.from('client')), size: '6', policy: 'managed' },
+    { path: 'options.txt', pathKey: 'options.txt', sha256: digest('sha256', Buffer.from('setting')), size: '7', policy: 'preserve-after-seed' }
+  ]);
+  assert.deepEqual(result.optionalFileIds, []);
+  assert.equal(result.contentFormat, 'multimc');
+  assert.deepEqual(result.runtimeConstraints, { lwjglVersion: '3.3.1' });
+  assert.equal(result.totalBytes, '13');
+  assert.equal(f.downloads.length, 0);
+  assert.ok(!events.some(e => e.activity === 'downloading-pack-files'));
+  assert.deepEqual(events.filter(e => e.activity === 'assembling-files').at(-1), {
+    activity: 'assembling-files', completedItems: 2, totalItems: 2, processedBytes: 13, totalBytes: 13
+  });
+  await f.preparer.release(result.ownerId);
+  assert.ok(f.registry.resolveOwnedId({ ownerId: f.inspectionId, id: f.inspectionId, kind: 'inspection' }));
+  assert.equal(f.preparer.forgetInspection(f.inspectionId), true);
+  await f.registry.releaseOwner(f.inspectionId);
+});
+
+test('MRPACK preparation omits both private MultiMC fields', async t => {
+  const f = await fixture(t);
+  const inspected = await f.preparer.inspect({ inspectionId: f.inspectionId });
+  const result = await f.preparer.prepare({ inspectionId: f.inspectionId, optionalFileIds: [] });
+  for (const value of [inspected, result]) {
+    assert.equal(Object.hasOwn(value, 'contentFormat'), false);
+    assert.equal(Object.hasOwn(value, 'runtimeConstraints'), false);
+  }
+});
+test('MRPACK still installs ordinary override JSON and launcher-like filenames', async t => {
+  const f = await fixture(t, { extra: {
+    'overrides/config/manifest.json': Buffer.from('ordinary-json'),
+    'client-overrides/config/mmc-pack.json': Buffer.from('ordinary-payload'),
+    'client-overrides/config/instance.cfg': Buffer.from('ordinary-config')
+  } });
+  const result = await f.preparer.prepare({ inspectionId: f.inspectionId, optionalFileIds: [] });
+  assert.equal(await fs.readFile(path.join(result.path, 'config/manifest.json'), 'utf8'), 'ordinary-json');
+  assert.equal(await fs.readFile(path.join(result.path, 'config/mmc-pack.json'), 'utf8'), 'ordinary-payload');
+  assert.equal(await fs.readFile(path.join(result.path, 'config/instance.cfg'), 'utf8'), 'ordinary-config');
+});
+for (const prefix of ['.minecraft', 'overrides', 'client-overrides', 'server-overrides']) {
+  test(`MRPACK preparer refuses another Modrinth index in ${prefix} before extraction`, async t => {
+    const f = await fixture(t, { extra: { [`${prefix}/config/modrinth.index.json`]: Buffer.from('{}') } });
+    const before = f.registry.records.size;
+    await assert.rejects(f.preparer.inspect({ inspectionId: f.inspectionId }), { code: 'PACK_ROOT_AMBIGUOUS' });
+    assert.equal(f.registry.records.size, before);
+    assert.equal(f.downloads.length, 0);
+  });
+}
+test('MultiMC rechecks consumed metadata and marker after awaited copy work', async t => {
+  for (const relative of ['mmc-pack.json', 'instance.cfg']) {
+    const f = await fixture(t, { multimc: true });
+    const inspected = await f.preparer.inspect({ inspectionId: f.inspectionId });
+    const raw = f.registry.resolveOwnedWorkspace({ ownerId: f.inspectionId, id: inspected.outputId, kind: 'output' }).path;
+    let mutated = false;
+    f.preparer.candidateHashService = { dispose: () => f.hashService.dispose(), async hashFile(filePath, options) {
+      const measured = await f.hashService.hashFile(filePath, options);
+      if (!mutated) { mutated = true; await fs.writeFile(path.join(raw, relative), 'changed after inspect'); }
+      return measured;
+    } };
+    await assert.rejects(f.preparer.prepare({ inspectionId: f.inspectionId, optionalFileIds: [] }), { code: 'PLAN_STALE' });
+    assert.equal([...f.registry.records.values()].filter(r => r.ownerId.startsWith('client-candidate-')).length, 0);
+  }
+});
+test('MultiMC revalidation binds archive fingerprint and actual selected format', async t => {
+  for (const change of ['fingerprint', 'format']) {
+    const f = await fixture(t, { multimc: true });
+    await f.preparer.inspect({ inspectionId: f.inspectionId });
+    const materializer = f.preparer.archiveExtractor.materializer;
+    const original = materializer.loadInspection.bind(materializer);
+    materializer.loadInspection = id => {
+      const loaded = original(id);
+      return { ...loaded, result: { ...loaded.result, ...(change === 'fingerprint'
+        ? { artifactSet: { ...loaded.result.artifactSet, fingerprint: 'changed' } }
+        : { entries: [{ entryName: 'modrinth.index.json', type: 'file', size: '1' }] }) } };
+    };
+    await assert.rejects(f.preparer.inspect({ inspectionId: f.inspectionId }), { code: 'PLAN_STALE' });
+  }
+});
+test('MultiMC refuses nonempty or malformed optional choices before candidate allocation', async t => {
+  const f = await fixture(t, { multimc: true });
+  await f.preparer.inspect({ inspectionId: f.inspectionId });
+  const count = f.registry.records.size;
+  for (const optionalFileIds of [['optional-unreviewed'], undefined, null, '']) {
+    await assert.rejects(f.preparer.prepare({ inspectionId: f.inspectionId, optionalFileIds }), { code: 'INVALID_REQUEST' });
+    assert.equal(f.registry.records.size, count);
+  }
+  assert.equal(f.downloads.length, 0);
+});
+for (const relative of ['mmc-pack.json', 'instance.cfg', '.minecraft/config/common.toml']) {
+  test(`MultiMC refuses same-byte identity replacement of ${relative}`, async t => {
+    const f = await fixture(t, { multimc: true });
+    const inspected = await f.preparer.inspect({ inspectionId: f.inspectionId });
+    const root = f.registry.resolveOwnedWorkspace({ ownerId: f.inspectionId, id: inspected.outputId, kind: 'output' }).path;
+    const target = path.join(root, ...relative.split('/'));
+    const replacement = `${target}.replacement`;
+    await fs.writeFile(replacement, await fs.readFile(target));
+    await fs.rename(replacement, target);
+    await assert.rejects(f.preparer.prepare({ inspectionId: f.inspectionId, optionalFileIds: [] }), { code: 'PLAN_STALE' });
+    assert.equal(f.downloads.length, 0);
+    assert.ok(f.registry.resolveOwnedId({ ownerId: f.inspectionId, id: f.inspectionId, kind: 'inspection' }));
+  });
+}
+test('MultiMC cached inspection rejects replaced marker identity without parsing cfg commands', async t => {
+  const f = await fixture(t, { multimc: true });
+  const inspected = await f.preparer.inspect({ inspectionId: f.inspectionId });
+  const root = f.registry.resolveOwnedWorkspace({ ownerId: f.inspectionId, id: inspected.outputId, kind: 'output' }).path;
+  await fs.writeFile(path.join(root, 'instance.cfg'), 'changed marker');
+  await assert.rejects(f.preparer.inspect({ inspectionId: f.inspectionId }), { code: 'PLAN_STALE' });
+});
+test('MultiMC refuses a source hardlink and reparse marker after inspection', async t => {
+  for (const mutation of ['hardlink', 'reparse']) {
+    const f = await fixture(t, { multimc: true });
+    const inspected = await f.preparer.inspect({ inspectionId: f.inspectionId });
+    const root = f.registry.resolveOwnedWorkspace({ ownerId: f.inspectionId, id: inspected.outputId, kind: 'output' }).path;
+    if (mutation === 'hardlink') await fs.link(path.join(root, '.minecraft/config/common.toml'), path.join(root, 'alias'));
+    else f.preparer.reparseInspector = { async isReparsePoint(p) { return path.basename(p) === 'instance.cfg'; } };
+    await assert.rejects(f.preparer.prepare({ inspectionId: f.inspectionId, optionalFileIds: [] }), { code: 'UNSAFE_ARCHIVE_ENTRY' });
+  }
+});
+test('MultiMC cancellation awaits hashing, rejects busy eviction, and cleans only its candidate owner', { timeout: 10_000 }, async t => {
+  const f = await fixture(t, { multimc: true });
+  await f.preparer.inspect({ inspectionId: f.inspectionId });
+  const unrelated = f.registry.createStagingOutput({ ownerId: 'unrelated-owner' });
+  let enter; const entered = new Promise(resolve => { enter = resolve; });
+  let finish; const gate = new Promise(resolve => { finish = resolve; });
+  const controller = new AbortController();
+  f.preparer.candidateHashService = { dispose: () => f.hashService.dispose(),
+    async hashFile(request, options) { enter(); await gate; return f.hashService.hashFile(request, options); } };
+  const pending = f.preparer.prepare({ inspectionId: f.inspectionId, optionalFileIds: [], signal: controller.signal });
+  let settled = false; pending.catch(() => { settled = true; });
+  await entered;
+  await assert.rejects(f.preparer.inspect({ inspectionId: f.inspectionId }), { code: 'OPERATION_IN_PROGRESS' });
+  assert.throws(() => f.preparer.forgetInspection(f.inspectionId), { code: 'OPERATION_IN_PROGRESS' });
+  controller.abort();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.ok([...f.registry.records.values()].some(r => r.ownerId.startsWith('client-candidate-')));
+  finish();
+  await assert.rejects(pending, { code: 'CANCELLED' });
+  assert.equal([...f.registry.records.values()].filter(r => r.ownerId.startsWith('client-candidate-')).length, 0);
+  assert.ok(f.registry.resolveOwnedWorkspace({ ownerId: 'unrelated-owner', id: unrelated, kind: 'output' }));
 });
