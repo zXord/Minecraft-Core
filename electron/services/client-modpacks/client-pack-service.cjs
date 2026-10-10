@@ -4,6 +4,7 @@ const { normalizeRuntimeTuple } = require('../modpacks/contracts.cjs');
 const { captureServerDirectoryCopySource } = require('../modpack-lifecycle/server-directory-identity.cjs');
 const { normalizeCompanionDescriptor } = require('./companion-contracts.cjs');
 const { planOwnership } = require('./client-pack-state.cjs');
+const { singleClientArchive } = require('./client-archive-source.cjs');
 const fail = (code = 'INVALID_REQUEST', cause) => new ModpackError(code, 'The matching client pack operation could not be completed', { cause });
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const RUNTIME_ROOTS = new Set(['versions', 'libraries', 'assets', 'java', 'natives']);
@@ -18,10 +19,6 @@ function request(value, keys, required = keys) {
 }
 function cancelled(signal) { if (signal?.aborted) throw fail('CANCELLED'); }
 function sameRuntime(a, b) { return equal(normalizeRuntimeTuple(a), normalizeRuntimeTuple(b)); }
-function single(plan) {
-  if (plan?.artifactSet?.kind !== 'single' || plan.artifactSet.parts?.length !== 1 || !/\.mrpack$/i.test(plan.artifactSet.parts[0].fileName)) throw fail('UNSUPPORTED_ARCHIVE');
-  return plan.artifactSet.parts[0];
-}
 class ClientPackService {
   constructor({ resolveClient, managementClient, candidatePreparer, sourceResolver, artifactAcquisition, archiveInspector,
     processGuard, transaction, stateStore, runtimeInstaller, reparseInspector, clock = Date.now } = {}) {
@@ -80,10 +77,12 @@ class ClientPackService {
       selection = { provider: 'github', repositoryId: source.repositoryId, releaseId: source.releaseId, assetIds: [source.assetId] };
     }
     const resolved = await this.sourceResolver.resolveArtifactSetPlan(selection, { signal: options.signal });
-    const part = single(resolved.artifactSetPlan);
+    const part = singleClientArchive(resolved.artifactSetPlan, source.provider);
     if (source.provider === 'github' && part.providerAssetId !== source.assetId) throw fail('PLAN_STALE');
     const verified = await this.artifactAcquisition.downloadSet(resolved.artifactSetPlan, { signal: options.signal, onProgress: options.onProgress });
-    if (single(verified).calculatedDigests?.sha256 !== descriptor.artifactSha256) throw fail('PLAN_STALE');
+    const acquired = singleClientArchive(verified, source.provider);
+    if (source.provider === 'github' && acquired.providerAssetId !== source.assetId) throw fail('PLAN_STALE');
+    if (acquired.calculatedDigests?.sha256 !== descriptor.artifactSha256) throw fail('PLAN_STALE');
     cancelled(options.signal);
     return verified;
   }
@@ -120,6 +119,7 @@ class ClientPackService {
         const archive = await this.archiveInspector.inspectArchive({ verifiedArtifactSet: verified, signal: operation.signal, onProgress: operation.onProgress });
         plan.inspectionId = archive.inspectionId;
         const inspected = await this.candidatePreparer.inspect({ inspectionId: plan.inspectionId, signal: operation.signal, onProgress: operation.onProgress });
+        if (descriptor.source.provider === 'modrinth' && inspected.contentFormat === 'multimc') throw fail('UNSUPPORTED_ARCHIVE');
         if (!sameRuntime(inspected.runtime, descriptor.runtime)) throw fail('RUNTIME_INCOMPLETE');
         const available = inspected.optionalFiles.map(file => file.id);
         const selected = value.optionalFileIds === undefined ? available : value.optionalFileIds;

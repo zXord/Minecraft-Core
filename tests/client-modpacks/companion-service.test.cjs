@@ -27,7 +27,8 @@ const runtime = { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersi
 const safeReparse = { async isReparsePoint() { return false; } };
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 
-async function fixture(t, { provider = 'github', clientLoader = '47.3.12', blockedWorker, managedHealth = false } = {}) {
+async function fixture(t, { provider = 'github', clientLoader = '47.3.12', blockedWorker, managedHealth = false,
+  fileName = 'client.mrpack', multimc = false, nonclient = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-companion-service-'));
   const filePath = path.join(root, 'companions.json');
   const durableFs = createDurableFs({ allowedRoots: [root], durableClient: { moveWriteThrough: fs.renameSync, replaceFileWriteThrough: fs.renameSync, flushDirectory() {} } });
@@ -41,10 +42,10 @@ async function fixture(t, { provider = 'github', clientLoader = '47.3.12', block
   const workspaceRoot = path.join(root, 'workspaces');
   const cache = new ArtifactCache({ root: path.join(root, 'cache'), workspaceRoot });
   const registry = new ArtifactWorkspaceRegistry({ root: workspaceRoot, artifactCache: cache });
-  const archiveBytes = Buffer.from('PK companion archive');
+  const archiveBytes = Buffer.from(multimc ? 'PK bundled client ZIP' : 'PK companion archive');
   const archiveSha256 = hash('sha256', archiveBytes);
   fs.mkdirSync(path.dirname(cache.pathForSha256(archiveSha256)), { recursive: true }); fs.writeFileSync(cache.pathForSha256(archiveSha256), archiveBytes);
-  const plan = createArtifactSetPlan({ provider, project: { id: provider === 'github' ? '123' : 'project', slug: 'pack', title: 'Pack' }, release: { id: provider === 'github' ? '456' : 'version', version: 'v1', channel: 'release', publishedAt: '2026-10-08T00:00:00.000Z' }, artifactSet: { kind: 'single', groupingScheme: 'single', primaryPartId: 'client', providerImmutable: true, attestationStatus: 'verified', parts: [{ partId: 'client', providerAssetId: provider === 'github' ? '20' : 'client', fileName: 'client.mrpack', size: String(archiveBytes.length), providerDigest: { algorithm: 'sha256', value: archiveSha256 } }] } });
+  const plan = createArtifactSetPlan({ provider, project: { id: provider === 'github' ? '123' : 'project', slug: 'pack', title: 'Pack' }, release: { id: provider === 'github' ? '456' : 'version', version: 'v1', channel: 'release', publishedAt: '2026-10-08T00:00:00.000Z' }, artifactSet: { kind: 'single', groupingScheme: 'single', primaryPartId: 'client', providerImmutable: true, attestationStatus: 'verified', parts: [{ partId: 'client', providerAssetId: provider === 'github' ? '20' : 'client', fileName, size: String(archiveBytes.length), providerDigest: { algorithm: 'sha256', value: archiveSha256 } }] } });
   const verified = finalizeVerifiedArtifactSet(plan, [{ partId: 'client', measuredSize: String(archiveBytes.length), sha256: archiveSha256, sha512: hash('sha512', archiveBytes) }]);
   const versionMetadata = { channel: 'release', prerelease: false, publishedAt: '2026-10-08T00:00:00.000Z' };
   const providers = {
@@ -52,21 +53,28 @@ async function fixture(t, { provider = 'github', clientLoader = '47.3.12', block
       async getRepositoryIdentity(url) { assert.equal(url, 'https://github.com/Pack-Team/Pack'); initializedRepository = true; return { repositoryId, owner: 'Pack-Team', repo: 'Pack', visibility: 'public' }; },
       repository(id) { assert.equal(initializedRepository, true, 'repository cache must be initialized'); assert.equal(id, '123'); return { repositoryId: id, owner: 'Pack-Team', repo: 'Pack', visibility: 'public' }; },
       async getRelease(request) { assert.deepEqual(request, { repositoryId: '123', releaseId: '456' }); return { releaseId: '456', tagName: 'v1', title: 'Pack', ...versionMetadata }; },
-      async listUploadedAssets(request) { assert.equal(initializedRepository, true); assert.deepEqual(request, { repositoryId: '123', releaseId: '456' }); return { repositoryId: '123', releaseId: '456', assets: [{ assetId: '20', fileName: 'client.mrpack', size: String(archiveBytes.length), state: 'uploaded', providerDigest: { algorithm: 'sha256', value: archiveSha256 } }, { assetId: '10', fileName: 'server.zip', size: '100', state: 'uploaded' }], choices: [] }; },
+      async listUploadedAssets(request) { assert.equal(initializedRepository, true); assert.deepEqual(request, { repositoryId: '123', releaseId: '456' }); return { repositoryId: '123', releaseId: '456', assets: [{ assetId: '20', fileName, size: String(archiveBytes.length), state: 'uploaded', providerDigest: { algorithm: 'sha256', value: archiveSha256 } }, { assetId: '10', fileName: 'server.zip', size: '100', state: 'uploaded' }, { assetId: '30', fileName: 'unfinished.ZIP', size: '40', state: 'new' }, { assetId: '40', fileName: 'other.rar', size: '40', state: 'uploaded' }], choices: [] }; },
       async buildArtifactSetPlan(request) { assert.deepEqual(request, { repositoryId: '123', releaseId: '456', selectedAssetIds: ['20'] }); return plan; }
     },
     modrinth: { async getVersion(id) { assert.equal(id, 'version'); return { projectId: 'project', versionId: 'version', version: 'v1', ...versionMetadata }; }, async resolveArtifactSetPlan(id) { assert.equal(id, 'version'); return plan; } }
   };
   const sourceResolver = new ProductionModpackSourceResolver({ providers, localArtifactSource: { async ingestSelection() { assert.fail('No local ingestion'); } } });
   const index = Buffer.from(JSON.stringify({ formatVersion: 1, game: 'minecraft', versionId: 'client-v1', name: 'Client pack', files: [{ path: 'mods/client.jar', hashes: { sha1: 'a'.repeat(40), sha512: 'a'.repeat(128) }, env: { client: 'required', server: 'unsupported' }, downloads: ['https://cdn.modrinth.com/client.jar'], fileSize: 42 }], dependencies: { minecraft: '1.20.1', forge: clientLoader } }));
-  const entries = [{ entryName: 'modrinth.index.json', canonicalName: 'modrinth.index.json', type: 'file', size: String(index.length), packedSize: String(index.length), depth: 1 }];
+  const payload = multimc ? new Map([
+    ['mmc-pack.json', Buffer.from(JSON.stringify({ formatVersion: 1, components: [{ uid: 'net.minecraft', version: '1.20.1' }, { uid: 'net.minecraftforge', version: clientLoader }] }))],
+    ['instance.cfg', Buffer.from('PreLaunchCommand=never import')], ['.minecraft/config/common.toml', Buffer.from('bundled')]
+  ]) : nonclient ? new Map([['server.properties', Buffer.from('server')]]) : new Map([['modrinth.index.json', index]]);
+  const entries = [...payload].map(([entryName, bytes]) => ({ entryName, canonicalName: entryName.toLowerCase(), type: 'file', size: String(bytes.length), packedSize: String(bytes.length), depth: entryName.split('/').length }));
   const policy = validateArchiveEntries(entries.map(entry => ({ path: entry.entryName, type: entry.type, size: entry.size, packedSize: entry.packedSize, encrypted: false, attributes: '' })), ARCHIVE_LIMITS);
-  const result = { type: 'archive-inspection', archiveFamily: 'mrpack', integrity: 'tested', artifactSet: { completeness: 'verified-complete-set', fingerprint: computePlanFingerprint(verified) }, engineEvidence: { family: 'zip', tested: true, version: '26.02' }, entries, rootCandidates: [], selectedRoot: null, limitEvidence: { policyVersion: 1, totals: policy.totals }, classification: { kind: 'client-only', confidence: 'exact', blocked: true } };
+  const result = { type: 'archive-inspection', archiveFamily: /\.zip$/i.test(fileName) ? 'zip' : 'mrpack', integrity: 'tested', artifactSet: { completeness: 'verified-complete-set', fingerprint: computePlanFingerprint(verified) }, engineEvidence: { family: 'zip', tested: true, version: '26.02' }, entries, rootCandidates: multimc ? ['.minecraft'] : [], selectedRoot: null, limitEvidence: { policyVersion: 1, totals: policy.totals }, classification: { kind: 'client-only', confidence: 'exact', blocked: true } };
   const materializer = new ArchiveInputMaterializer({ workspaceRegistry: registry, workspaceRoot });
   const archiveInspector = { materializer, async inspectArchive({ verifiedArtifactSet }) { assert.equal(verifiedArtifactSet, verified); const context = await materializer.prepare(verifiedArtifactSet); return { ...result, inspectionId: materializer.promote(context, result) }; } };
   const extractor = new ArchiveExtractor({ workspaceRegistry: registry, workspaceRoot, reparseInspector: safeReparse, diskProbe: async () => ({ availableBytes: String(100n * 1024n ** 3n) }), watchdogIntervalMs: 1000, workerClient: { async run(request, { signal }) {
     if (blockedWorker) await blockedWorker(signal);
-    await fsp.writeFile(path.join(workspaceRoot, request.outputDirectoryId, 'modrinth.index.json'), index);
+    for (const [relative, bytes] of payload) {
+      const destination = path.join(workspaceRoot, request.outputDirectoryId, ...relative.split('/'));
+      await fsp.mkdir(path.dirname(destination), { recursive: true }); await fsp.writeFile(destination, bytes);
+    }
     return { type: 'status', ok: true, exitCode: 0, metrics: { stdoutBytes: '0', stderrBytes: '0', dataBytes: '0', elapsedMs: 1 } };
   } } });
   const preparer = new ClientCandidatePreparer({ workspaceRegistry: registry, archiveExtractor: extractor, artifactCache: cache, reparseInspector: safeReparse, randomUUID: crypto.randomUUID, artifactDownloader: { async downloadPart() { assert.fail('Pairing must not download referenced mods'); } } });
@@ -94,6 +102,109 @@ async function fixture(t, { provider = 'github', clientLoader = '47.3.12', block
   return { root, filePath, store, service, registry, preparer, selector, coordinator, archiveSha256, jarPath, byteReads: () => byteReads, fingerprint: serverPackFingerprint(state), getState: () => state, setState: value => { state = value; }, setNow: value => { now = value; }, setRepositoryId: id => { repositoryId = id; }, setResolveInside: callback => { resolveInside = callback; }, bumps: () => bumps };
 }
 const inspect = f => f.service.inspect({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint, assetId: '20' });
+
+// Removing the shared provider allowlist or single-part check must break these cases.
+test('client archive source gates accept only provider-supported single archives', () => {
+  const { isClientArchiveName, singleClientArchive } = require('../../electron/services/client-modpacks/client-archive-source.cjs');
+  for (const [provider, name, accepted] of [['github', 'client.MRPACK', true], ['github', 'client.ZIP', true], ['modrinth', 'client.MRPACK', true],
+    ['modrinth', 'client.zip', false], ['local', 'client.mrpack', false], ['other', 'client.zip', false], ['github', 'client.zip.exe', false], ['github', null, false]]) {
+    assert.equal(isClientArchiveName(name, provider), accepted);
+    const part = { fileName: name }; const plan = { artifactSet: { kind: 'single', parts: [part] } };
+    if (accepted) assert.equal(singleClientArchive(plan, provider), part);
+    else assert.throws(() => singleClientArchive(plan, provider), { code: 'UNSUPPORTED_ARCHIVE' });
+  }
+  let reads = 0; assert.equal(isClientArchiveName({ toString() { reads++; return 'pack.zip'; } }, 'github'), false); assert.equal(reads, 0);
+  for (const artifactSet of [null, { kind: 'multipart', parts: [{ fileName: 'client.zip' }] }, { kind: 'single', parts: [] },
+    { kind: 'single', parts: [{ fileName: 'one.zip' }, { fileName: 'two.zip' }] }, { kind: 'single', parts: [null] }]) {
+    assert.throws(() => singleClientArchive({ artifactSet }, 'github'), { code: 'UNSUPPORTED_ARCHIVE' });
+  }
+});
+
+test('explicit GitHub ZIP inspection reviews bundled content without auto-selection or pairing', async t => {
+  const f = await fixture(t, { fileName: 'client.ZIP', multimc: true }); let acquired = 0;
+  const download = f.service.artifactAcquisition.downloadSet; f.service.artifactAcquisition.downloadSet = (...args) => { acquired++; return download(...args); };
+  assert.deepEqual((await f.service.listAssets({ serverId: 'server-one' })).assets, [{ assetId: '20', fileName: 'client.ZIP', size: '21' }, { assetId: '10', fileName: 'server.zip', size: '100' }]);
+  assert.equal(acquired, 0);
+  await assert.rejects(f.service.inspect({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint }), { code: 'INVALID_REQUEST' });
+  const preview = await inspect(f);
+  assert.equal(preview.serverVersion, 'v1'); assert.equal(preview.version, '1.20.1'); assert.equal(preview.downloadBytes, '0');
+  assert.deepEqual(preview.optionalFiles, []); assert.equal(Object.hasOwn(preview, 'runtimeConstraints'), false);
+  assert.equal((await f.service.getStatus({ serverId: 'server-one' })).status, 'unpaired'); assert.equal(f.store.sequence, 0); assert.equal(acquired, 1);
+  const descriptor = await f.service.accept({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint, inspectionId: preview.inspectionId });
+  assert.equal(descriptor.artifactSha256, f.archiveSha256); assert.equal(descriptor.source.assetId, '20'); assert.equal(f.bumps(), 0);
+});
+
+test('same-release MRPACK to ZIP changes pairing only after explicit acceptance', async t => {
+  const f = await fixture(t); const old = await inspect(f);
+  const descriptor = await f.service.accept({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint, inspectionId: old.inspectionId });
+  const zipped = await fixture(t, { fileName: 'client.zip', multimc: true });
+  for (const key of ['providers', 'sourceResolver', 'artifactAcquisition', 'archiveInspector', 'clientCandidatePreparer']) f.service[key] = zipped.service[key];
+  const preview = await inspect(f); assert.deepEqual(await f.service.getStatus({ serverId: 'server-one' }), descriptor);
+  assert.notEqual(preview.artifactSha256, descriptor.artifactSha256);
+  const accepted = await f.service.accept({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint, inspectionId: preview.inspectionId });
+  assert.equal(accepted.artifactSha256, zipped.archiveSha256); assert.equal(accepted.serverFingerprint, descriptor.serverFingerprint); assert.equal(f.bumps(), 0);
+});
+
+test('nonclient ZIP inspection preserves an existing pairing and never falls back', async t => {
+  const f = await fixture(t); const old = await inspect(f);
+  const descriptor = await f.service.accept({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint, inspectionId: old.inspectionId });
+  const zipped = await fixture(t, { fileName: 'server.zip', nonclient: true });
+  for (const key of ['providers', 'sourceResolver', 'artifactAcquisition', 'archiveInspector', 'clientCandidatePreparer']) f.service[key] = zipped.service[key];
+  let inspections = 0; const actual = zipped.preparer.inspect.bind(zipped.preparer);
+  zipped.preparer.inspect = async request => { inspections++; return actual(request); };
+  await assert.rejects(inspect(f), { code: 'PACK_ROOT_AMBIGUOUS' });
+  assert.equal(inspections, 1); assert.equal(f.store.sequence, 1); assert.deepEqual(await f.service.getStatus({ serverId: 'server-one' }), descriptor);
+});
+
+test('MRPACK acquisition failure never selects a listed ZIP alternative', async t => {
+  const f = await fixture(t); let acquisitions = 0;
+  f.service.artifactAcquisition.downloadSet = async () => { acquisitions++; throw Object.assign(new Error('unavailable'), { code: 'ARTIFACT_UNAVAILABLE' }); };
+  await assert.rejects(inspect(f), { code: 'ARTIFACT_UNAVAILABLE' }); assert.equal(acquisitions, 1); assert.equal(f.store.sequence, 0);
+});
+
+for (const boundary of ['resolved', 'acquired']) test(`companion refuses wrong selected GitHub asset at ${boundary} boundary`, async t => {
+  const f = await fixture(t);
+  if (boundary === 'resolved') f.service.sourceResolver.resolveArtifactSetPlan = async () => ({ artifactSetPlan: { artifactSet: { kind: 'single', parts: [{ fileName: 'client.mrpack', providerAssetId: '999' }] } } });
+  else { const download = f.service.artifactAcquisition.downloadSet; f.service.artifactAcquisition.downloadSet = async (...args) => { const value = await download(...args); return { ...value, artifactSet: { ...value.artifactSet, parts: value.artifactSet.parts.map(part => ({ ...part, providerAssetId: '999' })) } }; }; }
+  await assert.rejects(inspect(f), { code: 'PLAN_STALE' }); assert.equal(f.store.sequence, 0);
+});
+
+for (const boundary of ['resolved', 'acquired']) for (const invalid of ['extension', 'multipart']) test(`companion enforces ${invalid} single-archive gate at ${boundary} boundary`, async t => {
+  const f = await fixture(t, { fileName: 'client.zip', multimc: true });
+  const dependency = boundary === 'resolved' ? f.service.sourceResolver : f.service.artifactAcquisition;
+  const method = boundary === 'resolved' ? 'resolveArtifactSetPlan' : 'downloadSet'; const original = dependency[method];
+  dependency[method] = async (...args) => {
+    const result = await original.apply(dependency, args); const plan = boundary === 'resolved' ? result.artifactSetPlan : result;
+    const artifactSet = invalid === 'multipart' ? { ...plan.artifactSet, kind: 'multipart' }
+      : { ...plan.artifactSet, parts: plan.artifactSet.parts.map(part => ({ ...part, fileName: 'client.rar' })) };
+    const changed = { ...plan, artifactSet }; return boundary === 'resolved' ? { ...result, artifactSetPlan: changed } : changed;
+  };
+  f.service.archiveInspector.inspectArchive = async () => assert.fail('Invalid source must fail before inspection');
+  await assert.rejects(inspect(f), { code: 'UNSUPPORTED_ARCHIVE' }); assert.equal(f.store.sequence, 0);
+});
+
+test('GitHub MultiMC ZIP runtime mismatch cannot publish a pairing', async t => {
+  const f = await fixture(t, { fileName: 'client.zip', multimc: true, clientLoader: '47.0.0' });
+  await assert.rejects(inspect(f), { code: 'RUNTIME_INCOMPLETE' }); assert.equal(f.store.sequence, 0);
+});
+
+test('wrong GitHub listing release refuses discovery and inspection before acquisition', async t => {
+  const f = await fixture(t); const list = f.service.providers.github.listUploadedAssets;
+  f.service.providers.github.listUploadedAssets = async (...args) => ({ ...await list(...args), releaseId: '457' });
+  f.service.artifactAcquisition.downloadSet = async () => assert.fail('Wrong release must not acquire');
+  await assert.rejects(f.service.listAssets({ serverId: 'server-one' }), { code: 'PLAN_STALE' });
+  await assert.rejects(inspect(f), { code: 'PLAN_STALE' }); assert.equal(f.store.sequence, 0);
+});
+
+for (const fileName of ['client.zip', 'client.mrpack']) test(`Modrinth refuses MultiMC content in ${fileName} before pairing`, async t => {
+  const f = await fixture(t, { provider: 'modrinth', fileName, multimc: true });
+  if (fileName.endsWith('.zip')) {
+    f.service.artifactAcquisition.downloadSet = async () => assert.fail('Modrinth ZIP must not acquire');
+    await assert.rejects(f.service.listAssets({ serverId: 'server-one' }), { code: 'UNSUPPORTED_ARCHIVE' });
+  }
+  await assert.rejects(f.service.inspect({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint }), { code: 'UNSUPPORTED_ARCHIVE' });
+  assert.equal(f.store.sequence, 0);
+});
 
 test('accept forces fresh managed JAR bytes under reservation and historical ready descriptor recovers after repair', async t => {
   const f = await fixture(t, { managedHealth: true }); const preview = await inspect(f); const reads = f.byteReads();
@@ -123,7 +234,7 @@ test('managed JAR drift refuses status, asset listing and inspection before pair
 
 test('pairing inspects only the exact official release archive and binds measured digest', async t => {
   const f = await fixture(t);
-  assert.deepEqual((await f.service.listAssets({ serverId: 'server-one' })).assets, [{ assetId: '20', fileName: 'client.mrpack', size: '20' }]);
+  assert.deepEqual((await f.service.listAssets({ serverId: 'server-one' })).assets, [{ assetId: '20', fileName: 'client.mrpack', size: '20' }, { assetId: '10', fileName: 'server.zip', size: '100' }]);
   assert.equal((await f.service.getStatus({ serverId: 'server-one' })).status, 'unpaired');
   await assert.rejects(f.service.inspect({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint, assetId: '999' }), { code: 'INVALID_REQUEST' });
   const preview = await inspect(f);
@@ -144,7 +255,7 @@ test('saved ready status remains independent of repository identity refusal in a
   assert.deepEqual(await f.service.getStatus({ serverId: 'server-one' }), descriptor);
   f.setRepositoryId('123');
   assert.equal((await f.service.listAssets({ serverId: 'server-one' })).serverFingerprint, descriptor.serverFingerprint);
-  assert.deepEqual((await f.service.listAssets({ serverId: 'server-one' })).assets, [{ assetId: '20', fileName: 'client.mrpack', size: '20' }]);
+  assert.deepEqual((await f.service.listAssets({ serverId: 'server-one' })).assets, [{ assetId: '20', fileName: 'client.mrpack', size: '20' }, { assetId: '10', fileName: 'server.zip', size: '100' }]);
   assert.equal(f.store.sequence, 1);
 });
 

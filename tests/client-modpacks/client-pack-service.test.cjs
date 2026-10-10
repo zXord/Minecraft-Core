@@ -107,6 +107,129 @@ function multimcServiceFixture(t) {
   return { ...f, evidence, verifiedRequests, reopen };
 }
 
+for (const boundary of ['resolved', 'acquired']) test(`client review refuses wrong GitHub selected asset at ${boundary} boundary`, async t => {
+  const f = multimcServiceFixture(t); const dependency = boundary === 'resolved' ? f.dependencies.sourceResolver : f.dependencies.artifactAcquisition;
+  const method = boundary === 'resolved' ? 'resolveArtifactSetPlan' : 'downloadSet'; const original = dependency[method];
+  dependency[method] = async (...args) => {
+    const result = await original(...args); const plan = boundary === 'resolved' ? result.artifactSetPlan : result;
+    const changed = { ...plan, artifactSet: { ...plan.artifactSet, parts: plan.artifactSet.parts.map(part => ({ ...part, providerAssetId: '999' })) } };
+    return boundary === 'resolved' ? { ...result, artifactSetPlan: changed } : changed;
+  };
+  f.dependencies.archiveInspector.inspectArchive = async () => assert.fail('Wrong asset must fail before inspection');
+  await assert.rejects(f.service.preview({ clientId: 'one' }), { code: 'PLAN_STALE' });
+  assert.equal(await f.transaction.status(f.target), null);
+});
+
+for (const boundary of ['resolved', 'acquired']) for (const invalid of ['extension', 'multipart']) test(`client review enforces ${invalid} single-archive gate at ${boundary} boundary`, async t => {
+  const f = multimcServiceFixture(t); const dependency = boundary === 'resolved' ? f.dependencies.sourceResolver : f.dependencies.artifactAcquisition;
+  const method = boundary === 'resolved' ? 'resolveArtifactSetPlan' : 'downloadSet'; const original = dependency[method];
+  dependency[method] = async (...args) => {
+    const result = await original(...args); const plan = boundary === 'resolved' ? result.artifactSetPlan : result;
+    const artifactSet = invalid === 'multipart' ? { ...plan.artifactSet, kind: 'multipart' }
+      : { ...plan.artifactSet, parts: plan.artifactSet.parts.map(part => ({ ...part, fileName: 'client.rar' })) };
+    const changed = { ...plan, artifactSet }; return boundary === 'resolved' ? { ...result, artifactSetPlan: changed } : changed;
+  };
+  f.dependencies.archiveInspector.inspectArchive = async () => assert.fail('Invalid source must fail before inspection');
+  await assert.rejects(f.service.preview({ clientId: 'one' }), { code: 'UNSUPPORTED_ARCHIVE' });
+  assert.equal(await f.transaction.status(f.target), null);
+});
+
+test('GitHub ZIP review preserves runtime evidence and old descriptor review is stale before publication', async t => {
+  const f = multimcServiceFixture(t); const resolve = f.dependencies.sourceResolver.resolveArtifactSetPlan;
+  f.dependencies.sourceResolver.resolveArtifactSetPlan = async (...args) => { const value = await resolve(...args); return { artifactSetPlan: { artifactSet: { kind: 'single', parts: value.artifactSetPlan.artifactSet.parts.map(part => ({ ...part, fileName: 'client.ZIP' })) } } }; };
+  const preview = await f.service.preview({ clientId: 'one' }); assert.equal(preview.downloadBytes, '0'); assert.deepEqual(preview.optionalFileIds, []);
+  f.external.requirement = { ...f.external.requirement, artifactSha256: 'c'.repeat(64) };
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'PLAN_STALE' });
+  assert.equal(await f.transaction.status(f.target), null);
+});
+
+test('GitHub ZIP whole digest drift fails before inspection and has no alternate acquisition', async t => {
+  const f = multimcServiceFixture(t); const resolve = f.dependencies.sourceResolver.resolveArtifactSetPlan; let calls = 0;
+  f.dependencies.sourceResolver.resolveArtifactSetPlan = async (...args) => { const value = await resolve(...args); return { artifactSetPlan: { artifactSet: { kind: 'single', parts: value.artifactSetPlan.artifactSet.parts.map(part => ({ ...part, fileName: 'client.zip' })) } } }; };
+  const download = f.dependencies.artifactAcquisition.downloadSet;
+  f.dependencies.artifactAcquisition.downloadSet = async (...args) => { calls++; const value = await download(...args); return { artifactSet: { ...value.artifactSet, parts: value.artifactSet.parts.map(part => ({ ...part, calculatedDigests: { sha256: 'c'.repeat(64) } })) } }; };
+  f.dependencies.archiveInspector.inspectArchive = async () => assert.fail('Digest drift must fail before extraction');
+  await assert.rejects(f.service.preview({ clientId: 'one' }), { code: 'PLAN_STALE' }); assert.equal(calls, 1);
+});
+
+for (const fileName of ['client.zip', 'client.mrpack']) test(`client Modrinth refuses inspected MultiMC from ${fileName} before preparation`, async t => {
+  const f = fixture(t); const resolve = f.dependencies.sourceResolver.resolveArtifactSetPlan;
+  f.dependencies.sourceResolver.resolveArtifactSetPlan = async (...args) => { const value = await resolve(...args); return { artifactSetPlan: { artifactSet: { kind: 'single', parts: value.artifactSetPlan.artifactSet.parts.map(part => ({ ...part, fileName })) } } }; };
+  const inspect = f.dependencies.candidatePreparer.inspect;
+  f.dependencies.candidatePreparer.inspect = async (...args) => ({ ...await inspect(...args), contentFormat: 'multimc', runtimeConstraints: { lwjglVersion: null }, optionalFiles: [] });
+  f.dependencies.candidatePreparer.prepare = async () => assert.fail('Modrinth MultiMC must not prepare');
+  if (fileName.endsWith('.zip')) f.dependencies.artifactAcquisition.downloadSet = async () => assert.fail('Modrinth ZIP must not acquire');
+  await assert.rejects(f.service.preview({ clientId: 'one' }), { code: 'UNSUPPORTED_ARCHIVE' });
+  assert.equal(await f.transaction.status(f.target), null);
+});
+
+// A filename-only allowlist, mocked preparer, or dropped private evidence cannot satisfy this path.
+test('same-release tiny GitHub ZIP uses actual archive preparer and real transaction publication', {
+  skip: process.platform !== 'win32' || process.arch !== 'x64', timeout: 120_000
+}, async t => {
+  const f = fixture(t); const root = path.dirname(f.live); const workspaceRoot = path.join(root, 'workspaces');
+  const { ArtifactCache } = require('../../electron/services/modpacks/artifacts/artifact-cache.cjs');
+  const { ArtifactWorkspaceRegistry } = require('../../electron/services/modpacks/artifacts/artifact-workspace-registry.cjs');
+  const { ArchiveWorkerClient } = require('../../electron/services/modpacks/archive/archive-worker-client.cjs');
+  const { createArchiveInspector } = require('../../electron/services/modpacks/archive/archive-inspector.cjs');
+  const { ArchiveExtractor } = require('../../electron/services/modpacks/archive/archive-extractor.cjs');
+  const { WindowsReparseInspector } = require('../../electron/services/modpacks/local/windows-reparse-inspector.cjs');
+  const { ClientCandidatePreparer } = require('../../electron/services/client-modpacks/client-candidate-preparer.cjs');
+  const { CompanionService } = require('../../electron/services/client-modpacks/companion-service.cjs');
+  const { CompanionStore } = require('../../electron/services/client-modpacks/companion-store.cjs');
+  const { serverPackFingerprint } = require('../../electron/services/client-modpacks/companion-contracts.cjs');
+  const { createArtifactSetPlan, finalizeVerifiedArtifactSet } = require('../../electron/services/modpacks/contracts.cjs');
+  const cache = new ArtifactCache({ root: path.join(root, 'cache'), workspaceRoot });
+  const registry = new ArtifactWorkspaceRegistry({ root: workspaceRoot, artifactCache: cache });
+  const reparse = new WindowsReparseInspector();
+  const worker = new ArchiveWorkerClient({ resourcesRoot: path.resolve(__dirname, '../..'), workspaceRoot, workspaceRegistry: registry, reparseInspector: reparse, appOwnedRoot: path.join(root, 'archive-worker') });
+  const archiveInspector = createArchiveInspector({ workspaceRegistry: registry, workspaceRoot, workerClient: worker });
+  const extractor = new ArchiveExtractor({ workspaceRegistry: registry, workspaceRoot, workerClient: worker, reparseInspector: reparse, diskProbe: async () => ({ availableBytes: String(100n * 1024n ** 3n) }) });
+  const zip = new (require('adm-zip'))();
+  for (const [name, bytes] of [['mmc-pack.json', JSON.stringify({ formatVersion: 1, components: [{ uid: 'net.minecraft', version: '1.20.1' }, { uid: 'net.minecraftforge', version: '47.3.12' }, { uid: 'org.lwjgl3', version: '3.3.1', dependencyOnly: true }] })],
+    ['instance.cfg', 'PreLaunchCommand=never execute'], ['.minecraft/mods/inert.jar', 'inert'], ['.minecraft/config/common.toml', 'bundled'], ['.minecraft/options.txt', 'publisher']]) zip.addFile(name, Buffer.from(bytes));
+  const bytes = zip.toBuffer(); const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+  const plan = createArtifactSetPlan({ provider: 'github', project: { id: '1', slug: 'pack', title: 'Pack' },
+    release: { id: '2', version: '0.13.4', channel: 'release', publishedAt: '2026-10-08T00:00:00.000Z' },
+    artifactSet: { kind: 'single', groupingScheme: 'single', primaryPartId: 'client', providerImmutable: true, attestationStatus: 'verified', parts: [{ partId: 'client', providerAssetId: '3', fileName: 'client.zip', size: String(bytes.length), providerDigest: { algorithm: 'sha256', value: digest } }] } });
+  let acquisitions = 0;
+  const artifactAcquisition = { async downloadSet(actual, options) {
+    assert.equal(actual, plan); acquisitions++;
+    const measured = crypto.createHash('sha256').update(bytes).digest('hex');
+    const verified = finalizeVerifiedArtifactSet(actual, [{ partId: 'client', measuredSize: String(bytes.length), sha256: measured, sha512: crypto.createHash('sha512').update(bytes).digest('hex') }]);
+    await fs.promises.mkdir(path.dirname(cache.pathForSha256(measured)), { recursive: true }); await fs.promises.writeFile(cache.pathForSha256(measured), bytes);
+    options.onProgress?.({ phase: 'downloading-archive', completedBytes: String(bytes.length), totalBytes: String(bytes.length) }); return verified;
+  } };
+  const providers = { github: { async getRepositoryIdentity() { return { repositoryId: '1', visibility: 'public' }; },
+    async listUploadedAssets(input) { assert.deepEqual(input, { repositoryId: '1', releaseId: '2' }); return { ...input, assets: [{ assetId: '3', fileName: 'client.zip', size: String(bytes.length), state: 'uploaded' }] }; } } };
+  const sourceResolver = { providers, async resolveArtifactSetPlan(input) { assert.deepEqual(input, { provider: 'github', repositoryId: '1', releaseId: '2', assetIds: ['3'] }); return { artifactSetPlan: plan }; } };
+  const preparer = new ClientCandidatePreparer({ workspaceRegistry: registry, archiveExtractor: extractor, artifactCache: cache, reparseInspector: reparse, randomUUID: crypto.randomUUID, artifactDownloader: { async downloadPart() { assert.fail('Bundled ZIP has no external pack downloads'); } } });
+  const store = new CompanionStore({ filePath: path.join(root, 'companions.json'), durableFs: f.transaction.durableFs }); await store.initialize();
+  const server = { modpackManaged: true, source: { provider: 'github', repositoryId: '1', githubOwner: 'Example', githubRepo: 'Pack', releaseId: '2', selectedAssetIds: ['8'], artifactSetDigest: 'd'.repeat(64), version: '0.13.4' }, runtime, selectedOptionalFiles: [] };
+  const selector = { instanceId: 'synthetic-server', serverPath: path.join(root, 'server') };
+  const companion = new CompanionService({ store, resolveServer: async () => selector, readServerState: async () => server,
+    coordinator: { async runMutation(actual, options, work) { assert.deepEqual(actual, selector); assert.equal(options.revisionMode, 'none'); return work(); } }, providers, sourceResolver, artifactAcquisition, archiveInspector, clientCandidatePreparer: preparer });
+  Object.assign(f.service, { sourceResolver, artifactAcquisition, archiveInspector, candidatePreparer: preparer });
+  const prepareRuntime = f.dependencies.runtimeInstaller.prepare;
+  f.dependencies.runtimeInstaller.prepare = async request => { const result = await prepareRuntime(request); writeInertRuntime(request.clientPath); return result; };
+  f.dependencies.runtimeInstaller.verify = request => require('../../electron/services/client-modpacks/client-runtime-installer.cjs').verifyClientRuntime(request);
+  try {
+    const inspection = await companion.inspect({ serverId: 'server', expectedServerFingerprint: serverPackFingerprint(server), assetId: '3' });
+    assert.equal(inspection.artifactSha256, digest); assert.equal(inspection.serverVersion, '0.13.4'); assert.equal(inspection.version, '1.20.1');
+    f.external.requirement = await companion.accept({ serverId: 'server', expectedServerFingerprint: inspection.serverFingerprint, inspectionId: inspection.inspectionId });
+    const progress = []; const preview = await f.service.preview({ clientId: 'one' }, { onProgress: event => progress.push(event) });
+    assert.equal(preview.downloadBytes, '0'); assert.deepEqual(preview.optionalFileIds, []);
+    assert.deepEqual(preview.additions, ['config/common.toml', 'mods/inert.jar']); assert.deepEqual(preview.preserved, ['options.txt']);
+    assert.ok(progress.some(event => event.phase === 'assembling-files' && event.completedItems === '3' && event.completedBytes === '21' && event.totalBytes === '21'));
+    const installed = await f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }); assert.equal(installed.verified, true);
+    assert.equal(acquisitions, 3); assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'settings');
+    assert.equal(fs.readFileSync(path.join(f.live, 'mods/inert.jar'), 'utf8'), 'inert'); assert.equal(fs.readFileSync(path.join(f.live, 'config/common.toml'), 'utf8'), 'bundled');
+    for (const file of ['mmc-pack.json', 'instance.cfg', '.minecraft']) assert.equal(fs.existsSync(path.join(f.live, file)), false);
+    const manifest = await f.dependencies.stateStore.read(f.live); assert.equal(manifest.schemaVersion, 2); assert.equal(manifest.descriptor.artifactSha256, digest);
+    assert.deepEqual(manifest.runtimeConstraints, { lwjglVersion: '3.3.1' });
+  } finally { await companion.dispose(); await f.service.dispose(); await preparer.dispose(); await registry.dispose(); }
+});
+
 test('MultiMC private evidence enforces pre-seal and published runtime, without entering public DTOs', async t => {
   const f = multimcServiceFixture(t); const preview = await f.service.preview({ clientId: 'one' });
   assert.equal(Object.hasOwn(preview, 'runtimeConstraints'), false); assert.equal(Object.hasOwn(preview, 'contentFormat'), false);

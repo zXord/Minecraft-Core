@@ -50,9 +50,9 @@ async function start(page, status = 'install-required', kind = 'client') {
           case 'client-packs:install': window.currentStatus='ready'; value = {clientId:input.clientId,status:'ready',verified:true,...(window.installCleanup?{cleanup:window.installCleanup}:{})}; break;
           case 'client-packs:recover': window.currentStatus='install-required'; value = {phase:'abandoned',operationId:'private-id'}; break;
           case 'client-packs:get-companion': value = window.companionDescriptor ?? {...window.descriptor,status:'unpaired',source:null,runtime:null,artifactSha256:null}; break;
-          case 'client-packs:list-companion-assets': value = {serverFingerprint:'f'.repeat(64),serverVersion:'0.13.4',assets:[{assetId:'3',fileName:'pack-0.13.4.mrpack',size:'2048'}]}; break;
-          case 'client-packs:inspect-companion': value = {inspectionId:'inspection-1',...window.descriptor,name:'Pack',version:'0.13.4',optionalFiles:[],downloadBytes:'2048'}; break;
-          case 'client-packs:accept-companion': value = window.descriptor; break;
+          case 'client-packs:list-companion-assets': value = {serverFingerprint:'f'.repeat(64),serverVersion:'0.13.4',assets:window.companionAssets ?? [{assetId:'3',fileName:'pack-0.13.4.mrpack',size:'2048'}]}; break;
+          case 'client-packs:inspect-companion': value = window.inspection ?? {inspectionId:'inspection-1',...window.descriptor,name:'Pack',version:'0.13.4',optionalFiles:[],downloadBytes:'2048'}; break;
+          case 'client-packs:accept-companion': window.companionDescriptor = window.inspection ? {...window.descriptor,source:window.inspection.source,artifactSha256:window.inspection.artifactSha256} : window.descriptor; value = window.companionDescriptor; break;
           case 'client-packs:cancel': value={cancelled:true}; break;
           default: throw new Error(`Unexpected IPC ${channel}`);
         }
@@ -91,6 +91,82 @@ async function companionEvidence(page, label, errors) {
     overlays:document.querySelectorAll('vite-error-overlay, nextjs-portal, #webpack-dev-server-client-overlay').length
   })),errors},null,2));
 }
+
+async function zipCompanion(page, saved = false) {
+  await start(page);
+  await page.evaluate(saved => {
+    window.companionDescriptor = saved ? window.descriptor : undefined;
+    window.companionAssets = [{assetId:'3',fileName:'pack-0.13.4.mrpack',size:'2048'},{assetId:'4',fileName:'pack-0.13.4-multimc.ZIP',size:'4096'}];
+    window.inspection = {inspectionId:'zip-inspection',...window.descriptor,source:{...window.descriptor.source,assetId:'4'},artifactSha256:'b'.repeat(64),name:'MultiMC client export',version:'1.20.1',optionalFiles:[],downloadBytes:'0'};
+    window.preview = {...window.preview,optionalFiles:[],optionalFileIds:[],downloadBytes:'0',conflicts:[],descriptor:{...window.descriptor,source:window.inspection.source,artifactSha256:window.inspection.artifactSha256}};
+    window.show('companion','a');
+  }, saved);
+}
+
+test('ZIP selection requires keyboard Inspect Accept then separate client Review Install with honest bundled costs', async ({page}) => {
+  await zipCompanion(page);
+  const mrpack = page.getByLabel('pack-0.13.4.mrpack'); const zip = page.getByLabel('pack-0.13.4-multimc.ZIP');
+  await expect(mrpack).not.toBeChecked(); await expect(zip).not.toBeChecked();
+  await expect(page.getByRole('button',{name:'Inspect selected pack'})).toBeDisabled();
+  await expect(page.getByRole('group')).toContainText('MRPACK or MultiMC ZIP');
+  await mrpack.focus(); await page.keyboard.press('ArrowRight'); await expect(zip).toBeChecked();
+  await page.keyboard.press('Tab'); await expect(page.getByRole('button',{name:'Inspect selected pack'})).toBeFocused(); await page.keyboard.press('Enter');
+  const review = page.locator('.review');
+  await expect(review).toContainText('Installed server release 0.13.4');
+  await expect(review).not.toContainText('MultiMC client export · 1.20.1');
+  await expect(review).toContainText('Additional pack-file downloads: 0 bytes');
+  await expect(review).toContainText('Bundled content still needs installation');
+  await expect(review).toContainText(/archive.*runtime.*separate/i);
+  await expect(review).toContainText(/launcher commands and settings are not imported/i);
+  await page.getByRole('button',{name:'Accept matching client pack'}).focus(); await page.keyboard.press('Enter');
+  let calls = await page.evaluate(() => window.calls);
+  expect(calls.filter(call=>call.channel==='client-packs:inspect-companion').map(call=>call.input.assetId)).toEqual(['4']);
+  expect(calls.filter(call=>call.channel==='client-packs:accept-companion').map(call=>call.input)).toEqual([{serverId:'a',expectedServerFingerprint:'f'.repeat(64),inspectionId:'zip-inspection'}]);
+  expect(calls.filter(call=>/client-packs:(preview|install)$/.test(call.channel))).toEqual([]);
+  await page.evaluate(()=>{window.descriptor=window.preview.descriptor;window.show('client','a');});
+  await expect(page.getByRole('button',{name:'Install reviewed pack'})).toHaveCount(0);
+  await page.getByRole('button',{name:'Review matching pack'}).focus(); await page.keyboard.press('Enter');
+  await expect(page.locator('.review')).toContainText('Additional pack-file downloads: 0 bytes');
+  await expect(page.locator('.review')).toContainText('Bundled content still needs installation');
+  await expect(page.locator('.review')).toContainText(/archive.*runtime.*separate/i);
+  await expect(page.locator('.review')).toContainText(/launcher commands and settings are not imported/i);
+  await expect(page.getByRole('checkbox')).toHaveCount(0);
+  await page.getByRole('button',{name:'Install reviewed pack'}).focus(); await page.keyboard.press('Enter');
+  await expect(page.getByText('Matching pack ready',{exact:true})).toBeVisible();
+  calls = await page.evaluate(() => window.calls);
+  const install = calls.find(call=>call.channel==='client-packs:install');
+  expect(Object.keys(install.input).sort()).toEqual(['clientId','conflictChoices','planId','requestId']);
+  expect(calls.filter(call=>call.channel==='client-packs:preview')).toHaveLength(1);
+});
+
+for (const code of ['PACK_ROOT_AMBIGUOUS','CANCELLED']) test(`refused ZIP ${code} retains saved MRPACK pairing and never accepts or installs`, async ({page}) => {
+  await zipCompanion(page, true);
+  await page.getByLabel('pack-0.13.4-multimc.ZIP').check();
+  if(code==='CANCELLED') {
+    await page.evaluate(()=>window.pending['client-packs:inspect-companion']=[]);
+    await page.getByRole('button',{name:'Inspect selected pack'}).click();
+    await companionJobs(page,'inspect-companion',1);
+    await page.getByRole('button',{name:'Cancel request'}).click();
+    await settleCompanion(page,'inspect-companion',0,{code});
+  } else {
+    await page.evaluate(code=>window.fail={'client-packs:inspect-companion':{code,message:'PRIVATE unsupported ZIP'}},code);
+    await page.getByRole('button',{name:'Inspect selected pack'}).click();
+  }
+  await expect(page.getByRole('alert')).toContainText(code);
+  if(code==='PACK_ROOT_AMBIGUOUS')await expect(page.getByRole('alert')).toContainText(/supported client format|supported client archive/i);
+  await expect(page.getByRole('button',{name:'Accept matching client pack'})).toHaveCount(0);
+  expect(await page.evaluate(()=>window.companionDescriptor.source.assetId)).toBe('3');
+  expect(await page.evaluate(()=>window.calls.filter(call=>/accept-companion|client-packs:install/.test(call.channel)))).toEqual([]);
+});
+
+test('changing ZIP radio after inspection retires review until the newly selected asset is inspected', async ({page}) => {
+  await zipCompanion(page, true);
+  await page.getByLabel('pack-0.13.4-multimc.ZIP').check(); await page.getByRole('button',{name:'Inspect selected pack'}).click();
+  await expect(page.getByRole('button',{name:'Accept matching client pack'})).toBeVisible();
+  await page.getByLabel('pack-0.13.4.mrpack').check();
+  await expect(page.getByRole('button',{name:'Accept matching client pack'})).toHaveCount(0);
+  expect(await page.evaluate(()=>window.calls.filter(call=>call.channel==='client-packs:accept-companion'))).toEqual([]);
+});
 
 test('companion first-mount saved pairing survives asset discovery PLAN_STALE and ordinary Refresh recovers', async ({page}) => {
   const errors=[];

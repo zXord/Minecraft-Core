@@ -120,7 +120,7 @@
   </div>{/if}
   {#if state?.descriptor}<p>Server release {state.descriptor.serverVersion}</p>{/if}
   {#if state?.status === 'unpaired'}
-    <p>Ask the server owner to pair the same-release MRPACK in the server’s Modpack overview. Loose-mod synchronization is disabled for this managed server.</p>
+    <p>Ask the server owner to pair the same-release MRPACK or MultiMC ZIP in the server’s Modpack overview. GitHub supports both; Modrinth supports MRPACK only. Loose-mod synchronization is disabled for this managed server.</p>
   {:else if state?.status === 'unavailable'}
     <p>The server requirement could not be classified. Content changes and launch stay blocked until it can be checked.</p>
   {:else if state?.status === 'ready'}
@@ -144,7 +144,10 @@
   {#if plan}
     <div class="review"><h3>Review installation</h3><p>Destination: <strong>{destinationLabel || 'Selected existing client instance'}</strong></p>
       <p>Server release {plan.descriptor.serverVersion} · Minecraft {plan.descriptor.runtime.minecraftVersion} · {plan.descriptor.runtime.loaderFamily} {plan.descriptor.runtime.loaderVersion}</p>
-      <p>{number(plan.downloadBytes)} bytes to download</p>
+      <p>Additional pack-file downloads: {number(plan.downloadBytes)} bytes</p>
+      {#if plan.downloadBytes==='0'}<p>Bundled content still needs installation.</p>{/if}
+      <p>Archive acquisition and Minecraft/loader runtime preparation are separate costs, not included in additional pack-file downloads.</p>
+      <p>Minecraft Core prepares the declared Minecraft/loader runtime. Launcher commands and settings are not imported.</p>
       {#if plan.optionalFiles.length}<fieldset><legend>Optional client files</legend>{#each plan.optionalFiles as item (item.id)}<label><input type="checkbox" checked={plan.optionalFileIds.includes(item.id)} disabled={busy} on:change={event => changeOptional(item.id,event.currentTarget.checked)} />{item.label}</label>{/each}</fieldset>{/if}
       {#each [['Additions',plan.additions],['Removals',plan.removals],['Replacements',plan.replacements],['Preserved files',plan.preserved]] as [title, files]}
         {#if files.length}<details class="file-changes"><summary>{title} ({files.length})</summary><div class="file-scroll-region" role="region" aria-label={`${title} file list`}><ul>{#each files as file}<li>{file}</li>{/each}</ul></div></details>

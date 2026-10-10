@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { normalizeRuntimeTuple } = require('../modpacks/contracts.cjs');
 const { serverPackFingerprint, normalizeCompanionDescriptor } = require('./companion-contracts.cjs');
+const { isClientArchiveName, singleClientArchive } = require('./client-archive-source.cjs');
 const MAX_INSPECTIONS = 4;
 const TTL_MS = 15 * 60 * 1000;
 const fail = (code = 'INVALID_REQUEST', cause) => new ModpackError(code, code === 'CLIENT_PACK_UNAVAILABLE' ? 'The matching client pack is unavailable' : 'The matching client pack request could not be completed', { cause });
@@ -17,11 +18,6 @@ function cancelled(signal) { if (signal.aborted) throw fail('CANCELLED'); }
 function sameRuntime(left, right) {
   const a = normalizeRuntimeTuple(left); const b = normalizeRuntimeTuple(right);
   return ['minecraftVersion', 'loaderFamily', 'loaderVersion'].every(key => a[key] === b[key]);
-}
-function singleMrpack(plan) {
-  const set = plan?.artifactSet;
-  if (set?.kind !== 'single' || set.parts?.length !== 1 || !/\.mrpack$/i.test(set.parts[0].fileName)) throw fail('UNSUPPORTED_ARCHIVE');
-  return set.parts[0];
 }
 class CompanionService {
   constructor({ store, readServerState, resolveServer, coordinator, providers, sourceResolver, artifactAcquisition,
@@ -59,7 +55,7 @@ class CompanionService {
       if (source.provider === 'github') assets = await this.#githubAssets(source, signal);
       else if (source.provider === 'modrinth') {
         const resolved = await this.sourceResolver.resolveArtifactSetPlan({ provider: 'modrinth', projectId: source.projectId, versionId: source.versionId }, { signal });
-        const part = singleMrpack(resolved.artifactSetPlan);
+        const part = singleClientArchive(resolved.artifactSetPlan, source.provider);
         assets = [{ assetId: source.versionId, fileName: part.fileName, size: part.size }];
       } else assets = [];
       cancelled(signal);
@@ -84,25 +80,27 @@ class CompanionService {
           if (!assets.some(asset => asset.assetId === value.assetId)) throw fail();
           resolved = await this.sourceResolver.resolveArtifactSetPlan({ provider: 'github', repositoryId: source.repositoryId, releaseId: source.releaseId, assetIds: [value.assetId] }, { signal });
           companionSource = { provider: 'github', repositoryId: source.repositoryId, githubOwner: source.githubOwner, githubRepo: source.githubRepo, releaseId: source.releaseId, assetId: value.assetId };
-          if (singleMrpack(resolved.artifactSetPlan).providerAssetId !== value.assetId) throw fail('PLAN_STALE');
+          if (singleClientArchive(resolved.artifactSetPlan, source.provider).providerAssetId !== value.assetId) throw fail('PLAN_STALE');
         } else if (source.provider === 'modrinth') {
           if (value.assetId !== undefined && value.assetId !== source.versionId) throw fail();
           companionSource = { provider: 'modrinth', projectId: source.projectId, versionId: source.versionId };
           resolved = await this.sourceResolver.resolveArtifactSetPlan(companionSource, { signal });
-          singleMrpack(resolved.artifactSetPlan);
+          singleClientArchive(resolved.artifactSetPlan, source.provider);
         } else throw fail('CLIENT_PACK_UNAVAILABLE');
         cancelled(signal);
         const verified = await this.artifactAcquisition.downloadSet(resolved.artifactSetPlan, { signal, onProgress: options.onProgress });
-        singleMrpack(verified);
+        const part = singleClientArchive(verified, source.provider);
+        if (source.provider === 'github' && part.providerAssetId !== value.assetId) throw fail('PLAN_STALE');
         const archive = await this.archiveInspector.inspectArchive({ verifiedArtifactSet: verified, signal, onProgress: options.onProgress });
         // Only this newly created upstream capability enters our ownership set.
         slot.inspectionId = archive.inspectionId;
         if (typeof slot.inspectionId !== 'string' || !slot.inspectionId.length) throw fail('CLIENT_PACK_UNAVAILABLE');
         cancelled(signal);
         const inspected = await this.clientCandidatePreparer.inspect({ inspectionId: slot.inspectionId, signal, onProgress: options.onProgress });
+        if (source.provider === 'modrinth' && inspected.contentFormat === 'multimc') throw fail('UNSUPPORTED_ARCHIVE');
         if (!sameRuntime(installed.state.runtime, inspected.runtime)) throw fail('RUNTIME_INCOMPLETE');
         const descriptor = normalizeCompanionDescriptor({ schemaVersion: 1, status: 'ready', serverFingerprint: installed.fingerprint,
-          serverVersion: source.version, source: companionSource, runtime: inspected.runtime, artifactSha256: verified.artifactSet.parts[0].calculatedDigests.sha256 });
+          serverVersion: source.version, source: companionSource, runtime: inspected.runtime, artifactSha256: part.calculatedDigests.sha256 });
         await this.#installed(value.serverId, installed.fingerprint, { signal });
         cancelled(signal);
         Object.assign(slot, { serverId: value.serverId, descriptor, active: false, createdAt: this.clock() });
@@ -178,7 +176,7 @@ class CompanionService {
     const listing = await this.providers.github.listUploadedAssets({ repositoryId: source.repositoryId, releaseId: source.releaseId });
     cancelled(signal);
     if (listing.repositoryId !== source.repositoryId || listing.releaseId !== source.releaseId || !Array.isArray(listing.assets)) throw fail('PLAN_STALE');
-    return listing.assets.filter(asset => /\.mrpack$/i.test(asset.fileName) && (asset.state === undefined || asset.state === 'uploaded'))
+    return listing.assets.filter(asset => isClientArchiveName(asset.fileName, 'github') && (asset.state === undefined || asset.state === 'uploaded'))
       .map(asset => ({ assetId: asset.assetId, fileName: asset.fileName, size: asset.size }));
   }
   #sameRelease(installed, companion) {

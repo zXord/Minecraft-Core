@@ -117,7 +117,7 @@ test('actual composition refuses drift from real envelope and returns original i
 test('production composition lists matching client assets from the exact installed release', async t => {
   const { service } = await fixture(t);
   assert.deepEqual(await service.listAssets({ serverId: 'server-one' }), {
-    serverFingerprint: fingerprint, serverVersion: 'v1', assets: [{ assetId: '20', fileName: 'client.mrpack', size: '42' }]
+    serverFingerprint: fingerprint, serverVersion: 'v1', assets: [{ assetId: '20', fileName: 'client.mrpack', size: '42' }, { assetId: '10', fileName: 'server.zip', size: '100' }]
   });
 });
 

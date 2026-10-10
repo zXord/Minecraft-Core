@@ -21,6 +21,7 @@
         inspection=null;assets=null;selected='';
         guidance=code==='PLAN_STALE'?'The server or verification evidence changed during this request. Refresh the companion list and try again.':"The server's managed mod files differ from the installed pack. Use Modpack Verify and Repair before installing or launching its matching client pack.";
       }else if(code==='SERVER_RUNNING')guidance='Stop the server before accepting this matching client pack. The inspected pack has not been paired.';
+      else if(['UNSUPPORTED_ARCHIVE','PACK_ROOT_AMBIGUOUS','MANIFEST_INVALID'].includes(code))guidance='The selected archive is not a supported client format. Choose a same-release MRPACK or MultiMC ZIP candidate and inspect it. Modrinth supports MRPACK only.';
       error={channel,code,message:`${channel} failed (${code}). ${guidance}`};
     }}
     finally{if(current()){busy=false;controller=null;progress=null;}}
@@ -56,13 +57,14 @@
   {#if !descriptor&&!busy}<p>Pairing status could not be loaded. Refresh the companion list to retry.</p>{/if}
   {#if localArchive}<p>Local server archives remain supported. They cannot advertise a downloadable matching client pack; use an official GitHub or Modrinth release for companion pairing.</p>
   {:else if assets}
-    {#if assets.assets.length===0}<p>No MRPACK client asset is available for this installed server release. Server installation is unaffected.</p>
-    {:else}<fieldset disabled={busy}><legend>MRPACK assets from this exact release</legend>{#each assets.assets as asset (asset.assetId)}<label><input type="radio" name={`companion-${serverId}`} bind:group={selected} value={asset.assetId} on:change={()=>inspection=null}/><span>{asset.fileName}</span><small>{number(asset.size)} bytes</small></label>{/each}</fieldset>
+    {#if assets.assets.length===0}<p>No supported client archive candidate is available for this installed server release. GitHub supports MRPACK or MultiMC ZIP; Modrinth supports MRPACK only. Server installation is unaffected.</p>
+    {:else}<fieldset disabled={busy}><legend>Client archive candidates from this exact release — MRPACK or MultiMC ZIP</legend>{#each assets.assets as asset (asset.assetId)}<label><input type="radio" name={`companion-${serverId}`} bind:group={selected} value={asset.assetId} on:change={()=>inspection=null}/><span>{asset.fileName}</span><small>{number(asset.size)} bytes</small></label>{/each}</fieldset>
+      <p>GitHub supports MRPACK or MultiMC ZIP; Modrinth supports MRPACK only. Inspection determines whether a candidate has a supported client format.</p>
       <button type="button" disabled={busy||!selected} on:click={inspect}>Inspect selected pack</button>
     {/if}
   {/if}
   {#if progress}<div role="status" aria-live="polite"><p>{progress.phase.replaceAll('-',' ')}</p>{#if progress.completedBytes!==undefined}<p>{number(progress.completedBytes)}{progress.totalBytes!==undefined?` / ${number(progress.totalBytes)}`:''} bytes</p>{/if}<progress aria-label="Inspecting client archive"></progress><button type="button" on:click={()=>controller?.abort()}>Cancel request</button></div>{/if}
-  {#if inspection}<div class="review"><h3>Review matching runtime</h3><p>{inspection.name} · {inspection.version}</p><p>Minecraft {inspection.runtime.minecraftVersion} · {inspection.runtime.loaderFamily} {inspection.runtime.loaderVersion}</p><p>{number(inspection.downloadBytes)} bytes referenced by the client pack</p><p>This pairs the inspected MRPACK only. Client installation is a separate reviewed action. Stop the server before accepting.</p><button class="primary" type="button" disabled={busy} on:click={accept}>Accept matching client pack</button></div>{/if}
+  {#if inspection}<div class="review"><h3>Review matching runtime</h3><p>{inspection.name}</p><p>Installed server release {inspection.serverVersion}</p><p>Minecraft {inspection.runtime.minecraftVersion} · {inspection.runtime.loaderFamily} {inspection.runtime.loaderVersion}</p><p>Additional pack-file downloads: {number(inspection.downloadBytes)} bytes</p>{#if inspection.downloadBytes==='0'}<p>Bundled content still needs installation.</p>{/if}<p>Archive acquisition and Minecraft/loader runtime preparation are separate costs, not included in additional pack-file downloads.</p><p>Minecraft Core prepares the declared Minecraft/loader runtime. Launcher commands and settings are not imported.</p><p>This pairs the inspected client archive only. Client installation is a separate reviewed action. Stop the server before accepting.</p><button class="primary" type="button" disabled={busy} on:click={accept}>Accept matching client pack</button></div>{/if}
   <button type="button" disabled={busy} on:click={refresh}>Refresh companion list</button>
 </section>
 {/if}

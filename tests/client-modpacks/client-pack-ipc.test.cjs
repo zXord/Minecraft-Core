@@ -8,6 +8,23 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a,b) 
 const descriptor={schemaVersion:1,status:'ready',serverFingerprint:'a'.repeat(64),serverVersion:'0.13.4',source:{provider:'modrinth',projectId:'p',versionId:'v'},artifactSha256:'b'.repeat(64),runtime:{minecraftVersion:'1.20.1',loaderFamily:'forge',loaderVersion:'47.4.13',javaMajor:17,os:'win32',architecture:'x64'}};
 const preview=clientId=>({clientId,planId:'p',descriptor,optionalFiles:[],optionalFileIds:[],downloadBytes:'0',additions:[],removals:[],replacements:[],conflicts:[],preserved:[]});
 const prepare=async f=>assert.equal((await f.call('preview',{clientId:'c',requestId:'preview-r'})).ok,true);
+
+test('MultiMC private source and constraint evidence never becomes IPC authority', async () => {
+  const github = { ...descriptor, source: { provider: 'github', repositoryId: '1', githubOwner: 'Example', githubRepo: 'Pack', releaseId: '2', assetId: '3' } };
+  const privateFields = { contentFormat: 'multimc', runtimeConstraints: { lwjglVersion: '3.3.1' }, outputId: 'private-output', path: 'C:/private', url: 'https://private' };
+  const inspection = { inspectionId: 'i', ...github, name: 'MultiMC client export', version: '1.20.1', optionalFiles: [], downloadBytes: '0' };
+  const reviewed = { ...preview('c'), descriptor: github };
+  let calls = 0;
+  const f = fixture({ companion: { inspect: async () => { calls++; return { ...inspection, ...privateFields }; } }, client: { preview: async () => { calls++; return { ...reviewed, ...privateFields }; } } });
+  assert.deepEqual(await f.call('inspect-companion', { serverId: 's', expectedServerFingerprint: 'a'.repeat(64), assetId: '3', requestId: 'r' }), { ok: true, value: inspection });
+  assert.deepEqual(await f.call('preview', { clientId: 'c', requestId: 'p' }), { ok: true, value: reviewed });
+  for (const [name, input] of [['inspect-companion', { serverId: 's', expectedServerFingerprint: 'a'.repeat(64), assetId: '3', requestId: 'other-r' }], ['preview', { clientId: 'c', requestId: 'other-p' }], ['install', { clientId: 'c', planId: 'p', conflictChoices: {}, requestId: 'install-r' }]]) {
+    for (const extra of [{ contentFormat: 'multimc' }, { runtimeConstraints: { lwjglVersion: null } }, { root: '.minecraft' }, { source: github.source }, { path: 'C:/private' }, { url: 'https://private' }]) {
+      assert.equal((await f.call(name, { ...input, ...extra })).error.code, 'INVALID_REQUEST');
+    }
+  }
+  assert.equal(calls, 2); await f.dispose();
+});
 function sender(id) { const value = new EventEmitter(); value.id=id; value.messages=[]; value.dead=false; value.send=(channel,payload) => value.messages.push({channel,payload}); value.isDestroyed=()=>value.dead; return value; }
 function fixture(overrides={}) {
   assert.equal(typeof create, 'function', 'matching client IPC boundary must exist');
