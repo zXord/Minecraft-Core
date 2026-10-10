@@ -37,6 +37,63 @@ function fixture(t) {
 async function stage(f, overrides = {}) {
   return f.tx.stage({ target: f.target, baseline: await captureServerDirectoryCopySource(f.live, { reparseInspector }), oldManifest: await f.stateStore.read(f.live), prepared: f.prepared, descriptor, optionalFileIds: [], conflictChoices: {}, ...overrides });
 }
+const githubDescriptor = { ...descriptor, source: { provider: 'github', repositoryId: '1', githubOwner: 'Example', githubRepo: 'Pack', releaseId: '2', assetId: '3' } };
+const multimcPrepared = (f, lwjglVersion = '3.3.1') => ({ ...f.prepared, optionalFileIds: [], contentFormat: 'multimc', runtimeConstraints: { lwjglVersion } });
+
+test('whole manifest transitions replace private evidence and preserve user state and conflict decisions', async t => {
+  const f = fixture(t);
+  for (const [schemaVersion, prepared] of [[1, f.prepared], [2, multimcPrepared(f)], [2, multimcPrepared(f, null)], [1, f.prepared]]) {
+    const context = await stage(f, { prepared, descriptor: githubDescriptor }); await f.tx.seal(context); await f.tx.publish(context);
+    const manifest = await f.stateStore.read(f.live);
+    assert.equal(manifest.schemaVersion, schemaVersion);
+    assert.deepEqual(manifest.descriptor, githubDescriptor);
+    if (schemaVersion === 2) {
+      assert.equal(manifest.contentFormat, 'multimc'); assert.deepEqual(manifest.runtimeConstraints, prepared.runtimeConstraints);
+      assert.deepEqual(manifest.optionalFileIds, []);
+    } else {
+      assert.equal(Object.hasOwn(manifest, 'contentFormat'), false); assert.equal(Object.hasOwn(manifest, 'runtimeConstraints'), false);
+    }
+    for (const [file, bytes] of Object.entries({ 'options.txt': 'mine', 'saves/world.dat': 'save', 'client-config.json': 'auth', 'mods/user.jar': 'user' })) {
+      assert.equal(fs.readFileSync(path.join(f.live, file), 'utf8'), bytes);
+    }
+  }
+  write(f.live, 'mods/new.jar', 'modified');
+  await assert.rejects(stage(f, { prepared: multimcPrepared(f), descriptor: githubDescriptor }), { code: 'INVALID_REQUEST' });
+  const context = await stage(f, { prepared: multimcPrepared(f), descriptor: githubDescriptor, conflictChoices: { 'mods/new.jar': 'preserve' } });
+  await f.tx.seal(context); await f.tx.publish(context);
+  assert.equal((await f.stateStore.read(f.live)).entries.find(e => e.path === 'mods/new.jar').preserved, true);
+  assert.equal(fs.readFileSync(path.join(f.live, 'mods/new.jar'), 'utf8'), 'modified');
+});
+
+for (const [label, evidence] of [
+  ['unknown format', { contentFormat: 'other' }], ['explicit mrpack', { contentFormat: 'mrpack' }],
+  ['constraints without format', { runtimeConstraints: { lwjglVersion: null } }],
+  ['missing constraints', { contentFormat: 'multimc' }],
+  ['malformed constraints', { contentFormat: 'multimc', runtimeConstraints: {} }],
+  ['explicit undefined fields', { contentFormat: undefined, runtimeConstraints: undefined }]
+]) test(`staging refuses ${label} instead of silently writing legacy ownership`, async t => {
+  const f = fixture(t); await assert.rejects(stage(f, { prepared: { ...f.prepared, ...evidence }, descriptor: githubDescriptor }), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(await f.stateStore.read(f.live), null);
+  assert.equal(fs.existsSync(path.join(f.live, 'mods/new.jar')), false);
+});
+
+test('staging MultiMC refuses non-GitHub descriptor and optional choices', async t => {
+  const f = fixture(t);
+  await assert.rejects(stage(f, { prepared: multimcPrepared(f), descriptor }), { code: 'RECOVERY_REQUIRED' });
+  await assert.rejects(stage(f, { prepared: multimcPrepared(f), descriptor: githubDescriptor, optionalFileIds: ['optional-one'] }), { code: 'RECOVERY_REQUIRED' });
+  await assert.rejects(stage(f, { prepared: { ...multimcPrepared(f), optionalFileIds: ['optional-one'] }, descriptor: githubDescriptor }), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(await f.stateStore.read(f.live), null);
+});
+
+test('staging refuses accessor or inherited private format evidence without invoking it', async t => {
+  const f = fixture(t); let reads = 0;
+  const accessor = { ...multimcPrepared(f), get contentFormat() { reads++; return 'multimc'; } };
+  await assert.rejects(stage(f, { prepared: accessor, descriptor: githubDescriptor }), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(reads, 0);
+  const inherited = Object.assign(Object.create({ contentFormat: 'multimc', runtimeConstraints: { lwjglVersion: '3.3.1' } }), f.prepared);
+  await assert.rejects(stage(f, { prepared: inherited, descriptor: githubDescriptor }), { code: 'RECOVERY_REQUIRED' });
+  assert.deepEqual(fs.readdirSync(f.dependencies.journalRoot), []);
+});
 test('publication preserves user files and atomically publishes matching ownership', async t => {
   const f = fixture(t); const context = await stage(f); await f.tx.seal(context); await f.tx.publish(context);
   for (const [p, bytes] of Object.entries({ 'saves/world.dat': 'save', 'client-config.json': 'auth', 'options.txt': 'mine', 'mods/user.jar': 'user', 'mods/new.jar': 'new' })) assert.equal(fs.readFileSync(path.join(f.live, p), 'utf8'), bytes);
@@ -69,9 +126,9 @@ test('unknown choices cannot replace protected or unreviewed paths', async t => 
   await assert.rejects(stage(f, { conflictChoices: { 'client-config.json': 'replace' } }), { code: 'INVALID_REQUEST' });
   assert.equal(fs.readFileSync(path.join(f.live, 'client-config.json'), 'utf8'), 'auth');
 });
-for (const boundary of ['before-first-rename', 'after-first-rename', 'before-second-rename', 'after-second-rename', 'before-completion', 'after-completion']) {
-  test(`recovery yields exact new directory after ${boundary}`, async t => {
-    const f = fixture(t); const context = await stage(f); await f.tx.seal(context);
+for (const format of ['mrpack', 'multimc']) for (const boundary of ['before-first-rename', 'after-first-rename', 'before-second-rename', 'after-second-rename', 'before-completion', 'after-completion']) {
+  test(`${format} recovery yields exact new directory after ${boundary}`, async t => {
+    const f = fixture(t); const context = await stage(f, format === 'multimc' ? { prepared: multimcPrepared(f), descriptor: githubDescriptor } : {}); await f.tx.seal(context);
     let moves = 0;
     const broken = { ...f.durableFs,
       async renameDurableAsync(a, b) {
@@ -94,6 +151,11 @@ for (const boundary of ['before-first-rename', 'after-first-rename', 'before-sec
     assert.equal(fs.readFileSync(path.join(f.live, 'mods/new.jar'), 'utf8'), 'new');
     assert.equal(fs.readFileSync(path.join(f.live, 'saves/world.dat'), 'utf8'), 'save');
     assert.equal((await f.stateStore.read(f.live)).descriptor.serverFingerprint, 'a'.repeat(64));
+    if (format === 'multimc') {
+      const manifest = await new ClientPackStateStore({ durableFs: f.durableFs }).read(f.live);
+      assert.equal(manifest.schemaVersion, 2); assert.equal(manifest.contentFormat, 'multimc');
+      assert.deepEqual(manifest.runtimeConstraints, { lwjglVersion: '3.3.1' });
+    }
   });
 }
 test('substituted directory identity blocks recovery without deleting evidence', async t => {

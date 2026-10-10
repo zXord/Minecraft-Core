@@ -3,6 +3,7 @@ const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { strictJsonClone } = require('../../utils/durable-fs.cjs');
 const { normalizeCompanionDescriptor } = require('./companion-contracts.cjs');
 const { clientPathPolicy } = require('./client-content-policy.cjs');
+const { normalizeRuntimeConstraints } = require('./client-runtime-constraints.cjs');
 const MANIFEST_NAME = '.minecraft-core-client-pack.json';
 const fail = () => new ModpackError('RECOVERY_REQUIRED', 'Client ownership state could not be verified');
 function normalizeEntries(entries) {
@@ -19,6 +20,16 @@ function normalizeEntries(entries) {
 }
 function normalizeClientPackManifest(value) {
   const v = strictJsonClone(value);
+  if (v?.schemaVersion === 2) {
+    try {
+      if (Object.keys(v).sort().join(',') !== 'contentFormat,descriptor,entries,optionalFileIds,runtimeConstraints,schemaVersion' ||
+          v.contentFormat !== 'multimc' || !Array.isArray(v.optionalFileIds) || v.optionalFileIds.length !== 0) throw fail();
+      const descriptor = normalizeCompanionDescriptor(v.descriptor);
+      if (descriptor.status !== 'ready' || descriptor.source.provider !== 'github') throw fail();
+      return deepFreeze({ schemaVersion: 2, descriptor, optionalFileIds: [], entries: normalizeEntries(v.entries),
+        contentFormat: 'multimc', runtimeConstraints: normalizeRuntimeConstraints(v.runtimeConstraints) });
+    } catch (cause) { throw new ModpackError('RECOVERY_REQUIRED', 'Client ownership state could not be verified', { cause }); }
+  }
   if (!v || Object.keys(v).sort().join(',') !== 'descriptor,entries,optionalFileIds,schemaVersion' || v.schemaVersion !== 1 ||
       !Array.isArray(v.optionalFileIds) || v.optionalFileIds.length > 10000 ||
       v.optionalFileIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9._:-]{1,192}$/.test(id)) ||

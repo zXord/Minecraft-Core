@@ -159,7 +159,7 @@ class ClientPackService {
               signal: operation.signal, onProgress: operation.onProgress, operationId: operation.operationId });
             if (preparedRuntime?.quiescent !== true || !sameRuntime(preparedRuntime.runtime, plan.descriptor.runtime)) throw fail('RUNTIME_INCOMPLETE');
             cancelled(operation.signal);
-            await this._runtime(context.candidatePath, plan.descriptor.runtime);
+            await this._runtime(context.candidatePath, plan.descriptor.runtime, plan.prepared.runtimeConstraints);
             const runtimeSnapshot = await captureServerDirectoryCopySource(context.candidatePath, this.reparseInspector ? { reparseInspector: this.reparseInspector } : {});
             if (!equal(nonRuntimeFiles(preservedSnapshot), nonRuntimeFiles(runtimeSnapshot))) throw fail('PLAN_STALE');
             if (!equal((await this._requirement(value.clientId, { signal: operation.signal, deadline: operation.deadline, expectedBinding: plan.binding })).descriptor, plan.descriptor)) throw fail('PLAN_STALE');
@@ -205,8 +205,8 @@ class ClientPackService {
       } finally { plan.active = false; await this._release(plan); }
     });
   }
-  async _runtime(clientPath, runtime) {
-    const result = await this.runtimeInstaller.verify({ clientPath, runtime });
+  async _runtime(clientPath, runtime, runtimeConstraints) {
+    const result = await this.runtimeInstaller.verify({ clientPath, runtime, runtimeConstraints });
     if (result?.verified !== true || !sameRuntime(result.runtime, runtime) || typeof result.profileId !== 'string' ||
         !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,191}$/.test(result.profileId)) throw fail('RUNTIME_INCOMPLETE');
     return result;
@@ -223,7 +223,7 @@ class ClientPackService {
       (!files.has(e.pathKey) || files.get(e.pathKey).type !== 'file' || files.get(e.pathKey).sha256 !== e.sha256 || files.get(e.pathKey).size !== e.size) &&
       !(e.preserved && !/\.jar$/i.test(e.path) && files.get(e.pathKey)?.type === 'file')));
     if (modified.length) return { verified: false, status: 'modified', manifest };
-    const runtime = await this._runtime(target.clientPath, manifest.descriptor.runtime);
+    const runtime = await this._runtime(target.clientPath, manifest.descriptor.runtime, manifest.runtimeConstraints);
     return { verified: true, status: 'ready', manifest, runtime };
   }
   async getState(value) {

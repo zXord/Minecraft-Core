@@ -16,6 +16,19 @@ const fail = (code = 'RECOVERY_REQUIRED', cause) => new ModpackError(code, 'Clie
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const sameTree = (a, b) => a && b && equal(a.directoryIdentity, b.directoryIdentity) && a.fingerprint === b.fingerprint;
+function preparedManifestEvidence(prepared, descriptor, optionalFileIds) {
+  if (!prepared || Object.getPrototypeOf(prepared) !== Object.prototype) throw fail();
+  const format = Object.getOwnPropertyDescriptor(prepared, 'contentFormat');
+  const constraints = Object.getOwnPropertyDescriptor(prepared, 'runtimeConstraints');
+  if (!format && !constraints) return { schemaVersion: 1 };
+  const choices = Object.getOwnPropertyDescriptor(prepared, 'optionalFileIds');
+  if (!format?.enumerable || !Object.hasOwn(format, 'value') || format.value !== 'multimc' ||
+      !constraints?.enumerable || !Object.hasOwn(constraints, 'value') ||
+      !choices?.enumerable || !Object.hasOwn(choices, 'value') || !Array.isArray(choices.value) || choices.value.length !== 0) throw fail();
+  const manifest = normalizeClientPackManifest({ schemaVersion: 2, descriptor, optionalFileIds, entries: [],
+    contentFormat: format.value, runtimeConstraints: constraints.value });
+  return { schemaVersion: 2, contentFormat: manifest.contentFormat, runtimeConstraints: manifest.runtimeConstraints };
+}
 const MAX_CLEANUP_ENTRIES = 20000;
 const MAX_CLEANUP_BYTES = 8 * 1024 * 1024;
 const exactKeys = (value, keys) => value && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
@@ -157,6 +170,7 @@ class ClientPackTransaction {
   async stage({ target, baseline, oldManifest, prepared, descriptor, optionalFileIds, conflictChoices = {}, signal, operationId = crypto.randomUUID(), onProgress }) {
     if (onProgress !== undefined && typeof onProgress !== 'function') throw fail('INVALID_REQUEST');
     signal?.throwIfAborted();
+    const evidence = preparedManifestEvidence(prepared, descriptor, optionalFileIds);
     const live = await inspectServerDirectoryTree(target.clientPath, this._options());
     if (!sameTree(live, baseline)) throw fail('PLAN_STALE');
     const ownership = planOwnership(baseline, oldManifest, prepared.manifest.entries);
@@ -210,7 +224,7 @@ class ClientPackTransaction {
     for (const conflict of ownership.conflicts.filter(c => c.action === 'remove' && conflictChoices[c.path] === 'preserve')) {
       entries.push({ ...oldManifest.entries.find(e => e.pathKey === conflict.path.toLowerCase()), preserved: true });
     }
-    const manifest = normalizeClientPackManifest({ schemaVersion: 1, descriptor, optionalFileIds, entries });
+    const manifest = normalizeClientPackManifest({ ...evidence, descriptor, optionalFileIds, entries });
     await this.stateStore.write(context.candidatePath, manifest);
     return context;
     } catch (cause) {

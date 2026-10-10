@@ -58,6 +58,132 @@ function fixture(t) {
   });
   return { service, dependencies, external, live, target, guard, transaction, runtimeOperations, forgottenOperations };
 }
+function writeInertRuntime(root, lwjglVersion = '3.3.1') {
+  const put = (name, data) => { const file = path.join(root, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof data === 'string' ? data : JSON.stringify(data)); };
+  const sha1 = text => crypto.createHash('sha1').update(text).digest('hex');
+  const lib = name => {
+    const [group, artifact, version] = name.split(':'); const relative = `${group.replaceAll('.', '/')}/${artifact}/${version}/${artifact}-${version}.jar`;
+    const bytes = `inert ${name}`; put(`libraries/${relative}`, bytes);
+    return { name, downloads: { artifact: { path: relative, size: bytes.length, sha1: sha1(bytes), url: 'https://example.invalid/library' } } };
+  };
+  put('versions/1.20.1/1.20.1.json', { id: '1.20.1', type: 'release', mainClass: 'net.minecraft.client.main.Main',
+    time: '2023-06-12T13:25:51+00:00', releaseTime: '2023-06-12T13:25:51+00:00', minimumLauncherVersion: 21,
+    javaVersion: { majorVersion: 17 }, arguments: { game: [], jvm: [] }, libraries: [lib(`org.lwjgl:lwjgl:${lwjglVersion}`), lib(`org.lwjgl:lwjgl-glfw:${lwjglVersion}`)],
+    downloads: { client: { size: 6, sha1: sha1('client'), url: 'https://example.invalid/client' } },
+    assetIndex: { id: '5', size: 14, sha1: sha1('{"objects":{}}'), url: 'https://example.invalid/index' } });
+  put('versions/1.20.1/1.20.1.jar', 'client');
+  put('versions/1.20.1-forge-47.3.12/1.20.1-forge-47.3.12.json', { id: '1.20.1-forge-47.3.12', inheritsFrom: '1.20.1',
+    mainClass: 'cpw.mods.bootstraplauncher.BootstrapLauncher', arguments: { game: [], jvm: [] }, libraries: [lib('net.minecraftforge:fmlloader:1.20.1-47.3.12')] });
+  put('assets/indexes/5.json', '{"objects":{}}');
+  put('java/java-17/jdk/release', 'JAVA_VERSION="17.0.16"\nOS_NAME="Windows"\nOS_ARCH="amd64"\n');
+  put('java/java-17/jdk/bin/javaw.exe', 'inert executable never launched'); put('java/java-17/jdk/bin/server/jvm.dll', 'inert jvm');
+}
+function multimcServiceFixture(t) {
+  const f = fixture(t); const evidence = { contentFormat: 'multimc', runtimeConstraints: { lwjglVersion: '3.3.1' } };
+  f.external.requirement = { ...descriptor, source: { provider: 'github', repositoryId: '1', githubOwner: 'Example', githubRepo: 'Pack', releaseId: '2', assetId: '3' } };
+  // Task3 owns the filename gate. Synthetic inspected MultiMC bytes use the existing permitted acquisition-name seam here.
+  const part = { fileName: 'inspected.mrpack', providerAssetId: '3', size: '4', calculatedDigests: { sha256: descriptor.artifactSha256 } };
+  f.dependencies.sourceResolver.providers = { github: { async getRepositoryIdentity() { return { repositoryId: '1' }; } } };
+  f.dependencies.sourceResolver.resolveArtifactSetPlan = async () => ({ artifactSetPlan: { artifactSet: { kind: 'single', parts: [part] } } });
+  f.dependencies.artifactAcquisition.downloadSet = async plan => ({ artifactSet: plan.artifactSet });
+  const inspect = f.dependencies.candidatePreparer.inspect.bind(f.dependencies.candidatePreparer);
+  const prepare = f.dependencies.candidatePreparer.prepare.bind(f.dependencies.candidatePreparer);
+  f.dependencies.candidatePreparer.inspect = async request => ({ ...await inspect(request), ...evidence, optionalFiles: [], downloadBytes: '0' });
+  f.dependencies.candidatePreparer.prepare = async request => ({ ...await prepare(request), ...evidence });
+  const prepareRuntime = f.dependencies.runtimeInstaller.prepare.bind(f.dependencies.runtimeInstaller);
+  f.dependencies.runtimeInstaller.prepare = async request => { const result = await prepareRuntime(request); writeInertRuntime(request.clientPath); return result; };
+  const verifiedRequests = [];
+  f.dependencies.runtimeInstaller.verify = async request => {
+    verifiedRequests.push({ clientPath: request.clientPath, runtimeConstraints: request.runtimeConstraints });
+    return require('../../electron/services/client-modpacks/client-runtime-installer.cjs').verifyClientRuntime(request);
+  };
+  const reopen = () => {
+    const stateStore = new ClientPackStateStore({ durableFs: f.transaction.durableFs });
+    const transaction = new ClientPackTransaction({ journalRoot: f.transaction.journalRoot, durableFs: f.transaction.durableFs, stateStore, reparseInspector });
+    const service = new ClientPackService({ ...f.dependencies, transaction, stateStore,
+      runtimeInstaller: { ...f.dependencies.runtimeInstaller, verify: request => require('../../electron/services/client-modpacks/client-runtime-installer.cjs').verifyClientRuntime(request) } });
+    t.after(() => service.dispose()); return service;
+  };
+  return { ...f, evidence, verifiedRequests, reopen };
+}
+
+test('MultiMC private evidence enforces pre-seal and published runtime, without entering public DTOs', async t => {
+  const f = multimcServiceFixture(t); const preview = await f.service.preview({ clientId: 'one' });
+  assert.equal(Object.hasOwn(preview, 'runtimeConstraints'), false); assert.equal(Object.hasOwn(preview, 'contentFormat'), false);
+  const result = await f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} });
+  assert.equal(result.verified, true); assert.equal(f.verifiedRequests.length, 2);
+  assert.notEqual(f.verifiedRequests[0].clientPath, f.live); assert.equal(f.verifiedRequests[1].clientPath, f.live);
+  assert.deepEqual(f.verifiedRequests.map(request => request.runtimeConstraints), [{ lwjglVersion: '3.3.1' }, { lwjglVersion: '3.3.1' }]);
+  const manifest = await f.dependencies.stateStore.read(f.live);
+  assert.equal(manifest.schemaVersion, 2); assert.deepEqual(manifest.runtimeConstraints, { lwjglVersion: '3.3.1' });
+  assert.equal(Object.hasOwn(result, 'runtimeConstraints'), false);
+});
+
+test('MultiMC mismatch in real prepared runtime refuses before sealing or publication', async t => {
+  const f = multimcServiceFixture(t); const prepare = f.dependencies.runtimeInstaller.prepare.bind(f.dependencies.runtimeInstaller);
+  f.dependencies.runtimeInstaller.prepare = async request => { const result = await prepare(request); writeInertRuntime(request.clientPath, '3.3.2'); return result; };
+  const preview = await f.service.preview({ clientId: 'one' }); let sealed = false;
+  const seal = f.transaction.seal.bind(f.transaction); f.transaction.seal = async context => { sealed = true; return seal(context); };
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'RUNTIME_INCOMPLETE' });
+  assert.equal(sealed, false); assert.equal(await f.dependencies.stateStore.read(f.live), null);
+  assert.equal(fs.existsSync(path.join(f.live, 'mods/pack.jar')), false);
+});
+
+test('persisted null LWJGL evidence imposes no stale Forge constraint after service restart', async t => {
+  const f = multimcServiceFixture(t); f.evidence.runtimeConstraints = { lwjglVersion: null };
+  const preview = await f.service.preview({ clientId: 'one' }); await f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} });
+  const manifest = await f.dependencies.stateStore.read(f.live); assert.equal(manifest.schemaVersion, 2); assert.deepEqual(manifest.runtimeConstraints, { lwjglVersion: null });
+  await f.service.dispose(); const fresh = f.reopen(); writeInertRuntime(f.live, '3.3.2');
+  assert.equal((await fresh.verify({ clientId: 'one' })).verified, true);
+  assert.equal((await fresh.getLaunchAuthority({ clientId: 'one' })).profileId, '1.20.1-forge-47.3.12');
+});
+
+test('fresh MultiMC service Verify and launch enforce persisted constraints after hash-valid library replacement', async t => {
+  const f = multimcServiceFixture(t); const preview = await f.service.preview({ clientId: 'one' });
+  await f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }); await f.service.dispose();
+  const fresh = f.reopen(); assert.equal(fresh.plans.size, 0);
+  assert.equal((await fresh.verify({ clientId: 'one' })).verified, true);
+  assert.equal((await fresh.getLaunchAuthority({ clientId: 'one' })).profileId, '1.20.1-forge-47.3.12');
+  writeInertRuntime(f.live, '3.3.2');
+  assert.equal((await fresh.verify({ clientId: 'one' })).status, 'runtime-incomplete');
+  await assert.rejects(fresh.getLaunchAuthority({ clientId: 'one' }), { code: 'RUNTIME_INCOMPLETE' });
+  assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'settings');
+});
+
+for (const mutation of ['missing', 'malformed']) test(`fresh MultiMC service refuses ${mutation} schema2 evidence for Verify and launch`, async t => {
+  const f = multimcServiceFixture(t); const preview = await f.service.preview({ clientId: 'one' });
+  await f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} });
+  const file = path.join(f.live, '.minecraft-core-client-pack.json'); const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+  value.schemaVersion = 2; value.contentFormat = 'multimc';
+  if (mutation === 'missing') delete value.runtimeConstraints; else value.runtimeConstraints = {};
+  fs.writeFileSync(file, JSON.stringify(value)); const fresh = f.reopen();
+  assert.equal((await fresh.verify({ clientId: 'one' })).status, 'recovery-required');
+  await assert.rejects(fresh.getLaunchAuthority({ clientId: 'one' }), { code: 'RECOVERY_REQUIRED' });
+});
+
+for (const boundary of ['ready', 'first-rename', 'second-rename']) test(`fresh service recovery retains MultiMC requirements after interrupted ${boundary}`, async t => {
+  const f = multimcServiceFixture(t); const preview = await f.service.preview({ clientId: 'one' });
+  const durableFs = f.transaction.durableFs; let moves = 0;
+  f.transaction.durableFs = { ...durableFs, async renameDurableAsync(a, b) {
+    if (boundary === 'ready' && moves === 0) throw Error('inert ready interruption');
+    await durableFs.renameDurableAsync(a, b); moves++;
+    if (moves === (boundary === 'first-rename' ? 1 : 2)) throw Error('inert publication interruption');
+  } };
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'RECOVERY_REQUIRED' });
+  f.transaction.durableFs = durableFs; await f.service.dispose(); const fresh = f.reopen();
+  assert.equal((await fresh.recover({ clientId: 'one' })).phase, 'committed');
+  assert.equal((await fresh.verify({ clientId: 'one' })).verified, true);
+  writeInertRuntime(f.live, '3.3.2');
+  assert.equal((await fresh.verify({ clientId: 'one' })).status, 'runtime-incomplete');
+  await assert.rejects(fresh.getLaunchAuthority({ clientId: 'one' }), { code: 'RUNTIME_INCOMPLETE' });
+});
+
+test('changing MultiMC companion artifact invalidates retained review before stage', async t => {
+  const f = multimcServiceFixture(t); const preview = await f.service.preview({ clientId: 'one' });
+  f.external.requirement = { ...f.external.requirement, artifactSha256: 'c'.repeat(64), source: { ...f.external.requirement.source, assetId: '4' } };
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'PLAN_STALE' });
+  assert.equal(await f.transaction.status(f.target), null); assert.equal(await f.dependencies.stateStore.read(f.live), null);
+});
 function sessionFixture(t) {
   const f = fixture(t);
   const configFile = path.join(f.live, 'client-config.json');

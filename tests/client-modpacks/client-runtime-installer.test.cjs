@@ -23,6 +23,77 @@ function fixture(t) {
   put('java/java-17/jdk/release', 'JAVA_VERSION="17.0.16"\nOS_NAME="Windows"\nOS_ARCH="amd64"\n');
   return { root, put, profile, base };
 }
+function libraryFixture(f, name, extra = {}) {
+  const [coordinate, extension = 'jar'] = name.split('@'); const [group, artifact, version, classifier] = coordinate.split(':');
+  const location = `${group.replaceAll('.', '/')}/${artifact}/${version}/${artifact}-${version}${classifier ? `-${classifier}` : ''}.${extension}`;
+  const bytes = `inert ${name}`;
+  f.put(`libraries/${location}`, bytes);
+  return { name, downloads: { artifact: { path: location, url: 'https://example.invalid/library', size: Buffer.byteLength(bytes),
+    sha1: crypto.createHash('sha1').update(bytes).digest('hex') } }, ...extra };
+}
+function nativeFixture(f, name) {
+  const native = libraryFixture(f, `${name}:natives-windows`);
+  return { name, natives: { windows: 'natives-windows' }, downloads: { classifiers: { 'natives-windows': native.downloads.artifact } } };
+}
+function saveProfiles(f) {
+  f.put('versions/1.20.1/1.20.1.json', f.base); f.put(`versions/${profileId}/${profileId}.json`, f.profile);
+}
+
+for (const form of ['implicit-jar', 'explicit-jar', 'core-with-native', 'excluded-other-version']) {
+  test(`MultiMC parsed effective LWJGL accepts ${form}`, async t => {
+    const f = fixture(t);
+    f.base.libraries = [libraryFixture(f, `org.lwjgl:lwjgl:3.3.1${form === 'explicit-jar' ? '@jar' : ''}`), libraryFixture(f, 'org.lwjgl:lwjgl-glfw:3.3.1')];
+    if (form === 'core-with-native') f.base.libraries.push(nativeFixture(f, 'org.lwjgl:lwjgl:3.3.1'), libraryFixture(f, 'org.lwjgl:lwjgl-glfw:3.3.1:natives-windows'));
+    if (form === 'excluded-other-version') f.profile.libraries.push(libraryFixture(f, 'org.lwjgl:lwjgl-glfw:3.3.2', { rules: [{ action: 'allow', os: { name: 'linux' } }] }));
+    saveProfiles(f);
+    assert.equal((await require(modulePath).verifyClientRuntime({ clientPath: f.root, runtime, runtimeConstraints: { lwjglVersion: '3.3.1' } })).verified, true);
+  });
+}
+for (const mutation of ['missing-core', 'wrong-core', 'mixed-module', 'mixed-native', 'classified-core-only', 'legacy-native-core-only', 'nonjar-core-only', 'excluded-core', 'inherited-shadow']) {
+  test(`MultiMC parsed effective LWJGL refuses ${mutation} despite valid file hashes`, async t => {
+    const f = fixture(t); f.base.libraries = [libraryFixture(f, 'org.lwjgl:lwjgl:3.3.1'), libraryFixture(f, 'org.lwjgl:lwjgl-glfw:3.3.1')];
+    if (mutation === 'missing-core') f.base.libraries.shift();
+    if (mutation === 'wrong-core') f.base.libraries[0] = libraryFixture(f, 'org.lwjgl:lwjgl:3.3.2');
+    if (mutation === 'mixed-module') f.base.libraries[1] = libraryFixture(f, 'org.lwjgl:lwjgl-glfw:3.3.2');
+    if (mutation === 'mixed-native') f.base.libraries.push(nativeFixture(f, 'org.lwjgl:lwjgl:3.3.2'));
+    if (mutation === 'classified-core-only') f.base.libraries[0] = libraryFixture(f, 'org.lwjgl:lwjgl:3.3.1:natives-windows');
+    if (mutation === 'legacy-native-core-only') f.base.libraries[0] = nativeFixture(f, 'org.lwjgl:lwjgl:3.3.1');
+    if (mutation === 'nonjar-core-only') f.base.libraries[0] = libraryFixture(f, 'org.lwjgl:lwjgl:3.3.1@zip');
+    if (mutation === 'excluded-core') f.base.libraries[0].rules = [{ action: 'disallow', os: { name: 'windows' } }];
+    if (mutation === 'inherited-shadow') f.profile.libraries.push(libraryFixture(f, 'org.lwjgl:lwjgl:3.3.2'));
+    saveProfiles(f);
+    await assert.rejects(require(modulePath).verifyClientRuntime({ clientPath: f.root, runtime, runtimeConstraints: { lwjglVersion: '3.3.1' } }), { code: 'RUNTIME_INCOMPLETE' });
+  });
+}
+for (const form of ['implicit-jar', 'explicit-jar', 'missing', 'wrong-version', 'classified', 'legacy-native', 'nonjar', 'excluded', 'shadowed']) {
+  test(`MultiMC Fabric parsed intermediary ${form}`, async t => {
+    const f = fixture(t); const fabricRuntime = { ...runtime, loaderFamily: 'fabric', loaderVersion: '0.16.14' };
+    f.profile.libraries = [libraryFixture(f, 'net.fabricmc:fabric-loader:0.16.14')];
+    const name = form === 'wrong-version' || form === 'shadowed' ? 'net.fabricmc:intermediary:1.20.2' :
+      `net.fabricmc:intermediary:1.20.1${form === 'explicit-jar' ? '@jar' : form === 'classified' ? ':natives-windows' : form === 'nonjar' ? '@zip' : ''}`;
+    if (form !== 'missing') f.profile.libraries.push(form === 'legacy-native' ? nativeFixture(f, name) : libraryFixture(f, name,
+      form === 'excluded' ? { rules: [{ action: 'disallow', os: { name: 'windows' } }] } : {}));
+    if (form === 'shadowed') f.base.libraries = [libraryFixture(f, 'net.fabricmc:intermediary:1.20.1')];
+    saveProfiles(f);
+    const request = { clientPath: f.root, runtime: fabricRuntime, runtimeConstraints: { lwjglVersion: null } };
+    if (['implicit-jar', 'explicit-jar'].includes(form)) assert.equal((await require(modulePath).verifyClientRuntime(request)).verified, true);
+    else await assert.rejects(require(modulePath).verifyClientRuntime(request), { code: 'RUNTIME_INCOMPLETE' });
+  });
+}
+test('undefined legacy and explicit null LWJGL add no Forge or vanilla constraints', async t => {
+  for (const family of ['forge', 'vanilla']) {
+    const f = fixture(t); const selectedRuntime = family === 'forge' ? runtime : { ...runtime, loaderFamily: 'vanilla', loaderVersion: '1.20.1' };
+    for (const runtimeConstraints of [undefined, { lwjglVersion: null }]) {
+      assert.equal((await require(modulePath).verifyClientRuntime({ clientPath: f.root, runtime: selectedRuntime, runtimeConstraints })).verified, true);
+    }
+  }
+});
+test('common verifier refuses every malformed supplied constraint instead of ignoring evidence', async t => {
+  const f = fixture(t);
+  for (const runtimeConstraints of [null, {}, [], { lwjglVersion: undefined }, { lwjglVersion: 'latest' }, { lwjglVersion: null, extra: 1 }]) {
+    await assert.rejects(require(modulePath).verifyClientRuntime({ clientPath: f.root, runtime, runtimeConstraints }), { code: 'RUNTIME_INCOMPLETE' });
+  }
+});
 test('runtime adapter is available without loading native or network runtime dependencies', () => {
   assert.equal(fs.existsSync(path.resolve(__dirname, modulePath)), true, 'runtime adapter must exist');
   assert.equal(typeof require(modulePath).ClientRuntimeInstaller, 'function');

@@ -4,6 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { normalizeRuntimeTuple } = require('../modpacks/contracts.cjs');
 const { waitForRuntimeWorkerQuiescence } = require('../runtime-worker-quiescence.cjs');
+const { assertRuntimeConstraints } = require('./client-runtime-constraints.cjs');
 
 function failure(code = 'RUNTIME_INCOMPLETE') {
   if (!['RUNTIME_INCOMPLETE', 'UNSUPPORTED_LOADER', 'CANCELLED', 'LOADER_VERSION_REQUIRED', 'LOADER_VERSION_UNAVAILABLE'].includes(code)) code = 'RUNTIME_INCOMPLETE';
@@ -130,7 +131,7 @@ function findJava(root, runtime) {
   if (candidates.length !== 1) throw failure();
   return candidates[0];
 }
-async function verifyClientRuntime({ clientPath, runtime: input }) {
+async function verifyClientRuntime({ clientPath, runtime: input, runtimeConstraints }) {
   const runtime = normalizeClientRuntime(input);
   try {
     safePath(clientPath, '', true);
@@ -140,6 +141,7 @@ async function verifyClientRuntime({ clientPath, runtime: input }) {
     const resolved = await Version.parse(clientPath, profileId, { name: 'windows', arch: 'x64', version: '' });
     if (resolved.minecraftVersion !== runtime.minecraftVersion || resolved.libraries.length > 10000) throw failure();
     assertEffectiveLoader(resolved.libraries, runtime);
+    assertRuntimeConstraints(resolved.libraries, runtime, runtimeConstraints);
     await verifyFile(clientPath, `versions/${runtime.minecraftVersion}/${runtime.minecraftVersion}.jar`, base.downloads?.client);
     for (const library of resolved.libraries) {
       if (relative(library.download.path) !== relative(library.path)) throw failure();

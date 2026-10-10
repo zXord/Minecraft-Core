@@ -29,6 +29,56 @@ function fixture(t) {
   return { state, integration, target, reservation, write: () => ++state.writes };
 }
 
+function realManagedFixture(t, coreForm) {
+  const f = fixture(t); const root = f.target.clientPath; const crypto = require('node:crypto');
+  const { ClientPackStateStore } = require('../../electron/services/client-modpacks/client-pack-state.cjs');
+  const { ClientPackService } = require('../../electron/services/client-modpacks/client-pack-service.cjs');
+  const { ClientRuntimeInstaller } = require('../../electron/services/client-modpacks/client-runtime-installer.cjs');
+  const runtime = { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.4.13', javaMajor: 17, os: 'win32', architecture: 'x64' };
+  const descriptor = { schemaVersion: 1, status: 'ready', serverFingerprint: 'a'.repeat(64), serverVersion: 'v1', artifactSha256: 'b'.repeat(64), runtime,
+    source: { provider: 'github', repositoryId: '1', githubOwner: 'Example', githubRepo: 'Pack', releaseId: '2', assetId: '3' } };
+  const put = (name, value) => { const file = path.join(root, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof value === 'string' ? value : JSON.stringify(value)); };
+  const lib = name => {
+    const [body, extension = 'jar'] = name.split('@'); const [group, artifact, version, classifier] = body.split(':');
+    const relative = `${group.replaceAll('.', '/')}/${artifact}/${version}/${artifact}-${version}${classifier ? `-${classifier}` : ''}.${extension}`;
+    const bytes = `inert ${name}`; put(`libraries/${relative}`, bytes);
+    return { name, downloads: { artifact: { path: relative, size: bytes.length, sha1: crypto.createHash('sha1').update(bytes).digest('hex'), url: 'https://example.invalid/library' } } };
+  };
+  let core = lib(`org.lwjgl:lwjgl:3.3.1${coreForm === 'explicit-jar' ? '@jar' : coreForm === 'classified' || coreForm === 'legacy-native' ? ':natives-windows' : coreForm === 'nonjar' ? '@zip' : ''}`);
+  if (coreForm === 'legacy-native') core = { name: 'org.lwjgl:lwjgl:3.3.1', natives: { windows: 'natives-windows' }, downloads: { classifiers: { 'natives-windows': core.downloads.artifact } } };
+  put('versions/1.20.1/1.20.1.json', { id: '1.20.1', type: 'release', mainClass: 'net.minecraft.client.main.Main', javaVersion: { majorVersion: 17 },
+    time: '2023-06-12T13:25:51+00:00', releaseTime: '2023-06-12T13:25:51+00:00', arguments: { game: [], jvm: [] }, libraries: [core], assetIndex: { id: '5' } });
+  put('versions/1.20.1/1.20.1.jar', 'inert client'); put('assets/indexes/5.json', '{"objects":{}}');
+  put('versions/forge/forge.json', { id: 'forge', inheritsFrom: '1.20.1', mainClass: 'cpw.mods.bootstraplauncher.BootstrapLauncher',
+    arguments: { game: [], jvm: [] }, libraries: [lib('net.minecraftforge:fmlloader:1.20.1-47.4.13')] });
+  put('java/java-17/jdk/release', 'JAVA_VERSION="17.0.16"\nOS_NAME="Windows"\nOS_ARCH="amd64"\n');
+  put('java/java-17/jdk/bin/javaw.exe', 'inert never launched'); put('java/java-17/jdk/bin/server/jvm.dll', 'inert jvm');
+  put('.minecraft-core-client-pack.json', { schemaVersion: 2, descriptor, entries: [], optionalFileIds: [], contentFormat: 'multimc', runtimeConstraints: { lwjglVersion: '3.3.1' } });
+  const stateStore = new ClientPackStateStore({ durableFs: { readFileBoundedAsync: file => fs.promises.readFile(file) } });
+  const forbidden = () => { throw Error('unexpected fixture mutation/acquisition'); };
+  const transaction = Object.fromEntries(['stage', 'seal', 'publish', 'abandon', 'recover', 'cleanup', 'candidatePathFor'].map(key => [key, forbidden])); transaction.status = async () => null;
+  const managementClient = { async readRequirement() { return { descriptor, binding: f.state.binding }; }, async getLaunchConnection() { return { serverIp: 'saved.example', serverPort: 25575 }; } };
+  const service = new ClientPackService({ resolveClient: async () => f.target, managementClient, stateStore, transaction,
+    processGuard: { withMutation: forbidden }, runtimeInstaller: new ClientRuntimeInstaller(), candidatePreparer: Object.fromEntries(['inspect', 'prepare', 'release', 'forgetInspection'].map(key => [key, forbidden])),
+    sourceResolver: { resolveArtifactSetPlan: forbidden }, artifactAcquisition: { downloadSet: forbidden },
+    archiveInspector: { inspectArchive: forbidden, materializer: { workspaceRegistry: { releaseOwner: forbidden } } }, reparseInspector: { async isReparsePoint() { return false; } } });
+  t.after(() => service.dispose());
+  const integration = createClientPackIntegration({ resolveClient: async () => f.target, resolveClientByPath: async () => f.target,
+    processGuard: { async beginLaunch() { f.state.held = true; return f.reservation; } }, transaction, stateStore, managementClient, clientPackService: service });
+  return { ...f, integration };
+}
+
+for (const coreForm of ['implicit-jar', 'explicit-jar', 'classified', 'legacy-native', 'nonjar']) {
+  test(`managed launch uses real parsed persisted LWJGL evidence for ${coreForm}`, async t => {
+    const f = realManagedFixture(t, coreForm);
+    if (['implicit-jar', 'explicit-jar'].includes(coreForm)) {
+      const launch = await f.integration.beginManagedLaunch({ clientPath: f.target.clientPath });
+      assert.equal(launch.authority.profileId, 'forge'); await launch.abortBeforeSpawn();
+    } else await assert.rejects(f.integration.beginManagedLaunch({ clientPath: f.target.clientPath }), { code: 'RUNTIME_INCOMPLETE' });
+    assert.equal(f.state.held, false);
+  });
+}
+
 for (const status of ['ready', 'unpaired']) test(`legacy content writer refuses authenticated ${status} even with no local manifest`, async t => {
   const f = fixture(t); f.state.requirement = { status };
   await assert.rejects(f.integration.runLegacyMutation({ clientId: 'client-a' }, f.write), { code: 'CLIENT_PACK_UNAVAILABLE' });
