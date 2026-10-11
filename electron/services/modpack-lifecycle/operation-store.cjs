@@ -1,12 +1,15 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { isDeepStrictEqual } = require('node:util');
 
 const { compactOperationIdFromRandomSource } = require('./operation-id.cjs');
 
 const { strictJsonClone } = require('../../utils/durable-fs.cjs');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { normalizeFailureDiagnostic } = require('./publication-failure-diagnostic.cjs');
+const { normalizeRecoveryTargetPath } = require('./recovery-target-envelope.cjs');
+const { isSafeWindowsBasename } = require('../modpacks/windows-basename.cjs');
 
 const JOB_TYPE = 'minecraft-core-modpack-job';
 const JOB_SCHEMA_VERSION = 1;
@@ -57,6 +60,10 @@ const RECORD_KEYS = Object.freeze([
   'type', 'schemaVersion', 'sequence', 'jobId', 'operationKind', 'serverId', 'planFingerprint', 'phase', 'swapStep',
   'progress', 'cancellationRequested', 'createdAt', 'updatedAt', 'terminalAt', 'outcome', 'events', 'checksum'
 ]);
+const PUBLIC_KEYS = Object.freeze(RECORD_KEYS.filter(key => key !== 'checksum'));
+const BINDING_KEYS = Object.freeze(['planId', 'planFingerprint', 'instanceId', 'targetPath',
+  'capturedReservation', 'displayName', 'destinationDisposition']);
+const LAUNCH_PLAN_ID = /^plan-launch-v1-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const EVENT_KEYS = Object.freeze([
   'sequence', 'jobId', 'channel', 'phase', 'timestamp', 'message', 'progress', 'currentItem', 'details'
 ]);
@@ -232,7 +239,82 @@ function normalizeNewEvent(value, { jobId, phase, sequence, timestamp: eventTime
 }
 
 function checksumPayload(record) {
-  return Object.fromEntries(RECORD_KEYS.filter(key => key !== 'checksum').map(key => [key, record[key]]));
+  const keys = record.schemaVersion === 2 ? [...PUBLIC_KEYS, 'launchBinding'] : PUBLIC_KEYS;
+  return Object.fromEntries(keys.map(key => [key, record[key]]));
+}
+
+function normalizeBinding(value, record, { stored = false, creating = false } = {}) {
+  const descriptors = strictObject(value, BINDING_KEYS);
+  const binding = Object.fromEntries(BINDING_KEYS.map(key => [key, descriptors[key].value]));
+  if (!NEW_SERVER_OPERATION_KINDS.has(record.operationKind) || typeof binding.planId !== 'string' ||
+      !LAUNCH_PLAN_ID.test(binding.planId) || typeof binding.planFingerprint !== 'string' ||
+      !SHA256.test(binding.planFingerprint) || binding.planFingerprint !== record.planFingerprint ||
+      identifier(binding.instanceId) !== record.serverId ||
+      !['held', 'released', 'consumed'].includes(binding.destinationDisposition) ||
+      (creating && binding.destinationDisposition !== 'held')) throw invalid();
+  const targetPath = normalizeRecoveryTargetPath(binding.targetPath);
+  if (typeof binding.displayName !== 'string') throw invalid();
+  const displayName = binding.displayName.normalize('NFC').trim();
+  if (displayName.length < 1 || displayName.length > 128 || !isSafeWindowsBasename(displayName) ||
+      /\p{Cc}/u.test(displayName) ||
+      (stored && (targetPath !== binding.targetPath || displayName !== binding.displayName))) throw invalid();
+  const capture = binding.capturedReservation;
+  // Examine descriptors before reading even the discriminant; getters are never executed.
+  const captureDescriptors = strictObject(capture, ['kind', 'identity'], ['kind']);
+  const kind = captureDescriptors.kind.value;
+  if (kind === 'absent') {
+    strictObject(capture, ['kind']);
+    binding.capturedReservation = { kind };
+  } else if (kind === 'empty-directory') {
+    strictObject(capture, ['kind', 'identity']);
+    const identityDescriptors = strictObject(captureDescriptors.identity.value, ['dev', 'ino', 'birthtimeNs']);
+    const identity = {};
+    for (const key of ['dev', 'ino', 'birthtimeNs']) {
+      const part = identityDescriptors[key].value;
+      const pattern = key === 'birthtimeNs' ? /^(?:0|-?[1-9][0-9]*)$/ : /^(?:0|[1-9][0-9]*)$/;
+      if (typeof part !== 'string' || part.length > 128 || !pattern.test(part)) throw invalid();
+      identity[key] = part;
+    }
+    binding.capturedReservation = { kind, identity };
+  } else throw invalid();
+  return { ...binding, targetPath, displayName };
+}
+
+function revision(value) {
+  const descriptors = strictObject(value, ['sequence', 'sha256']);
+  const sequence = descriptors.sequence.value;
+  const sha256 = descriptors.sha256.value;
+  if (!Number.isSafeInteger(sequence) || sequence < 0 || typeof sha256 !== 'string' || !SHA256.test(sha256)) throw invalid();
+  return { sequence, sha256 };
+}
+
+function terminalUpdate(value) {
+  const descriptors = strictObject(value, ['expectedPhase', 'nextPhase', 'patch']);
+  const expectedPhase = descriptors.expectedPhase.value;
+  const nextPhase = descriptors.nextPhase.value;
+  if (!JOB_PHASE_SET.has(expectedPhase) || !['failed', 'cancelled'].includes(nextPhase)) throw invalid();
+  const patchDescriptors = strictObject(descriptors.patch.value, ['progress', 'swapStep', 'outcome'], ['outcome']);
+  const patch = { outcome: normalizeOutcome(patchDescriptors.outcome.value, nextPhase) };
+  if (patchDescriptors.progress) patch.progress = normalizeProgress(patchDescriptors.progress.value);
+  if (patchDescriptors.swapStep) {
+    const value = patchDescriptors.swapStep.value;
+    if (value !== null && (typeof value !== 'string' || !SWAP_STEP.test(value))) throw invalid();
+    patch.swapStep = value;
+  }
+  return { expectedPhase, nextPhase, patch };
+}
+
+function hasTerminalUpdate(record, update) {
+  return record.phase === update.nextPhase && record.terminalAt !== null &&
+    Object.entries(update.patch).every(([key, value]) => isDeepStrictEqual(record[key], value));
+}
+
+function interruptedUpdate(kind) {
+  return { expectedPhase: 'queued', nextPhase: 'failed', patch: {
+    outcome: { status: 'failed', message: 'The operation was interrupted before execution',
+      errorCode: 'COMMIT_FAILED', operationKind: kind, actions: [] },
+    progress: { percent: 100, message: 'Interrupted before execution', currentItem: null }
+  } };
 }
 
 function checksumFor(record) {
@@ -245,7 +327,9 @@ function secureEqual(left, right) {
 }
 
 function normalizeRecord(value) {
-  const descriptors = strictObject(value, RECORD_KEYS);
+  const versionDescriptor = Object.getOwnPropertyDescriptor(value, 'schemaVersion');
+  const storageVersion = versionDescriptor?.value;
+  const descriptors = strictObject(value, storageVersion === 2 ? [...RECORD_KEYS, 'launchBinding'] : RECORD_KEYS);
   const sequence = descriptors.sequence.value;
   const phase = descriptors.phase.value;
   const swapStep = descriptors.swapStep.value;
@@ -253,7 +337,7 @@ function normalizeRecord(value) {
   const cancellationRequested = descriptors.cancellationRequested.value;
   const terminalAt = descriptors.terminalAt.value;
   const rawEvents = descriptors.events.value;
-  if (descriptors.type.value !== JOB_TYPE || descriptors.schemaVersion.value !== JOB_SCHEMA_VERSION ||
+  if (descriptors.type.value !== JOB_TYPE || ![1, 2].includes(storageVersion) ||
       !Number.isSafeInteger(sequence) || sequence < 0 || !JOB_PHASE_SET.has(phase) ||
       (swapStep !== null && (typeof swapStep !== 'string' || !SWAP_STEP.test(swapStep))) ||
       (planFingerprint !== null && (typeof planFingerprint !== 'string' || !SHA256.test(planFingerprint))) ||
@@ -270,7 +354,7 @@ function normalizeRecord(value) {
   if (events.some(event => event.sequence > sequence)) throw invalid();
   const record = {
     type: JOB_TYPE,
-    schemaVersion: JOB_SCHEMA_VERSION,
+    schemaVersion: storageVersion,
     sequence,
     jobId,
     operationKind: operationKind(descriptors.operationKind.value),
@@ -287,6 +371,7 @@ function normalizeRecord(value) {
     events,
     checksum: descriptors.checksum.value
   };
+  if (storageVersion === 2) record.launchBinding = normalizeBinding(descriptors.launchBinding.value, record, { stored: true });
   if (!secureEqual(record.checksum, checksumFor(record))) throw recoveryRequired();
   return record;
 }
@@ -315,25 +400,28 @@ function sameIdentity(left, right) {
 }
 
 function dto(record) {
-  const result = clone(record);
-  delete result.checksum;
+  const result = clone(Object.fromEntries(PUBLIC_KEYS.map(key => [key, key === 'schemaVersion' ? 1 : record[key]])));
   return deepFreeze(result);
 }
 
 // Public reads share the durable job contract without accepting a checksum as
 // renderer authority. This does not authenticate bytes; OperationStore.get does.
 function validatePublicJob(value) {
-  strictObject(value, RECORD_KEYS.filter(key => key !== 'checksum'));
+  const descriptors = strictObject(value, PUBLIC_KEYS);
+  if (descriptors.schemaVersion.value !== 1) throw invalid();
   return dto(normalizeRecord({ ...value, checksum: checksumFor(value) }));
 }
 
 class OperationStore {
-  constructor({ userDataPath, fsApi = fs, durableFs, clock = () => new Date(), randomUUID = crypto.randomUUID, eventSink = () => {} } = {}) {
+  constructor({ userDataPath, fsApi = fs, durableFs, clock = () => new Date(), randomUUID = crypto.randomUUID,
+    eventSink = () => {}, allowNewServerLaunchBindings = false, launchOwner = null } = {}) {
     if (typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath) || !fsApi || typeof fsApi !== 'object' ||
         !durableFs || typeof durableFs.readFileBounded !== 'function' || typeof durableFs.writeJsonAtomic !== 'function' ||
         typeof durableFs.writeJsonAtomicAsync !== 'function' ||
         typeof durableFs.flushDirectory !== 'function' || typeof clock !== 'function' || typeof randomUUID !== 'function' ||
-        typeof eventSink !== 'function') throw invalid();
+        typeof eventSink !== 'function' || typeof allowNewServerLaunchBindings !== 'boolean' ||
+        (launchOwner !== null && (typeof launchOwner !== 'object' || typeof launchOwner.assertCurrent !== 'function' ||
+          launchOwner.epoch === null || launchOwner.epoch === undefined))) throw invalid();
     this.userDataPath = path.resolve(userDataPath);
     if (this.userDataPath === path.parse(this.userDataPath).root) throw invalid();
     let userDataStat;
@@ -353,6 +441,9 @@ class OperationStore {
     this.operationsPath = path.join(this.rootPath, 'operations');
     this.pins = { userData: directoryIdentity(userDataStat), root: null, operations: null };
     this.activePublications = new Map();
+    this.publicationGeneration = 0;
+    this.allowNewServerLaunchBindings = allowNewServerLaunchBindings;
+    this.launchOwner = launchOwner;
     this.initialized = false;
   }
 
@@ -372,9 +463,10 @@ class OperationStore {
     return deepFreeze([...records.values()].map(dto));
   }
 
-  async create(request) {
+  async create(request, ownerEpoch = null, { onPublicationAttempt = null } = {}) {
     this.#assertInitialized();
-    const descriptors = strictObject(request, ['jobId', 'operationKind', 'serverId', 'planFingerprint'], ['operationKind', 'serverId']);
+    if (onPublicationAttempt !== null && typeof onPublicationAttempt !== 'function') throw invalid();
+    const descriptors = strictObject(request, ['jobId', 'operationKind', 'serverId', 'planFingerprint', 'launchBinding'], ['operationKind', 'serverId']);
     const jobId = descriptors.jobId === undefined ? this.#newJobId() : identifier(descriptors.jobId.value);
     const filePath = this.#recordPath(jobId);
     if (this.#entryExists(filePath) || this.records.has(jobId)) throw targetExists();
@@ -400,16 +492,41 @@ class OperationStore {
       events: [],
       checksum: ''
     };
-    record.checksum = checksumFor(record);
-    try {
-      this.#revalidateDirectories();
-      await this.durableFs.writeJsonAtomicAsync(filePath, record, { expectedTargetSha256: null });
-      this.#revalidateDirectories();
-    } catch (error) {
-      throw commitFailure(error);
+    if (descriptors.launchBinding !== undefined) {
+      if (!this.allowNewServerLaunchBindings) throw invalid();
+      this.#assertLaunchOwner(ownerEpoch);
+      record.schemaVersion = 2;
+      record.launchBinding = normalizeBinding(descriptors.launchBinding.value, record, { creating: true });
+      const catalogue = this.#scanLaunchCatalogue(ownerEpoch);
+      if (catalogue.some(loaded => loaded.record.launchBinding &&
+          (loaded.record.launchBinding.planId === record.launchBinding.planId ||
+           loaded.record.launchBinding.instanceId === record.launchBinding.instanceId))) throw targetExists();
     }
-    this.records.set(jobId, record);
-    return dto(record);
+    record.checksum = checksumFor(record);
+    this.#revalidateDirectories();
+    if (record.schemaVersion === 2) this.#assertLaunchOwner(ownerEpoch);
+    // All rejection preconditions precede this local attempt witness. It is not
+    // proof of durable publication; only an exact subsequent reread can be that.
+    const finishPublication = this.#beginPublication(jobId);
+    try {
+      try {
+        if (record.schemaVersion === 2 && onPublicationAttempt) onPublicationAttempt(deepFreeze({
+          job: dto(record), binding: clone(record.launchBinding), expectedTargetSha256: null
+        }));
+        if (record.schemaVersion === 2) this.#assertLaunchOwner(ownerEpoch);
+        await this.durableFs.writeJsonAtomicAsync(filePath, record, { expectedTargetSha256: null });
+        this.#revalidateDirectories();
+        if (record.schemaVersion === 2) this.#assertLaunchOwner(ownerEpoch, { allowClosing: true });
+      } catch (error) {
+        if (record.schemaVersion === 2) this.#assertLaunchOwner(ownerEpoch, { allowClosing: true });
+        if (error?.code === 'PLAN_STALE') throw stale(error);
+        throw commitFailure(error);
+      }
+      this.records.set(jobId, record);
+      return dto(record);
+    } finally {
+      finishPublication();
+    }
   }
 
   async get(jobId) {
@@ -439,6 +556,160 @@ class OperationStore {
 
   async load(jobId) {
     return this.get(jobId);
+  }
+
+  #assertLaunchOwner(ownerEpoch, options = {}) {
+    if (!this.launchOwner || ownerEpoch === null || ownerEpoch === undefined || ownerEpoch !== this.launchOwner.epoch) throw stale();
+    try { this.launchOwner.assertCurrent(ownerEpoch, options); }
+    catch (error) { throw stale(error); }
+  }
+
+  async getNewServerLaunch(jobId, ownerEpoch) {
+    this.#assertInitialized();
+    identifier(jobId);
+    this.#assertLaunchOwner(ownerEpoch, { allowClosing: true });
+    let loaded;
+    while (true) {
+      await this.#waitForActivePublications(jobId);
+      this.#assertLaunchOwner(ownerEpoch, { allowClosing: true });
+      try {
+        loaded = this.#read(jobId, { allowMissing: true });
+        break;
+      } catch (error) {
+        this.#assertLaunchOwner(ownerEpoch, { allowClosing: true });
+        if (!this.activePublications.has(jobId)) throw error;
+      }
+    }
+    this.#assertLaunchOwner(ownerEpoch, { allowClosing: true });
+    if (!loaded) return null;
+    if (loaded.record.schemaVersion !== 2) throw recoveryRequired();
+    return this.#launchRecord(loaded);
+  }
+
+  #launchRecord(loaded) {
+    return deepFreeze({ job: dto(loaded.record), binding: clone(loaded.record.launchBinding),
+      recordRevision: { sequence: loaded.record.sequence, sha256: loaded.sha256 } });
+  }
+
+  getLaunchPublicationState(ownerEpoch) {
+    this.#assertInitialized();
+    this.#assertLaunchOwner(ownerEpoch, { allowClosing: true });
+    return Object.freeze({ generation: this.publicationGeneration, pending: this.activePublications.size !== 0 });
+  }
+
+  #assertStableCatalogue(generation, ownerEpoch) {
+    this.#assertLaunchOwner(ownerEpoch);
+    if (this.activePublications.size !== 0 || generation !== this.publicationGeneration) throw stale();
+  }
+
+  #scanLaunchCatalogue(ownerEpoch) {
+    this.#assertInitialized();
+    const generation = this.publicationGeneration;
+    this.#assertStableCatalogue(generation, ownerEpoch);
+    const catalogue = [];
+    const plans = new Set();
+    const instances = new Set();
+    try {
+      for (const entry of this.fs.readdirSync(this.operationsPath, { withFileTypes: true })) {
+        if (!entry.isFile() || entry.isSymbolicLink()) throw recoveryRequired();
+        const match = /^([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\.json$/.exec(entry.name);
+        if (!match) throw recoveryRequired();
+        const loaded = this.#read(match[1], { allowMissing: false });
+        const binding = loaded.record.launchBinding;
+        if (binding) {
+          if (plans.has(binding.planId) || instances.has(binding.instanceId)) throw recoveryRequired();
+          plans.add(binding.planId);
+          instances.add(binding.instanceId);
+        }
+        catalogue.push(loaded);
+      }
+      this.#revalidateDirectories();
+    } catch (error) {
+      throw recoveryRequired(error);
+    } finally {
+      // A scan cannot certify even a negative result across a publication or
+      // owner change. This also takes precedence over a racing temporary file.
+      this.#assertStableCatalogue(generation, ownerEpoch);
+    }
+    return catalogue;
+  }
+
+  async findNewServerLaunch(request, ownerEpoch) {
+    const descriptors = strictObject(request, ['planId', 'planFingerprint']);
+    const planId = descriptors.planId.value;
+    const planFingerprint = descriptors.planFingerprint.value;
+    if (typeof planId !== 'string' || !LAUNCH_PLAN_ID.test(planId) || typeof planFingerprint !== 'string' || !SHA256.test(planFingerprint)) throw invalid();
+    const catalogue = this.#scanLaunchCatalogue(ownerEpoch);
+    const found = catalogue.find(loaded => loaded.record.launchBinding?.planId === planId);
+    if (!found) return null;
+    if (found.record.launchBinding.planFingerprint !== planFingerprint) throw invalid();
+    return this.#launchRecord(found);
+  }
+
+  async listNewServerLaunchBindings(ownerEpoch) {
+    return deepFreeze(this.#scanLaunchCatalogue(ownerEpoch).filter(loaded => loaded.record.schemaVersion === 2)
+      .map(loaded => this.#launchRecord(loaded)));
+  }
+
+  #checkRevision(loaded, expected) {
+    if (loaded.record.sequence !== expected.sequence || !secureEqual(loaded.sha256, expected.sha256)) throw stale();
+  }
+
+  async settleNewServerDestination(jobId, request, ownerEpoch) {
+    this.#assertInitialized();
+    identifier(jobId);
+    const descriptors = strictObject(request, ['expectedInstanceId', 'expectedRecordRevision', 'nextDisposition', 'terminalUpdate'],
+      ['expectedInstanceId', 'expectedRecordRevision', 'nextDisposition']);
+    const expectedInstanceId = identifier(descriptors.expectedInstanceId.value);
+    const expectedRevision = revision(descriptors.expectedRecordRevision.value);
+    const nextDisposition = descriptors.nextDisposition.value;
+    if (!['released', 'consumed'].includes(nextDisposition)) throw invalid();
+    const update = descriptors.terminalUpdate ? terminalUpdate(descriptors.terminalUpdate.value) : null;
+    if (update && nextDisposition !== 'released') throw invalid();
+    const assertOwner = () => this.#assertLaunchOwner(ownerEpoch, { allowClosing: true });
+    assertOwner();
+    const loaded = this.#read(jobId, { allowMissing: false });
+    assertOwner();
+    const record = loaded.record;
+    if (record.schemaVersion !== 2) throw recoveryRequired();
+    if (record.serverId !== expectedInstanceId || record.launchBinding.instanceId !== expectedInstanceId) throw stale();
+    if (record.launchBinding.destinationDisposition === nextDisposition) {
+      if (update && !hasTerminalUpdate(record, update)) throw recoveryRequired();
+      return dto(record);
+    }
+    if (record.launchBinding.destinationDisposition !== 'held') throw recoveryRequired();
+    this.#checkRevision(loaded, expectedRevision);
+    if (update && (record.phase !== update.expectedPhase || TERMINAL_PHASES.has(record.phase) ||
+        !isLegalJobTransition(record.phase, update.nextPhase, { operationKind: record.operationKind }))) throw stale();
+    const now = this.#now();
+    const candidate = { ...record, sequence: record.sequence + 1, updatedAt: now,
+      launchBinding: { ...record.launchBinding, destinationDisposition: nextDisposition } };
+    if (update) Object.assign(candidate, update.patch, { phase: update.nextPhase, terminalAt: now });
+    return this.#write(jobId, loaded.sha256, candidate, assertOwner);
+  }
+
+  async closeInterruptedQueued(jobId, request, ownerEpoch) {
+    this.#assertInitialized();
+    identifier(jobId);
+    const descriptors = strictObject(request, ['expectedInstanceId', 'expectedRecordRevision']);
+    const expectedInstanceId = identifier(descriptors.expectedInstanceId.value);
+    const expectedRevision = revision(descriptors.expectedRecordRevision.value);
+    const assertOwner = () => this.#assertLaunchOwner(ownerEpoch, { startupOnly: true });
+    assertOwner();
+    const loaded = this.#read(jobId, { allowMissing: false });
+    assertOwner();
+    const record = loaded.record;
+    if (!NEW_SERVER_OPERATION_KINDS.has(record.operationKind) || record.serverId !== expectedInstanceId) throw stale();
+    const update = interruptedUpdate(record.operationKind);
+    if (hasTerminalUpdate(record, update) && !record.cancellationRequested &&
+        (record.schemaVersion === 1 || record.launchBinding.destinationDisposition === 'released')) return dto(record);
+    if (record.phase !== 'queued' || record.cancellationRequested) throw stale();
+    this.#checkRevision(loaded, expectedRevision);
+    if (record.schemaVersion === 2 && record.launchBinding.destinationDisposition !== 'held') throw recoveryRequired();
+    const now = this.#now();
+    const candidate = { ...record, ...update.patch, phase: 'failed', terminalAt: now, updatedAt: now, sequence: record.sequence + 1 };
+    if (record.schemaVersion === 2) candidate.launchBinding = { ...record.launchBinding, destinationDisposition: 'released' };
+    return this.#write(jobId, loaded.sha256, candidate, assertOwner);
   }
 
   async transition(jobId, request) {
@@ -558,7 +829,7 @@ class OperationStore {
     return written;
   }
 
-  async #write(jobId, expectedSha256, candidateValue) {
+  async #write(jobId, expectedSha256, candidateValue, assertOwner = null) {
     const candidate = { ...candidateValue, checksum: '' };
     candidate.checksum = checksumFor(candidate);
     let normalized;
@@ -567,10 +838,17 @@ class OperationStore {
     const finishPublication = this.#beginPublication(jobId);
     try {
       try {
+        if (assertOwner) assertOwner();
         this.#revalidateDirectories();
+        if (assertOwner) assertOwner();
         await this.durableFs.writeJsonAtomicAsync(this.#recordPath(jobId), normalized, { expectedTargetSha256: expectedSha256 });
         this.#revalidateDirectories();
+        if (assertOwner) assertOwner();
       } catch (error) {
+        if (assertOwner) {
+          assertOwner();
+          if (error?.code === 'PLAN_STALE') throw stale(error);
+        }
         throw commitFailure(error);
       }
       this.records.set(jobId, normalized);
@@ -581,6 +859,7 @@ class OperationStore {
   }
 
   #beginPublication(jobId) {
+    this.publicationGeneration += 1;
     let resolvePublication;
     const publication = new Promise(resolve => { resolvePublication = resolve; });
     let active = this.activePublications.get(jobId);
@@ -590,6 +869,7 @@ class OperationStore {
     }
     active.add(publication);
     return () => {
+      this.publicationGeneration += 1;
       active.delete(publication);
       if (active.size === 0 && this.activePublications.get(jobId) === active) {
         this.activePublications.delete(jobId);

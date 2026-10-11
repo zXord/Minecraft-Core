@@ -11,6 +11,42 @@ function record(patch = {}) {
   };
 }
 
+test('launch reads and events never leak private metadata', async () => {
+  const published = []; const calls = [];
+  const envelope = { job: record(), binding: { targetPath: 'c:\\private\\target', capturedReservation: { kind: 'absent' } },
+    recordRevision: { sequence: 1, sha256: 'a'.repeat(64) } };
+  const state = { generation: 2, pending: false };
+  const safe = record(); const callback = () => {}; const options = { onPublicationAttempt: callback };
+  const underlying = {
+    async initialize() { return []; }, async create(...args) { calls.push(['create', ...args]); return safe; },
+    async get() { return safe; }, async load() { return safe; }, async transition() { return safe; },
+    async reconcileRecovery() { return safe; }, async updateProgress() { return safe; },
+    async requestCancellation() { return safe; }, async appendEvent() { return safe; },
+    getNewServerLaunch(...args) { calls.push(['get', ...args]); return envelope; },
+    findNewServerLaunch(...args) { calls.push(['find', ...args]); return envelope; },
+    listNewServerLaunchBindings(...args) { calls.push(['list', ...args]); return [envelope]; },
+    getLaunchPublicationState(...args) { calls.push(['state', ...args]); return state; },
+    async settleNewServerDestination(...args) { calls.push(['settle', ...args]); return safe; },
+    async closeInterruptedQueued(...args) { calls.push(['close', ...args]); return safe; }
+  };
+  const store = new OperationEventStore({ operationStore: underlying,
+    nativeNotificationBridge: { publishJobEvent(value) { published.push(value); } } });
+  const credential = { planId: 'test', planFingerprint: 'a'.repeat(64) };
+  assert.equal(await store.getNewServerLaunch('job-one', 'epoch'), envelope);
+  assert.equal(await store.findNewServerLaunch(credential, 'epoch'), envelope);
+  assert.deepEqual(await store.listNewServerLaunchBindings('epoch'), [envelope]);
+  assert.equal(store.getLaunchPublicationState('epoch'), state);
+  assert.equal(published.length, 0);
+  assert.equal(await store.create({ operationKind: 'install' }, 'epoch', options), safe);
+  assert.equal(await store.settleNewServerDestination('job-one', credential, 'epoch'), safe);
+  assert.equal(await store.closeInterruptedQueued('job-one', credential, 'epoch'), safe);
+  assert.deepEqual(calls, [['get', 'job-one', 'epoch'], ['find', credential, 'epoch'], ['list', 'epoch'],
+    ['state', 'epoch'], ['create', { operationKind: 'install' }, 'epoch', options],
+    ['settle', 'job-one', credential, 'epoch'], ['close', 'job-one', credential, 'epoch']]);
+  assert.equal(published.length, 3);
+  assert.doesNotMatch(JSON.stringify(published), /launchBinding|targetPath|capturedReservation|recordRevision|epoch|checksum/);
+});
+
 test('durable operation mutations publish only the returned safe transition and preserve exact results', async () => {
   const published = [];
   const appendedEvent = {

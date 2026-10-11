@@ -2,13 +2,15 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const test = require('node:test');
 
 const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
 const {
   JOB_PHASES,
   OperationStore,
-  isLegalJobTransition
+  isLegalJobTransition,
+  validatePublicJob
 } = require('../../electron/services/modpack-lifecycle/operation-store.cjs');
 
 const PHASES = [
@@ -43,7 +45,7 @@ const MUTATION_TRANSITIONS = {
   'rolling-back': ['rolled-back', 'recovery-required']
 };
 
-function fixture(t, { eventSink = () => {} } = {}) {
+function fixture(t, { eventSink = () => {}, allowNewServerLaunchBindings = false, launchOwner = null } = {}) {
   const userDataPath = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-operation-store-'));
   let tempNumber = 0;
   const durableFs = createDurableFs({
@@ -68,7 +70,9 @@ function fixture(t, { eventSink = () => {} } = {}) {
     durableFs,
     clock: () => new Date(now += 1000),
     randomUUID: () => `00000000-0000-4000-8000-${String(++id).padStart(12, '0')}`,
-    eventSink
+    eventSink,
+    allowNewServerLaunchBindings,
+    launchOwner
   };
   t.after(() => fs.rmSync(userDataPath, { recursive: true, force: true }));
   return { dependencies, store: new OperationStore(dependencies), userDataPath };
@@ -83,6 +87,451 @@ function job(overrides = {}) {
     ...overrides
   };
 }
+
+const PUBLIC_V1_KEYS = ['type', 'schemaVersion', 'sequence', 'jobId', 'operationKind', 'serverId',
+  'planFingerprint', 'phase', 'swapStep', 'progress', 'cancellationRequested', 'createdAt', 'updatedAt',
+  'terminalAt', 'outcome', 'events'];
+function ownerFixture() {
+  const owner = {
+    epoch: 'test-owner', lease: {}, state: 'starting',
+    assertCurrent(epoch, { allowClosing = false, startupOnly = false } = {}) {
+      if (epoch !== this.epoch || !this.lease || this.state === 'disposed' ||
+          (this.state === 'closing' && !allowClosing) || (startupOnly && this.state !== 'starting')) {
+        throw Object.assign(new Error('Owner changed'), { code: 'PLAN_STALE' });
+      }
+    }
+  };
+  return owner;
+}
+function binding(overrides = {}) {
+  return {
+    planId: 'plan-launch-v1-00000000-0000-4000-8000-000000000001', planFingerprint: 'a'.repeat(64),
+    instanceId: 'server-0001', targetPath: 'c:\\private\\new-server', capturedReservation: { kind: 'absent' },
+    displayName: 'New server', destinationDisposition: 'held', ...overrides
+  };
+}
+function launchJob(overrides = {}) { return job({ operationKind: 'install-new', launchBinding: binding(), ...overrides }); }
+function recordFile(store, jobId = 'job-0001') { return path.join(store.operationsPath, `${jobId}.json`); }
+function rewriteRecord(store, jobId, mutate) {
+  const value = JSON.parse(fs.readFileSync(recordFile(store, jobId), 'utf8'));
+  mutate(value);
+  const payload = Object.fromEntries([...PUBLIC_V1_KEYS, ...(value.schemaVersion === 2 ? ['launchBinding'] : [])]
+    .map(key => [key, value[key]]));
+  value.checksum = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  fs.writeFileSync(recordFile(store, jobId), `${JSON.stringify(value, null, 2)}\n`);
+}
+
+test('v2 launch storage preserves public v1 shape', async t => {
+  const launchOwner = ownerFixture();
+  const { store, dependencies } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+  await store.initialize();
+  const suppliedBinding = binding();
+  const publicJob = await store.create(launchJob({ launchBinding: suppliedBinding }), launchOwner.epoch);
+  const rawStored = JSON.parse(fs.readFileSync(recordFile(store), 'utf8'));
+  const privateRead = await store.getNewServerLaunch(publicJob.jobId, launchOwner.epoch);
+  assert.equal(publicJob.schemaVersion, 1);
+  assert.equal(rawStored.schemaVersion, 2);
+  assert.deepEqual(privateRead.binding, suppliedBinding);
+  assert.deepEqual(Object.keys(publicJob).sort(), PUBLIC_V1_KEYS.slice().sort());
+  assert.throws(() => validatePublicJob(rawStored));
+  assert.equal(JSON.stringify(publicJob).includes('launchBinding'), false);
+  assert.deepEqual(validatePublicJob(publicJob), publicJob);
+  assert.equal(privateRead.recordRevision.sha256, crypto.createHash('sha256').update(fs.readFileSync(recordFile(store))).digest('hex'));
+  const reloaded = new OperationStore(dependencies);
+  assert.deepEqual(await reloaded.initialize(), [publicJob]);
+  assert.deepEqual(await reloaded.get(publicJob.jobId), publicJob);
+  const readOnlyV2 = new OperationStore({ ...dependencies, allowNewServerLaunchBindings: false, launchOwner: null });
+  const bytesBeforeReload = fs.readFileSync(recordFile(store));
+  assert.deepEqual(await readOnlyV2.initialize(), [publicJob]);
+  assert.deepEqual(await readOnlyV2.get(publicJob.jobId), publicJob);
+  assert.deepEqual(fs.readFileSync(recordFile(store)), bytesBeforeReload);
+  await assert.rejects(readOnlyV2.getNewServerLaunch(publicJob.jobId, launchOwner.epoch), error => error.code === 'PLAN_STALE');
+});
+
+test('public v1 storage remains unchanged and launch binding creation is opt-in', async t => {
+  const { store, dependencies } = fixture(t);
+  await store.initialize();
+  await assert.rejects(store.create(launchJob()), error => error.code === 'INVALID_REQUEST');
+  const created = await store.create(job());
+  const before = fs.readFileSync(recordFile(store));
+  const raw = JSON.parse(before);
+  assert.equal(raw.schemaVersion, 1);
+  assert.deepEqual(Object.keys(raw), [...PUBLIC_V1_KEYS, 'checksum']);
+  assert.deepEqual(await new OperationStore(dependencies).initialize(), [created]);
+  assert.deepEqual(fs.readFileSync(recordFile(store)), before);
+});
+
+test('launch binding validates closed canonical identity without target filesystem access', async t => {
+  const launchOwner = ownerFixture();
+  const { store } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+  await store.initialize();
+  const malformed = [
+    { extra: true }, { planId: 'plan-old' }, { planId: 'plan-launch-v1-00000000-0000-1000-8000-000000000001' },
+    { planFingerprint: 'A'.repeat(64) }, { planFingerprint: 'b'.repeat(64) }, { instanceId: 'other' },
+    { instanceId: '../bad' }, { targetPath: 'C:\\' }, { targetPath: 'C:\\private\\..\\new-server' },
+    { destinationDisposition: 'released' }, { destinationDisposition: 'unknown' }, { displayName: 'CON' },
+    { displayName: 'Bad\nName' }, { displayName: 'Bad\u0085Name' }, { capturedReservation: { kind: 'existing-unmanaged-directory' } },
+    { capturedReservation: { kind: 'absent', extra: true } },
+    { capturedReservation: { kind: 'empty-directory' } },
+    { capturedReservation: { kind: 'empty-directory', identity: { dev: '1', ino: '2' } } },
+    { capturedReservation: { kind: 'empty-directory', identity: { dev: 1, ino: '2', birthtimeNs: '3' } } },
+    { capturedReservation: { kind: 'empty-directory', identity: { dev: '01', ino: '2', birthtimeNs: '3' } } },
+    { capturedReservation: { kind: 'empty-directory', identity: { dev: '1', ino: '-2', birthtimeNs: '3' } } },
+    { capturedReservation: { kind: 'empty-directory', identity: { dev: '1', ino: '2', birthtimeNs: '-0' } } },
+    { capturedReservation: { kind: 'empty-directory', identity: { dev: '1', ino: '2', birthtimeNs: '3', extra: '4' } } }
+  ];
+  for (const patch of malformed) {
+    await assert.rejects(store.create(launchJob({ launchBinding: binding(patch) }), launchOwner.epoch), error => error.code === 'INVALID_REQUEST');
+  }
+  for (const field of ['targetPath', 'capturedReservation']) {
+    const accessor = binding();
+    Object.defineProperty(accessor, field, { enumerable: true, get() { throw new Error('must not invoke accessor'); } });
+    await assert.rejects(store.create(launchJob({ launchBinding: accessor }), launchOwner.epoch), error => error.code === 'INVALID_REQUEST');
+  }
+  const symbolic = binding(); symbolic[Symbol('private')] = true;
+  await assert.rejects(store.create(launchJob({ launchBinding: symbolic }), launchOwner.epoch), error => error.code === 'INVALID_REQUEST');
+  for (const location of ['capture', 'identity']) {
+    const capturedReservation = { kind: 'empty-directory', identity: { dev: '1', ino: '2', birthtimeNs: '3' } };
+    const object = location === 'capture' ? capturedReservation : capturedReservation.identity;
+    object[Symbol('hidden')] = true;
+    await assert.rejects(store.create(launchJob({ launchBinding: binding({ capturedReservation }) }), launchOwner.epoch), error => error.code === 'INVALID_REQUEST');
+    delete object[Object.getOwnPropertySymbols(object)[0]];
+    Object.defineProperty(object, location === 'capture' ? 'kind' : 'dev', { enumerable: true,
+      get() { throw new Error('nested accessor must not execute'); } });
+    await assert.rejects(store.create(launchJob({ launchBinding: binding({ capturedReservation }) }), launchOwner.epoch), error => error.code === 'INVALID_REQUEST');
+  }
+  await assert.rejects(store.create(launchJob({ operationKind: 'verify' }), launchOwner.epoch), error => error.code === 'INVALID_REQUEST');
+  await assert.rejects(store.create(launchJob(), 'wrong-owner'), error => error.code === 'PLAN_STALE');
+  const capturedReservation = { kind: 'empty-directory', identity: { dev: '0', ino: '2', birthtimeNs: '-3' } };
+  await store.create(launchJob({ launchBinding: binding({ targetPath: 'C:/Private/New-Server/', displayName: ' New server ', capturedReservation }) }), launchOwner.epoch);
+  const exact = await store.getNewServerLaunch('job-0001', launchOwner.epoch);
+  assert.equal(exact.binding.targetPath, 'c:\\private\\new-server');
+  assert.equal(exact.binding.displayName, 'New server');
+  assert.deepEqual(exact.binding.capturedReservation, capturedReservation);
+  rewriteRecord(store, 'job-0001', value => { value.launchBinding.targetPath = 'C:\\private\\new-server'; });
+  await assert.rejects(store.get('job-0001'), error => error.code === 'RECOVERY_REQUIRED');
+  rewriteRecord(store, 'job-0001', value => { value.launchBinding.targetPath = 'c:\\private\\new-server'; });
+  const raw = JSON.parse(fs.readFileSync(recordFile(store))); raw.checksum = 'f'.repeat(64);
+  fs.writeFileSync(recordFile(store), JSON.stringify(raw));
+  await assert.rejects(store.get('job-0001'), error => error.code === 'RECOVERY_REQUIRED');
+});
+
+test('launch create is tracked through post-publication failure', async t => {
+  const launchOwner = ownerFixture();
+  const { dependencies } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+  let release; let started;
+  const gate = new Promise(resolve => { release = resolve; });
+  const begin = new Promise(resolve => { started = resolve; });
+  const store = new OperationStore({ ...dependencies, durableFs: { ...dependencies.durableFs,
+    async writeJsonAtomicAsync(...args) {
+      started(); await gate;
+      await dependencies.durableFs.writeJsonAtomicAsync(...args);
+      throw new Error('transport response lost after publication');
+    }
+  } });
+  await store.initialize();
+  const witnesses = [];
+  const creating = store.create(launchJob(), launchOwner.epoch, { onPublicationAttempt(value) { witnesses.push(value); } });
+  const rejected = assert.rejects(creating, error => error.code === 'COMMIT_FAILED');
+  await begin;
+  assert.deepEqual(store.getLaunchPublicationState(launchOwner.epoch), { generation: 1, pending: true });
+  assert.equal(witnesses.length, 1);
+  assert.equal(Object.isFrozen(witnesses[0]), true);
+  assert.equal(Object.isFrozen(witnesses[0].binding.capturedReservation), true);
+  assert.equal(witnesses[0].expectedTargetSha256, null);
+  let rereadDone = false;
+  const reread = store.getNewServerLaunch('job-0001', launchOwner.epoch).then(value => { rereadDone = true; return value; });
+  await Promise.resolve();
+  assert.equal(rereadDone, false);
+  await assert.rejects(store.findNewServerLaunch(binding(), launchOwner.epoch), error => error.code === 'INVALID_REQUEST');
+  await assert.rejects(store.listNewServerLaunchBindings(launchOwner.epoch), error => error.code === 'PLAN_STALE');
+  release(); await rejected;
+  assert.deepEqual(store.getLaunchPublicationState(launchOwner.epoch), { generation: 2, pending: false });
+  assert.equal(store.activePublications.size, 0);
+  assert.equal(store.records.size, 0);
+  const found = await reread;
+  assert.deepEqual(found.job, witnesses[0].job);
+  assert.deepEqual(found.binding, witnesses[0].binding);
+  assert.equal(found.job.sequence, 0);
+  const credential = { planId: binding().planId, planFingerprint: binding().planFingerprint };
+  assert.deepEqual(await store.findNewServerLaunch(credential, launchOwner.epoch), found);
+  await assert.rejects(store.create(launchJob(), launchOwner.epoch, { onPublicationAttempt(value) { witnesses.push(value); } }), error => error.code === 'TARGET_EXISTS');
+  await assert.rejects(store.create(launchJob({ jobId: 'different', launchBinding: binding({ destinationDisposition: 'released' }) }), launchOwner.epoch,
+    { onPublicationAttempt(value) { witnesses.push(value); } }), error => error.code === 'INVALID_REQUEST');
+  assert.equal(witnesses.length, 1);
+});
+
+test('launch create before-publication failure and owner loss never imply adoption', async t => {
+  const launchOwner = ownerFixture();
+  const { dependencies } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+  const store = new OperationStore({ ...dependencies, durableFs: { ...dependencies.durableFs,
+    async writeJsonAtomicAsync() { throw new Error('before publication'); }
+  } });
+  await store.initialize();
+  const witnesses = [];
+  await assert.rejects(store.create(launchJob(), launchOwner.epoch, { onPublicationAttempt: value => witnesses.push(value) }), error => error.code === 'COMMIT_FAILED');
+  assert.equal(witnesses.length, 1);
+  assert.equal(await store.getNewServerLaunch('job-0001', launchOwner.epoch), null);
+  assert.deepEqual(store.getLaunchPublicationState(launchOwner.epoch), { generation: 2, pending: false });
+  launchOwner.lease = null;
+  await assert.rejects(store.create(launchJob(), launchOwner.epoch, { onPublicationAttempt: value => witnesses.push(value) }), error => error.code === 'PLAN_STALE');
+  assert.equal(witnesses.length, 1);
+});
+
+test('launch lookup validates complete durable catalogue without resetting index', async t => {
+  const launchOwner = ownerFixture();
+  const { store } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+  await store.initialize(); await store.create(launchJob(), launchOwner.epoch); await store.create(job({ jobId: 'legacy' }));
+  const records = store.records; const content = [...records];
+  rewriteRecord(store, 'job-0001', value => { value.launchBinding.destinationDisposition = 'released'; value.sequence += 1; });
+  const credential = { planId: binding().planId, planFingerprint: binding().planFingerprint };
+  assert.equal((await store.findNewServerLaunch(credential, launchOwner.epoch)).binding.destinationDisposition, 'released');
+  assert.equal((await store.listNewServerLaunchBindings(launchOwner.epoch)).length, 1);
+  assert.equal(store.records, records); assert.deepEqual([...records], content);
+  await assert.rejects(store.findNewServerLaunch({ ...credential, planFingerprint: 'b'.repeat(64) }, launchOwner.epoch), error => error.code === 'INVALID_REQUEST');
+  await assert.rejects(store.getNewServerLaunch('legacy', launchOwner.epoch), error => error.code === 'RECOVERY_REQUIRED');
+  fs.writeFileSync(recordFile(store, 'legacy'), '{}');
+  await assert.rejects(store.findNewServerLaunch(credential, launchOwner.epoch), error => error.code === 'RECOVERY_REQUIRED');
+  await assert.rejects(store.listNewServerLaunchBindings(launchOwner.epoch), error => error.code === 'RECOVERY_REQUIRED');
+  assert.equal(store.records, records); assert.deepEqual([...records], content);
+});
+
+test('launch duplicate associations and changed generation never certify absence', async t => {
+  const launchOwner = ownerFixture();
+  const { store, dependencies } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+  await store.initialize(); await store.create(launchJob(), launchOwner.epoch);
+  const secondBinding = binding({ planId: 'plan-launch-v1-00000000-0000-4000-8000-000000000002', instanceId: 'server-0002' });
+  await assert.rejects(store.create(launchJob({ jobId: 'collision' }), launchOwner.epoch), error => error.code === 'TARGET_EXISTS');
+  await store.create(launchJob({ jobId: 'job-second', serverId: 'server-0002', launchBinding: secondBinding }), launchOwner.epoch);
+  for (const duplicate of ['plan', 'incarnation']) {
+    rewriteRecord(store, 'job-second', value => {
+      value.launchBinding.planId = duplicate === 'plan' ? binding().planId : secondBinding.planId;
+      value.launchBinding.planFingerprint = value.planFingerprint = 'b'.repeat(64);
+      value.launchBinding.instanceId = value.serverId = duplicate === 'incarnation' ? 'server-0001' : 'server-0002';
+    });
+    await assert.rejects(store.listNewServerLaunchBindings(launchOwner.epoch), error => error.code === 'RECOVERY_REQUIRED');
+  }
+  rewriteRecord(store, 'job-second', value => { value.launchBinding.instanceId = value.serverId = 'server-0002'; });
+  let startedWrite; let publication;
+  const racing = new OperationStore({ ...dependencies, durableFs: { ...dependencies.durableFs,
+    readFileBounded(...args) {
+      const bytes = dependencies.durableFs.readFileBounded(...args);
+      if (startedWrite) { const work = startedWrite; startedWrite = null; work(); }
+      return bytes;
+    }
+  } });
+  await racing.initialize();
+  startedWrite = () => { publication = racing.create(job({ jobId: 'racing-legacy' })); };
+  await assert.rejects(racing.findNewServerLaunch({ planId: 'plan-launch-v1-00000000-0000-4000-8000-000000000099', planFingerprint: 'a'.repeat(64) }, launchOwner.epoch), error => error.code === 'PLAN_STALE');
+  await publication;
+  startedWrite = () => { launchOwner.lease = null; };
+  await assert.rejects(racing.listNewServerLaunchBindings(launchOwner.epoch), error => error.code === 'PLAN_STALE');
+});
+
+test('launch disposition uses sequence and exact byte hash CAS', async t => {
+  const launchOwner = ownerFixture();
+  const { store } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+  await store.initialize(); await store.create(launchJob(), launchOwner.epoch);
+  let launch = await store.getNewServerLaunch('job-0001', launchOwner.epoch);
+  const settle = (revision, nextDisposition = 'released', extra = {}) => store.settleNewServerDestination('job-0001', {
+    expectedInstanceId: 'server-0001', expectedRecordRevision: revision, nextDisposition, ...extra
+  }, launchOwner.epoch);
+  const before = fs.readFileSync(recordFile(store));
+  await assert.rejects(settle({ ...launch.recordRevision, sequence: 1 }), error => error.code === 'PLAN_STALE');
+  await assert.rejects(settle({ ...launch.recordRevision, sha256: 'f'.repeat(64) }), error => error.code === 'PLAN_STALE');
+  await assert.rejects(settle(launch.recordRevision, 'released', { expectedInstanceId: 'old-incarnation' }), error => error.code === 'PLAN_STALE');
+  assert.deepEqual(fs.readFileSync(recordFile(store)), before);
+  const progress = { percent: 10, message: 'Preparing', currentItem: null };
+  await store.updateProgress('job-0001', { expectedPhase: 'queued', progress });
+  await store.appendEvent('job-0001', { channel: 'log', message: 'Preparing' });
+  await store.requestCancellation('job-0001');
+  launch = await store.getNewServerLaunch('job-0001', launchOwner.epoch);
+  assert.deepEqual(launch.binding, binding());
+  assert.equal(JSON.parse(fs.readFileSync(recordFile(store))).schemaVersion, 2);
+  const released = await settle(launch.recordRevision);
+  assert.equal(released.sequence, launch.job.sequence + 1);
+  const releasedBytes = fs.readFileSync(recordFile(store));
+  assert.deepEqual(await settle(launch.recordRevision), released);
+  assert.deepEqual(fs.readFileSync(recordFile(store)), releasedBytes);
+  await assert.rejects(settle(launch.recordRevision, 'consumed'), error => error.code === 'RECOVERY_REQUIRED');
+  await assert.rejects(settle(launch.recordRevision, 'held'), error => error.code === 'INVALID_REQUEST');
+});
+
+test('launch disposition terminal update is atomic and requires exact idempotent terminal pair', async t => {
+  const launchOwner = ownerFixture();
+  const { store } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+  await store.initialize(); await store.create(launchJob(), launchOwner.epoch);
+  const launch = await store.getNewServerLaunch('job-0001', launchOwner.epoch);
+  const terminalUpdate = { expectedPhase: 'queued', nextPhase: 'failed', patch: {
+    outcome: { status: 'failed', message: 'Stopped without mutation' },
+    progress: { percent: 100, message: 'Stopped', currentItem: null }
+  } };
+  const request = { expectedInstanceId: 'server-0001', expectedRecordRevision: launch.recordRevision, nextDisposition: 'released', terminalUpdate };
+  const terminal = await store.settleNewServerDestination('job-0001', request, launchOwner.epoch);
+  assert.equal(terminal.phase, 'failed'); assert.equal(terminal.sequence, 1);
+  assert.equal((await store.getNewServerLaunch('job-0001', launchOwner.epoch)).binding.destinationDisposition, 'released');
+  assert.deepEqual(await store.settleNewServerDestination('job-0001', request, launchOwner.epoch), terminal);
+  await assert.rejects(store.settleNewServerDestination('job-0001', { ...request, terminalUpdate: {
+    ...terminalUpdate, patch: { ...terminalUpdate.patch, outcome: { status: 'failed', message: 'Other result' } }
+  } }, launchOwner.epoch), error => error.code === 'RECOVERY_REQUIRED');
+});
+
+test('queued closure atomically fails and releases only under startup owner', async t => {
+  const launchOwner = ownerFixture();
+  const { store } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+  await store.initialize(); await store.create(launchJob(), launchOwner.epoch); await store.create(job({ jobId: 'legacy', operationKind: 'import-files-only-new' }));
+  for (const jobId of ['job-0001', 'legacy']) {
+    const current = await store.get(jobId);
+    const recordRevision = { sequence: current.sequence, sha256: crypto.createHash('sha256').update(fs.readFileSync(recordFile(store, jobId))).digest('hex') };
+    const request = { expectedInstanceId: 'server-0001', expectedRecordRevision: recordRevision };
+    launchOwner.state = 'ready';
+    await assert.rejects(store.closeInterruptedQueued(jobId, request, launchOwner.epoch), error => error.code === 'PLAN_STALE');
+    launchOwner.state = 'starting';
+    await assert.rejects(store.closeInterruptedQueued(jobId, { ...request, expectedInstanceId: 'other' }, launchOwner.epoch), error => error.code === 'PLAN_STALE');
+    await assert.rejects(store.closeInterruptedQueued(jobId, { ...request, expectedRecordRevision: { ...recordRevision, sha256: 'f'.repeat(64) } }, launchOwner.epoch), error => error.code === 'PLAN_STALE');
+    const closed = await store.closeInterruptedQueued(jobId, request, launchOwner.epoch);
+    assert.equal(closed.phase, 'failed'); assert.equal(closed.sequence, 1);
+    assert.equal(closed.outcome.errorCode, 'COMMIT_FAILED'); assert.deepEqual(closed.outcome.actions, []);
+    assert.equal(closed.progress.percent, 100);
+    assert.equal(JSON.parse(fs.readFileSync(recordFile(store, jobId))).schemaVersion, jobId === 'legacy' ? 1 : 2);
+    if (jobId !== 'legacy') assert.equal((await store.getNewServerLaunch(jobId, launchOwner.epoch)).binding.destinationDisposition, 'released');
+    const bytes = fs.readFileSync(recordFile(store, jobId));
+    assert.deepEqual(await store.closeInterruptedQueued(jobId, request, launchOwner.epoch), closed);
+    assert.deepEqual(fs.readFileSync(recordFile(store, jobId)), bytes);
+  }
+  for (const phase of ['cancelling', 'preflight']) {
+    const jobId = `job-${phase}`;
+    await store.create(job({ jobId, operationKind: 'install-new' }));
+    if (phase === 'cancelling') await store.requestCancellation(jobId);
+    else await store.transition(jobId, { expectedPhase: 'queued', nextPhase: phase, patch: {} });
+    const current = await store.get(jobId);
+    const revision = { sequence: current.sequence, sha256: crypto.createHash('sha256').update(fs.readFileSync(recordFile(store, jobId))).digest('hex') };
+    await assert.rejects(store.closeInterruptedQueued(jobId, { expectedInstanceId: 'server-0001', expectedRecordRevision: revision }, launchOwner.epoch), error => error.code === 'PLAN_STALE');
+  }
+});
+
+test('queued closure publication faults require exact reread without target action replay', async t => {
+  for (const afterPublication of [false, true]) {
+    const launchOwner = ownerFixture();
+    const { dependencies } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+    let fail = false;
+    const store = new OperationStore({ ...dependencies, durableFs: { ...dependencies.durableFs,
+      async writeJsonAtomicAsync(...args) {
+        if (!fail || afterPublication) await dependencies.durableFs.writeJsonAtomicAsync(...args);
+        if (fail) throw new Error('publication fault');
+      }
+    } });
+    await store.initialize(); await store.create(launchJob(), launchOwner.epoch);
+    const launch = await store.getNewServerLaunch('job-0001', launchOwner.epoch);
+    const request = { expectedInstanceId: 'server-0001', expectedRecordRevision: launch.recordRevision };
+    fail = true;
+    await assert.rejects(store.closeInterruptedQueued('job-0001', request, launchOwner.epoch), error => error.code === 'COMMIT_FAILED');
+    const reread = await store.getNewServerLaunch('job-0001', launchOwner.epoch);
+    assert.equal(reread.job.phase, afterPublication ? 'failed' : 'queued');
+    assert.equal(reread.binding.destinationDisposition, afterPublication ? 'released' : 'held');
+    assert.equal(store.getLaunchPublicationState(launchOwner.epoch).pending, false);
+    if (afterPublication) assert.deepEqual(await store.closeInterruptedQueued('job-0001', request, launchOwner.epoch), reread.job);
+  }
+});
+
+test('launch exact reread retries only its own authenticated publication race', async t => {
+  const launchOwner = ownerFixture();
+  const { dependencies } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+  let race = null; let publication;
+  const store = new OperationStore({ ...dependencies, durableFs: { ...dependencies.durableFs,
+    readFileBounded(...args) {
+      if (race) {
+        const work = race; race = null; work();
+        throw Object.assign(new Error('atomic replacement changed bounded-read identity'), { code: 'COMMIT_FAILED' });
+      }
+      return dependencies.durableFs.readFileBounded(...args);
+    }
+  } });
+  await store.initialize(); await store.create(launchJob(), launchOwner.epoch);
+  race = () => { publication = store.updateProgress('job-0001', { expectedPhase: 'queued',
+    progress: { percent: 5, message: 'Preparing', currentItem: null } }); };
+  let observed;
+  try { observed = await store.getNewServerLaunch('job-0001', launchOwner.epoch); }
+  finally { await publication; }
+  assert.equal(observed.job.sequence, 1);
+  assert.equal(observed.job.progress.percent, 5);
+  race = () => {};
+  await assert.rejects(store.getNewServerLaunch('job-0001', launchOwner.epoch), error => error.code === 'RECOVERY_REQUIRED');
+});
+
+test('launch publication finalization clears tracking after directory revalidation or owner loss', async t => {
+  for (const failure of ['directory', 'owner']) {
+    const launchOwner = ownerFixture();
+    const { dependencies } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+    let failNextStat = false;
+    const fsApi = { ...fs, lstatSync(candidate, ...args) {
+      assert.equal(candidate.startsWith(dependencies.userDataPath), true, 'no target filesystem access');
+      if (failNextStat) { failNextStat = false; throw new Error('directory revalidation failed'); }
+      return fs.lstatSync(candidate, ...args);
+    } };
+    const store = new OperationStore({ ...dependencies, fsApi, durableFs: { ...dependencies.durableFs,
+      async writeJsonAtomicAsync(...args) {
+        await dependencies.durableFs.writeJsonAtomicAsync(...args);
+        if (failure === 'directory') failNextStat = true;
+        else launchOwner.lease = null;
+      }
+    } });
+    await store.initialize();
+    const witnesses = [];
+    await assert.rejects(store.create(launchJob(), launchOwner.epoch, { onPublicationAttempt: value => witnesses.push(value) }),
+      error => error.code === (failure === 'directory' ? 'COMMIT_FAILED' : 'PLAN_STALE'));
+    assert.equal(store.activePublications.size, 0); assert.equal(store.records.size, 0);
+    assert.equal(store.publicationGeneration, 2);
+    assert.equal(witnesses.length, 1);
+    if (failure === 'owner') {
+      await assert.rejects(store.getNewServerLaunch('job-0001', launchOwner.epoch), error => error.code === 'PLAN_STALE');
+      launchOwner.lease = {};
+    }
+    assert.deepEqual((await store.getNewServerLaunch('job-0001', launchOwner.epoch)).job, witnesses[0].job);
+  }
+});
+
+test('launch disposition guards exact bytes, consumed contradiction, closing owner and terminal mutations', async t => {
+  const launchOwner = ownerFixture();
+  const { store } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+  await store.initialize(); await store.create(launchJob({ operationKind: 'import-files-only-new' }), launchOwner.epoch);
+  let launch = await store.getNewServerLaunch('job-0001', launchOwner.epoch);
+  const request = { expectedInstanceId: 'server-0001', expectedRecordRevision: launch.recordRevision, nextDisposition: 'consumed' };
+  const original = fs.readFileSync(recordFile(store), 'utf8');
+  fs.writeFileSync(recordFile(store), `${original}\n`);
+  await assert.rejects(store.settleNewServerDestination('job-0001', request, launchOwner.epoch), error => error.code === 'PLAN_STALE');
+  await store.transition('job-0001', { expectedPhase: 'queued', nextPhase: 'preflight', patch: {} });
+  await store.transition('job-0001', { expectedPhase: 'preflight', nextPhase: 'recovery-required', patch: { outcome: { status: 'recovery-required' } } });
+  await store.reconcileRecovery('job-0001', { nextPhase: 'failed', patch: { outcome: { status: 'failed' }, progress: { percent: 100, message: 'Recovered', currentItem: null } } });
+  launch = await store.getNewServerLaunch('job-0001', launchOwner.epoch);
+  assert.deepEqual(launch.binding, binding());
+  launchOwner.state = 'closing';
+  await assert.rejects(store.listNewServerLaunchBindings(launchOwner.epoch), error => error.code === 'PLAN_STALE');
+  await assert.rejects(store.create(launchJob({ jobId: 'fresh' }), launchOwner.epoch), error => error.code === 'PLAN_STALE');
+  await store.settleNewServerDestination('job-0001', { ...request, expectedRecordRevision: launch.recordRevision }, launchOwner.epoch);
+  const consumed = await store.getNewServerLaunch('job-0001', launchOwner.epoch);
+  assert.equal(consumed.binding.destinationDisposition, 'consumed');
+  await assert.rejects(store.settleNewServerDestination('job-0001', { ...request, nextDisposition: 'released', expectedRecordRevision: consumed.recordRevision }, launchOwner.epoch), error => error.code === 'RECOVERY_REQUIRED');
+  const serialized = JSON.stringify([await store.get('job-0001'), await store.initialize()]);
+  assert.doesNotMatch(serialized, /launchBinding|targetPath|capturedReservation|recordRevision|epoch|checksum/);
+});
+
+test('launch public returns, persisted events and native notifications project no binding', async t => {
+  const { OperationEventStore } = require('../../electron/services/modpack-lifecycle/operation-event-store.cjs');
+  const launchOwner = ownerFixture(); const emitted = []; const notifications = [];
+  const { store } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner, eventSink: event => emitted.push(event) });
+  const events = new OperationEventStore({ operationStore: store,
+    nativeNotificationBridge: { publishJobEvent(value) { notifications.push(value); } } });
+  const outputs = [await events.initialize(), await events.create(launchJob(), launchOwner.epoch)];
+  outputs.push(await events.appendEvent('job-0001', { channel: 'log', message: 'Preparing new server' }));
+  outputs.push(await events.get('job-0001'), await events.load('job-0001'));
+  const launch = await events.getNewServerLaunch('job-0001', launchOwner.epoch);
+  assert.equal(notifications.length, 2);
+  outputs.push(await events.closeInterruptedQueued('job-0001', { expectedInstanceId: 'server-0001', expectedRecordRevision: launch.recordRevision }, launchOwner.epoch));
+  assert.equal(notifications.length, 3);
+  assert.doesNotMatch(JSON.stringify([outputs, emitted, notifications]), /launchBinding|targetPath|capturedReservation|recordRevision|epoch|checksum|private/);
+  for (const output of outputs.filter(value => !Array.isArray(value))) assert.deepEqual(Object.keys(output).sort(), PUBLIC_V1_KEYS.slice().sort());
+});
 
 test('durable swap role tuples stay associated with one operation through reload and recovery reconciliation', async t => {
   // Catches event loss when recovery rebuilds a terminal outcome and cross-job association.

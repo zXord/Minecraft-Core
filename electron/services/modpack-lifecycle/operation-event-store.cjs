@@ -42,8 +42,21 @@ class OperationEventStore {
   get(jobId) { return this.operationStore.get(jobId); }
   load(jobId) { return this.operationStore.load(jobId); }
 
-  async create(request) {
-    return this.#publish(await this.operationStore.create(request));
+  async create(request, ownerEpoch = null, options = {}) {
+    return this.#publish(await this.operationStore.create(request, ownerEpoch, options));
+  }
+
+  getNewServerLaunch(jobId, ownerEpoch) { return this.operationStore.getNewServerLaunch(jobId, ownerEpoch); }
+  findNewServerLaunch(request, ownerEpoch) { return this.operationStore.findNewServerLaunch(request, ownerEpoch); }
+  listNewServerLaunchBindings(ownerEpoch) { return this.operationStore.listNewServerLaunchBindings(ownerEpoch); }
+  getLaunchPublicationState(ownerEpoch) { return this.operationStore.getLaunchPublicationState(ownerEpoch); }
+
+  async settleNewServerDestination(jobId, request, ownerEpoch) {
+    return this.#publish(await this.operationStore.settleNewServerDestination(jobId, request, ownerEpoch));
+  }
+
+  async closeInterruptedQueued(jobId, request, ownerEpoch) {
+    return this.#publish(await this.operationStore.closeInterruptedQueued(jobId, request, ownerEpoch));
   }
 
   async transition(jobId, request) {
