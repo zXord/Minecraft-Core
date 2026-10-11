@@ -934,14 +934,21 @@ function createComposition({ input, scenarioFile }) {
   function verificationOutcome(instanceId, overrides = {}) {
     const large = scenario().refreshFixture?.largeVerification === true;
     const healthy = scenario().refreshFixture?.healthyVerification === true;
-    const count = healthy ? '0' : large ? '147' : '1';
+    const samples = scenario().refreshFixture?.historicalVerificationSamples;
+    const historical = Number.isInteger(samples) && samples >= 0 && samples <= 64;
+    const count = healthy ? '0' : historical ? '148' : large ? '147' : '1';
     return { status: 'completed', kind: 'completed', actions: [], result: {
       instanceId, type: 'modpack-verification-result', contentRevision: scenario().statesByInstanceId?.[instanceId]?.contentRevision ?? scenario().state.contentRevision,
-      checkedFiles: large ? '4596' : '2', mismatchCount: count, healthy, repairAvailable: !healthy,
+      checkedFiles: large || historical ? '4596' : '2', mismatchCount: count, healthy, repairAvailable: !healthy,
       repair: healthy ? null : { operationKind: 'repair', mismatchCount: count },
-      mismatches: healthy ? [] : [{ entryName: 'mods/managed.jar', origin: 'pack', role: 'mod', status: 'modified' }],
+      mismatches: healthy ? [] : historical ? Array.from({ length: samples }, (_, index) => ({
+        entryName: index === 0 && scenario().refreshFixture?.longVerificationLabels
+          ? `config/${'long-unbroken-label-'.repeat(30)}.cfg` : `config/sample-${index + 1}.cfg`,
+        origin: 'pack', role: 'config', status: 'modified'
+      })) : [{ entryName: 'mods/managed.jar', origin: 'pack', role: 'mod', status: 'modified' }],
       verifiedAt: FIXED_TIME,
       ...(large && !healthy ? { shownMismatchCount: '1', omittedMismatchCount: '146', mismatchesTruncated: true } : {}),
+      ...(historical && !healthy ? { shownMismatchCount: String(samples), omittedMismatchCount: String(148 - samples), mismatchesTruncated: true } : {}),
       ...clone(overrides)
     } };
   }
@@ -1673,7 +1680,7 @@ function createComposition({ input, scenarioFile }) {
       const job = {
         type: 'minecraft-core-modpack-job', schemaVersion: 1, serverId: instanceId, sequence: 1,
         planFingerprint: null, swapStep: null,
-        jobId: `verify-${++jobSequence}`,
+        jobId: `${scenario().refreshFixture?.longVerificationLabels ? `verify-${'long-job-label-'.repeat(8)}` : 'verify-'}${++jobSequence}`,
         operationKind: 'verify',
         phase: held || queued ? 'queued' : 'completed',
         createdAt: FIXED_TIME, updatedAt: FIXED_TIME, terminalAt: held || queued ? null : FIXED_TIME, events: [],

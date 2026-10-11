@@ -61,6 +61,8 @@
   let verificationAttempt = null;
   let verificationAttemptStatus = 'none';
   let verificationReference = null;
+  let historicalDifferencesOpen = false;
+  let historicalDifferencesIdentity = '';
   let verificationRequestSequence = 0;
   let verificationInFlight = null;
   let busy = false;
@@ -96,6 +98,11 @@
   const serverRequestScope = createServerRequestScope();
 
   $: serverId = currentInstance?.type === 'server' ? currentInstance.id || '' : '';
+  // Expansion is local reading state, not historical evidence or authority.
+  $: if (historicalDifferencesIdentity !== `${serverId}:${verificationReference?.jobId || ''}`) {
+    historicalDifferencesIdentity = `${serverId}:${verificationReference?.jobId || ''}`;
+    historicalDifferencesOpen = false;
+  }
   $: if (serverId !== serverRequestScope.serverId) activateServer(serverId);
   $: isManaged = Boolean(state?.modpackManaged);
   $: loading = [stateStatus, historyStatus, recoveryStatus].some(status => ['unknown', 'loading'].includes(status));
@@ -1052,7 +1059,7 @@
   {#if error}<section class="mp-state error page-error" bind:this={errorRegion} tabindex="-1" aria-live="assertive"><strong>{error.code || 'Modpack action unavailable'}</strong><p>{error.message}</p><button class="mp-button" type="button" on:click={() => (error = null)}>Dismiss</button></section>{/if}
 
   {#if verificationReference}
-    <section class="mp-panel mp-stack" data-verification-history aria-label={verificationAttempt?.status === 'completed' ? 'Last verification' : 'Last verification attempt'}>
+    <section class="mp-panel verification-history" data-verification-history aria-label={verificationAttempt?.status === 'completed' ? 'Last verification' : 'Last verification attempt'}>
       <h2>{verificationAttempt?.status === 'completed' ? 'Last verification' : 'Last verification attempt'}</h2>
       <p>Job {verificationReference.jobId}</p>
       {#if verificationAttemptStatus === 'loading'}
@@ -1065,9 +1072,14 @@
         <p>Then observed: {verificationCount(verificationAttempt.checkedFiles)} checked files · {verificationCount(verificationAttempt.mismatchCount)} differences</p>
         {#if verificationAttempt.healthy}<p>The checked content was healthy at verification time.</p>{/if}
         {#if verificationAttempt.mismatches.length}
-          <ul aria-label="Historical managed file differences">{#each verificationAttempt.mismatches as mismatch}<li>{mismatch.entryName} — {mismatch.status} ({mismatch.origin} · {mismatch.role})</li>{/each}</ul>
+          <details bind:open={historicalDifferencesOpen}>
+            <summary>View historical file differences ({verificationAttempt.shownMismatchCount} shown)</summary>
+            <ul aria-label="Historical managed file differences">{#each verificationAttempt.mismatches as mismatch}<li>{mismatch.entryName} — {mismatch.status} ({mismatch.origin} · {mismatch.role})</li>{/each}</ul>
+            {#if verificationAttempt.mismatchesTruncated}<p>Showing {verificationAttempt.shownMismatchCount} differences; {verificationAttempt.omittedMismatchCount} additional differences are not listed.</p>{/if}
+          </details>
+        {:else if verificationAttempt.mismatchesTruncated}
+          <p>Showing {verificationAttempt.shownMismatchCount} differences; {verificationAttempt.omittedMismatchCount} additional differences are not listed.</p>
         {/if}
-        {#if verificationAttempt.mismatchesTruncated}<p>Showing {verificationAttempt.shownMismatchCount} differences; {verificationAttempt.omittedMismatchCount} additional differences are not listed.</p>{/if}
       {:else if verificationAttempt?.status === 'in-progress'}
         <p>This verification attempt had not completed when read. Current operation ownership is checked separately.</p>
       {:else if verificationAttempt}
@@ -1136,6 +1148,14 @@
   .modrinth-inspection-status { position: sticky; top: 4rem; z-index: 2; align-self: start; min-height: 7rem; border-radius: 8px; background: var(--mp-panel); }
   .page-header { padding: 0.4rem 0; }
   .page-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.55rem; min-height: 42px; }
+  .verification-history { display: grid; gap: 0.375rem; min-width: 0; padding: 0.85rem 1rem; font-size: 0.9rem; overflow-wrap: anywhere; }
+  .verification-history h2 { margin: 0; font-size: 1.1rem; line-height: 1.3; }
+  .verification-history p { margin: 0; min-width: 0; }
+  .verification-history details { min-width: 0; border-top: 1px solid var(--mp-border); }
+  .verification-history summary { padding: 0.55rem 0.15rem; cursor: pointer; color: var(--mp-control-accent); }
+  .verification-history summary:focus-visible { outline: 2px solid var(--mp-control-accent); outline-offset: 2px; border-radius: 4px; }
+  .verification-history ul { display: grid; gap: 0.35rem; margin: 0.25rem 0 0.6rem; padding-left: 1.25rem; min-width: 0; }
+  .verification-history li { min-width: 0; }
   .section-tabs { display: flex; gap: 0.45rem; overflow-x: auto; padding: 0.4rem; border: 1px solid var(--mp-border); border-radius: 10px; background: rgba(0, 0, 0, 0.15); }
   .section-tabs button { flex: 1 0 auto; min-width: 110px; border: 1px solid transparent; border-radius: 7px; padding: 0.6rem 0.8rem; background: transparent; color: var(--mp-muted); }
   .section-tabs button.active { color: white; background: rgba(255, 255, 255, 0.09); border-color: rgba(255, 255, 255, 0.28); }

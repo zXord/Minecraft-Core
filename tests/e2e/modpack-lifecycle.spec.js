@@ -1036,6 +1036,137 @@ async function startFixtureVerification(fixture) {
   return fixture.controlVerification({ kind: 'read' });
 }
 
+test('historical summary layout keeps 64 samples collapsed, exact and keyboard accessible without actions', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { historicalVerificationSamples: 64 } });
+  try {
+    const { page } = fixture;
+    const rendererErrors = [];
+    page.on('pageerror', error => rendererErrors.push(error.message));
+    page.on('console', message => { if (['error', 'warning'].includes(message.type())) rendererErrors.push(message.text()); });
+    await page.setViewportSize({ width: 800, height: 600 });
+    const job = await startFixtureVerification(fixture);
+    await openDashboard(page);
+    await fixture.openModpack();
+    const history = page.getByRole('region', { name: 'Last verification', exact: true });
+    const details = history.locator('details');
+    const summary = details.locator('summary');
+    const rows = history.locator('ul[aria-label="Historical managed file differences"] li');
+    await expect(details).toHaveCount(1);
+    await expect(details).not.toHaveAttribute('open');
+    await expect(rows).toHaveCount(64);
+    await expect(rows.first()).not.toBeVisible();
+    for (const text of [job.jobId, '2026-08-01T12:00:00.000Z', 'revision 1', '4,596 checked files · 148 differences',
+      'historical observation, not a current integrity check', 'Review repair checks the installed source and current files again']) {
+      await expect(history.getByText(text, { exact: false }).last()).toBeVisible();
+    }
+    const closedHeight = (await history.boundingBox()).height;
+    console.log(`Historical card 800x600: ${closedHeight} CSS px closed, 64 samples`);
+    expect(closedHeight).toBeLessThanOrEqual(240);
+    const tabs = page.getByRole('navigation', { name: 'Modpack sections' });
+    expect((await tabs.boundingBox()).y - (await history.boundingBox()).y).toBeLessThanOrEqual(260);
+    await expect(page.locator('[data-verification-history] :focus')).toHaveCount(0);
+    await expect(page).toHaveTitle('Minecraft Core');
+    expect(page.url()).toMatch(/^(?:http:\/\/127\.0\.0\.1:5173\/|file:\/\/\/.*\/dist\/index\.html)/u);
+    await history.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(os.tmpdir(), 'minecraft-core-history-closed-800x600.png') });
+    const actionsBefore = fixture.readState().lifecycleCalls.filter(call => !['getActiveJobs', 'getState', 'listHistory', 'getJob'].includes(call.method));
+    await summary.focus();
+    await summary.press('Enter');
+    await expect(details).toHaveAttribute('open', '');
+    await expect(rows.first()).toBeVisible();
+    await expect(rows.last()).toBeVisible();
+    await expect(history.getByText('Showing 64 differences; 84 additional differences are not listed.')).toBeVisible();
+    await expect(summary).toBeFocused();
+    await summary.press('Space');
+    await expect(details).not.toHaveAttribute('open');
+    await expect(summary).toBeFocused();
+    const beforeToggle = fixture.readState().lifecycleCalls.length;
+    await summary.click();
+    await expect(details).toHaveAttribute('open', '');
+    await summary.click();
+    await expect(details).not.toHaveAttribute('open');
+    expect(fixture.readState().lifecycleCalls.slice(beforeToggle)).toEqual([]);
+    expect(fixture.readState().lifecycleCalls.filter(call => !['getActiveJobs', 'getState', 'listHistory', 'getJob'].includes(call.method))).toEqual(actionsBefore);
+    expect(fixture.readState().safeActions).toEqual([]);
+    await summary.click();
+    // A same-attempt read temporarily replaces completed markup with loading.
+    await fixture.controlVerification({ kind: 'own', jobId: job.jobId });
+    await fixture.electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('modpacks:state-changed', { instanceId: 'server-e2e' }));
+    await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText(job.jobId);
+    await fixture.controlVerification({ kind: 'queue-read', jobId: job.jobId, reply: { hold: true } });
+    await fixture.controlVerification({ kind: 'release' });
+    await expect(history).toContainText('Loading historical verification evidence');
+    const held = fixture.readState().lifecycleCalls.filter(call => call.method === 'heldVerificationReadEntered').at(-1);
+    await fixture.controlVerification({ kind: 'release-read', readId: held.readId });
+    await expect(details).toHaveAttribute('open', '');
+    await openDashboard(page);
+    await fixture.openModpack();
+    await expect(details).not.toHaveAttribute('open');
+    await summary.click();
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await page.getByRole('button', { name: 'Verify', exact: true }).click();
+    await expect(history).toContainText('verify-2');
+    await expect(details).not.toHaveAttribute('open');
+    await expect(page.locator('section.outcome')).toBeFocused();
+    await expect(page.locator('vite-error-overlay')).toHaveCount(0);
+    expect(rendererErrors).toEqual([]);
+  } finally { await fixture.close(); }
+});
+
+test('historical summary layout closed height is sample independent and long exact labels wrap', async () => {
+  const heights = [];
+  for (const samples of [1, 64]) {
+    const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { historicalVerificationSamples: samples } });
+    try {
+      const { page } = fixture;
+      await page.setViewportSize({ width: 800, height: 600 });
+      await startFixtureVerification(fixture);
+      await openDashboard(page);
+      await fixture.openModpack();
+      const history = page.getByRole('region', { name: 'Last verification', exact: true });
+      await expect(history.locator('details')).toHaveCount(1);
+      heights.push((await history.boundingBox()).height);
+      await expect(page.getByRole('button', { name: 'Actions', exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Versions', exact: true })).toBeVisible();
+    } finally { await fixture.close(); }
+  }
+  expect(Math.abs(heights[0] - heights[1])).toBeLessThanOrEqual(2);
+  console.log(`Historical card closed heights at 800x600: one=${heights[0]}, 64=${heights[1]} CSS px`);
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { historicalVerificationSamples: 64, longVerificationLabels: true } });
+  try {
+    const { page } = fixture;
+    await page.setViewportSize({ width: 800, height: 600 });
+    const job = await startFixtureVerification(fixture);
+    await openDashboard(page);
+    await fixture.openModpack();
+    const history = page.getByRole('region', { name: 'Last verification', exact: true });
+    await expect(history).toContainText(job.jobId);
+    await history.locator('summary').click();
+    await expect(history.getByRole('list').locator('li').first()).toHaveText(`config/${'long-unbroken-label-'.repeat(30)}.cfg — modified (pack · config)`);
+    expect(await history.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await history.getByRole('list').locator('li').first().evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: path.join(os.tmpdir(), 'minecraft-core-history-expanded-800x600.png') });
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await history.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await history.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(os.tmpdir(), 'minecraft-core-history-expanded-390x844.png') });
+  } finally { await fixture.close(); }
+});
+
+for (const healthy of [false, true]) test(`historical summary layout ${healthy ? 'healthy' : 'omitted-only'} zero samples has no empty disclosure`, async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { historicalVerificationSamples: 0, healthyVerification: healthy } });
+  try {
+    const { page } = fixture;
+    await startFixtureVerification(fixture);
+    await openDashboard(page);
+    await fixture.openModpack();
+    const history = page.getByRole('region', { name: 'Last verification', exact: true });
+    await expect(history).toContainText(healthy ? 'healthy at verification time' : 'Showing 0 differences; 148 additional differences are not listed.');
+    await expect(history.locator('details')).toHaveCount(0);
+    await expect(history).toContainText('not a current integrity check');
+  } finally { await fixture.close(); }
+});
+
 for (const fast of [false, true]) test(`verification continuity preserves ${fast ? 'fast queued' : 'local'} completion through Back and actual route destruction`, async () => {
   const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { fastVerify: fast } });
   try {
@@ -1106,6 +1237,7 @@ for (const terminalPhase of ['failed', 'cancelled']) test(`verification continui
     const summary = page.getByRole('region', { name: 'Last verification attempt', exact: true });
     await expect(summary).toContainText(newer.jobId);
     await expect(summary).toContainText(`— ${terminalPhase} at`);
+    await expect(summary.locator('details')).toHaveCount(0);
     await expect(summary).not.toContainText('checked files');
     await expect(summary).not.toContainText(older.jobId);
     await page.getByRole('button', { name: 'Actions', exact: true }).click();
@@ -1130,6 +1262,8 @@ for (const variant of ['missing', 'rejected', 'foreign-server', 'foreign-job', '
     await fixture.openModpack();
     const summary = page.getByRole('region', { name: 'Last verification attempt', exact: true });
     await expect(summary).toContainText('Historical verification evidence is unavailable');
+    await expect(summary.locator('details')).toHaveCount(0);
+    await expect(summary.getByRole('button', { name: 'Retry historical read' })).toBeVisible();
     await expect(summary).not.toContainText('checked files');
     await expect(page.locator('.page-error')).toHaveCount(0);
     await page.getByRole('button', { name: 'Actions', exact: true }).click();
@@ -1403,6 +1537,7 @@ test('verification continuity same-pair explicit owner selection refreshes inval
     await owned.getByRole('button', { name: new RegExp(original.jobId, 'u') }).click();
     const summary = page.getByRole('region', { name: 'Last verification attempt', exact: true });
     await expect(summary).toContainText('had not completed when read');
+    await expect(summary.locator('details')).toHaveCount(0);
     await expect(summary).not.toContainText('checked files');
     const before = fixture.readState().lifecycleCalls.filter(call => call.method === 'getJob' && call.jobId === original.jobId).length;
     await owned.getByRole('button', { name: new RegExp(original.jobId, 'u') }).click();
