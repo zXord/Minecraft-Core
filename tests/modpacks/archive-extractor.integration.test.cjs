@@ -106,8 +106,9 @@ async function extractionFixture({ entries, workerAction, diskProbe, reparseInsp
   const cache = {
     retain() {},
     release() {},
-    async materializeSet(set, destination) {
+    async materializeSet(set, destination, { onDestinationCreated }) {
       await fsp.mkdir(destination);
+      onDestinationCreated();
       await fsp.writeFile(path.join(destination, set.artifactSet.parts[0].fileName), verified.bytes);
       return path.join(destination, set.artifactSet.parts[0].fileName);
     }

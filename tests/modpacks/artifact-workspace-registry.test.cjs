@@ -261,8 +261,9 @@ test('claimed transfers survive expiry, allow plan-to-job handoff once, and reje
 
 test('materializes a registered set into an owner-bound input ID without returning a renderer path', async (t) => {
   const f = registryFixture(); t.after(f.cleanup);
-  f.registry.artifactCache = { materializeSet: async (_set, destination) => {
+  f.registry.artifactCache = { materializeSet: async (_set, destination, { onDestinationCreated }) => {
     fs.mkdirSync(destination, { recursive: true });
+    onDestinationCreated();
     const primaryPath = path.join(destination, 'server.zip');
     fs.writeFileSync(primaryPath, 'archive');
     return primaryPath;
@@ -280,8 +281,9 @@ test('materializes a registered set into an owner-bound input ID without returni
 
 test('input binding is immutable and differs for two same-owner sets with equal filenames', async (t) => {
   const f = registryFixture(); t.after(f.cleanup);
-  f.registry.artifactCache = { materializeSet: async (_set, destination) => {
+  f.registry.artifactCache = { materializeSet: async (_set, destination, { onDestinationCreated }) => {
     fs.mkdirSync(destination, { recursive: true });
+    onDestinationCreated();
     fs.writeFileSync(path.join(destination, 'same.zip'), 'archive');
     return path.join(destination, 'same.zip');
   } };
@@ -301,8 +303,8 @@ test('input binding is immutable and differs for two same-owner sets with equal 
 test('materialization reserves owner state so transfer, release, and expiry cannot orphan it', async (t) => {
   const f = registryFixture(); t.after(f.cleanup);
   let finish;
-  f.registry.artifactCache = { materializeSet: async (_set, destination) => {
-    await new Promise((resolve) => { finish = () => { fs.mkdirSync(destination, { recursive: true }); fs.writeFileSync(path.join(destination, 'server.zip'), 'archive'); resolve(); }; });
+  f.registry.artifactCache = { materializeSet: async (_set, destination, { onDestinationCreated }) => {
+    await new Promise((resolve) => { finish = () => { fs.mkdirSync(destination, { recursive: true }); onDestinationCreated(); fs.writeFileSync(path.join(destination, 'server.zip'), 'archive'); resolve(); }; });
     return path.join(destination, 'server.zip');
   } };
   const artifactSetId = f.registry.registerVerifiedSet({ ownerId: 'plan-a', verifiedSet });

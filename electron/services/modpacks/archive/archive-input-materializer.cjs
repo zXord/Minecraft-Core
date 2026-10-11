@@ -139,14 +139,16 @@ class ArchiveInputMaterializer {
     return { inspectionId, artifactSetId, result, verifiedArtifactSet };
   }
 
-  async rematerialize(inspectionId) {
+  async rematerialize(inspectionId, preparationAttempt = null) {
     const loaded = this.loadInspection(inspectionId);
-    const inputDirectoryId = await this.workspaceRegistry.materializeInput({ ownerId: inspectionId, artifactSetId: loaded.artifactSetId });
+    const inputDirectoryId = preparationAttempt
+      ? await preparationAttempt.materializeInput(loaded.artifactSetId)
+      : await this.workspaceRegistry.materializeInput({ ownerId: inspectionId, artifactSetId: loaded.artifactSetId });
     try {
       const materialized = await this.verifyMaterialized({ inputDirectoryId, verifiedArtifactSet: loaded.verifiedArtifactSet });
       return Object.freeze({ ...loaded, ownerId: inspectionId, inputDirectoryId, ...materialized });
     } catch (error) {
-      try { await this.workspaceRegistry.releaseOwner(inspectionId); } catch { /* preserve the primary failure */ }
+      if (!preparationAttempt) try { await this.workspaceRegistry.releaseOwner(inspectionId); } catch { /* preserve the primary failure */ }
       throw error;
     }
   }

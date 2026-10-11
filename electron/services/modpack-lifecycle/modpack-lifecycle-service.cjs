@@ -767,6 +767,7 @@ function assertResolvedInstance(value, expectedInstanceId) {
 }
 
 class ModpackLifecycleService {
+  #planResults = new WeakMap();
   constructor({
     sourceResolver,
     artifactDownloader,
@@ -819,11 +820,15 @@ class ModpackLifecycleService {
     this.yieldControl = yieldControl;
     this.snapshotProgressClock = snapshotProgressClock;
     this.inspections = new Map();
+    this.planningInspections = new Map();
+    this.inspectionDisposals = new Map();
     this.activeOperations = new Map();
     this.releasedClaims = new Set();
   }
 
   async dispose() {
+    if (this.planningInspections.size) throw new ModpackError('OPERATION_IN_PROGRESS', 'Archive preflight is already in progress');
+    for (const inspectionId of this.inspectionDisposals.keys()) await this.disposeInspection(inspectionId);
     const inspectionIds = [...this.inspections.keys()];
     if (inspectionIds.length === 0) return 0;
     if (!this.workspaceRegistry) throw invalid();
@@ -885,6 +890,7 @@ class ModpackLifecycleService {
 
   async cancelInspection(inspectionId) {
     const normalizedInspectionId = assertIdentifier(inspectionId);
+    if (this.planningInspections.has(normalizedInspectionId)) throw new ModpackError('OPERATION_IN_PROGRESS', 'Archive preflight is already in progress');
     const session = this.inspections.get(normalizedInspectionId);
     if (!session) return false;
     if (!this.workspaceRegistry) throw invalid();
@@ -898,6 +904,47 @@ class ModpackLifecycleService {
     }
   }
 
+  // Trusted owner teardown only; the renderer's explicit discard still rejects active preparation.
+  disposeInspection(inspectionId) {
+    const id = assertIdentifier(inspectionId);
+    return this.#disposeInspection(id, this.planningInspections.get(id));
+  }
+
+  // Only the exact main-process result can extend teardown through the IPC delivery decision.
+  disposeUndeliverablePlan(result) {
+    const retained = this.#planResults.get(result);
+    if (!retained) throw invalid();
+    return this.#disposeInspection(retained.inspectionId, retained.planning);
+  }
+
+  #disposeInspection(id, attempt) {
+    let disposal = this.inspectionDisposals.get(id);
+    if (!disposal) {
+      disposal = { attempt, inFlight: null };
+      this.inspectionDisposals.set(id, disposal);
+    } else if (attempt) {
+      if (disposal.attempt && disposal.attempt !== attempt) throw invalid();
+      disposal.attempt = attempt;
+    }
+    if (disposal.inFlight) return disposal.inFlight;
+    const run = async () => {
+      for (;;) {
+        const target = disposal.attempt;
+        if (target) await target.settled;
+        // invalidate never releases a plan that has already been claimed by a runtime.
+        const result = target?.planId
+          ? await this.planRegistry.invalidate(target.planId)
+          : await this.cancelInspection(id);
+        // IPC may have supplied its branded result while fallback cancellation was awaiting.
+        if (disposal.attempt !== target) continue;
+        if (this.inspectionDisposals.get(id) === disposal) this.inspectionDisposals.delete(id);
+        return result;
+      }
+    };
+    disposal.inFlight = run().finally(() => { disposal.inFlight = null; });
+    return disposal.inFlight;
+  }
+
   async createPlan(request, options = {}) {
     const normalizedRequest = planningRequest(request);
     const { onProgress } = preflightOptions(options);
@@ -905,41 +952,78 @@ class ModpackLifecycleService {
     const inspectionId = normalizedRequest.inspectionId;
     const session = this.inspections.get(inspectionId);
     if (!session) throw stale();
-    let inspection;
-    try { inspection = this.inspectionLoader.loadInspection(inspectionId); }
-    catch (error) { throw error instanceof ModpackError ? error : stale(error); }
-    if (!inspection || inspection.inspectionId !== inspectionId) throw stale();
-    const planned = await this.planningAdapter.createPlan({
-      request: normalizedRequest,
-      inspection,
-      source: deepFreeze(clone(session.source)),
-      onProgress: reportProgress
-    });
-    if (planned?.requiresConflictReview === true) {
-      const descriptors = strictObject(planned, ['requiresConflictReview', 'conflicts']);
-      if (!Array.isArray(descriptors.conflicts.value) || descriptors.conflicts.value.length < 1) throw invalid();
-      const review = publicView(planned);
+    if (this.planningInspections.has(inspectionId) || this.inspectionDisposals.has(inspectionId)) throw new ModpackError('OPERATION_IN_PROGRESS', 'Archive preflight or owner disposal is already in progress');
+    let settle;
+    const planning = { settled: new Promise(resolve => { settle = resolve; }), planId: null };
+    this.planningInspections.set(inspectionId, planning);
+    let preparationAttempt = null;
+    let cleanupFailed = false;
+    try {
+      if (!this.workspaceRegistry || typeof this.workspaceRegistry.beginPreparationAttempt !== 'function') throw invalid();
+      preparationAttempt = this.workspaceRegistry.beginPreparationAttempt({ ownerId: inspectionId });
+      const retire = async (templateOutputId = null) => {
+        try { await preparationAttempt.retire({ templateOutputId }); }
+        catch (error) { cleanupFailed = error?.code === 'CLEANUP_FAILED'; throw error; }
+      };
+      let inspection;
+      try { inspection = this.inspectionLoader.loadInspection(inspectionId); }
+      catch (error) { throw error instanceof ModpackError ? error : stale(error); }
+      if (!inspection || inspection.inspectionId !== inspectionId) throw stale();
+      const planned = await this.planningAdapter.createPlan({
+        request: normalizedRequest,
+        inspection,
+        source: deepFreeze(clone(session.source)),
+        preparationAttempt,
+        onProgress: reportProgress
+      });
+      if (planned?.requiresConflictReview === true) {
+        const descriptors = strictObject(planned, ['requiresConflictReview', 'conflicts']);
+        if (!Array.isArray(descriptors.conflicts.value) || descriptors.conflicts.value.length < 1) throw invalid();
+        const review = publicView(planned);
+        await retire();
+        reportProgress({ phase: 'complete' });
+        return review;
+      }
+      const descriptors = strictObject(planned, ['plan', 'sanitizedView']);
+      const plan = descriptors.plan.value;
+      if (!plan || typeof plan !== 'object' || Array.isArray(plan) || typeof plan.fingerprint !== 'string') throw invalid();
+      const hasExecutionRecord = typeof this.planningAdapter.getExecutionRecord === 'function';
+      const execution = hasExecutionRecord ? this.planningAdapter.getExecutionRecord(plan).execution : null;
+      if (hasExecutionRecord && typeof execution?.templateOutputId !== 'string') throw invalid();
+      await retire(execution?.templateOutputId ?? null);
+      // The registry still holds the attempt lease: only this exact capability may seal it.
+      const created = this.planRegistry.create({
+        plan,
+        sanitizedView: descriptors.sanitizedView.value,
+        fingerprint: plan.fingerprint,
+        planningSessionId: inspectionId,
+        preparationAttempt
+      });
+      planning.planId = created.planId;
+      this.inspections.delete(inspectionId);
+      const result = deepFreeze({
+        planId: created.planId,
+        planFingerprint: created.fingerprint,
+        planView: created.planView,
+        expiresAt: created.expiresAt
+      });
+      this.#planResults.set(result, { inspectionId, planning });
       reportProgress({ phase: 'complete' });
-      return review;
+      return result;
+    } catch (error) {
+      if (preparationAttempt && !cleanupFailed) {
+        try { await preparationAttempt.retire(); }
+        catch (cleanupError) {
+          throw new ModpackError('CLEANUP_FAILED', 'Prepared archive cleanup failed; discard the inspection and try again', {
+            cause: new AggregateError([error, cleanupError], 'Archive preflight and its cleanup failed'), retryable: true
+          });
+        }
+      }
+      throw error;
+    } finally {
+      try { preparationAttempt?.finish(); }
+      finally { this.planningInspections.delete(inspectionId); settle(); }
     }
-    const descriptors = strictObject(planned, ['plan', 'sanitizedView']);
-    const plan = descriptors.plan.value;
-    if (!plan || typeof plan !== 'object' || Array.isArray(plan) || typeof plan.fingerprint !== 'string') throw invalid();
-    const created = this.planRegistry.create({
-      plan,
-      sanitizedView: descriptors.sanitizedView.value,
-      fingerprint: plan.fingerprint,
-      planningSessionId: inspectionId
-    });
-    this.inspections.delete(inspectionId);
-    const result = deepFreeze({
-      planId: created.planId,
-      planFingerprint: created.fingerprint,
-      planView: created.planView,
-      expiresAt: created.expiresAt
-    });
-    reportProgress({ phase: 'complete' });
-    return result;
   }
 
   async createManagementPlan(requestValue, options = {}) {

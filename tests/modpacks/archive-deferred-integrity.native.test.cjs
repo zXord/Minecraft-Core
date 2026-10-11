@@ -78,8 +78,9 @@ test('native extraction rejects a CRC-corrupt deferred archive and removes its q
   const cache = {
     retain() {},
     release() {},
-    async materializeSet(set, destination) {
+    async materializeSet(set, destination, { onDestinationCreated }) {
       await fsp.mkdir(destination);
+      onDestinationCreated();
       const primary = set.artifactSet.parts.find(part => part.partId === set.artifactSet.primaryPartId);
       const archivePath = path.join(destination, primary.fileName);
       await fsp.writeFile(archivePath, corrupt);

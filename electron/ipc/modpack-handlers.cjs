@@ -359,8 +359,11 @@ function createModpackHandlers({
     };
     record.onDestroyed = () => {
       forgetCompletedRequestAlias(record);
-      void Promise.resolve()
-        .then(() => lifecycleService.cancelInspection(inspectionId))
+      // Record trusted teardown synchronously, before the current preflight can settle/seal.
+      record.disposal = Promise.resolve(typeof lifecycleService.disposeInspection === 'function'
+        ? lifecycleService.disposeInspection(inspectionId)
+        : lifecycleService.cancelInspection(inspectionId));
+      void record.disposal
         .then(() => disposeCompletedInspection(record))
         .catch(() => {});
     };
@@ -466,6 +469,11 @@ function createModpackHandlers({
         const result = await lifecycleService.createPlan(planRequest, {
           ...(progress ? { onProgress: progress.report } : {})
         });
+        if (owner?.disposal) {
+          if (result?.planId) await lifecycleService.disposeUndeliverablePlan(result);
+          await owner.disposal;
+          throw new ModpackError('CANCELLED', 'Archive preflight owner was destroyed');
+        }
         if (owner && result?.planId) disposeCompletedInspection(owner);
         return result;
       } finally {

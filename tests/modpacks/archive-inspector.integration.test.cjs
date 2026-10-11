@@ -147,8 +147,9 @@ async function inspectorFixture({ verifiedSet, sourceParts, listText, entryData 
   const cache = {
     retain() {},
     release() {},
-    async materializeSet(set, destination) {
+    async materializeSet(set, destination, { onDestinationCreated }) {
       await fsp.mkdir(destination);
+      onDestinationCreated();
       for (const part of set.artifactSet.parts) await fsp.writeFile(path.join(destination, part.fileName), sourceBytes.get(part.partId));
       return path.join(destination, set.artifactSet.parts.find(part => part.partId === set.artifactSet.primaryPartId).fileName);
     }

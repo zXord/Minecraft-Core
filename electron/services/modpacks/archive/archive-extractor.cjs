@@ -359,7 +359,7 @@ class ArchiveExtractor {
     this.materializer = new ArchiveInputMaterializer({ workspaceRegistry, workspaceRoot });
   }
 
-  async extractArchive({ inspectionId, destinationId, signal, onProgress } = {}) {
+  async extractArchive({ inspectionId, destinationId, signal, onProgress, preparationAttempt = null } = {}) {
     if (typeof inspectionId !== 'string' || !IDENTIFIER.test(inspectionId) || !inspectionId.startsWith('inspection-')) invalid('inspectionId');
     assertSignal(signal);
     if (onProgress !== undefined && typeof onProgress !== 'function') invalid('onProgress');
@@ -383,7 +383,7 @@ class ArchiveExtractor {
       const available = availableBytes(await this.diskProbe(output));
       if (available < requiredBytes) throw insufficient(requiredBytes, available);
 
-      context = await this.materializer.rematerialize(inspectionId);
+      context = await this.materializer.rematerialize(inspectionId, preparationAttempt);
       const controller = new AbortController();
       externalAbort = () => controller.abort(signal.reason);
       if (signal?.aborted) externalAbort();

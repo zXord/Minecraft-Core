@@ -662,7 +662,7 @@ class ProductionPlanningAdapter {
     return deepFreeze({ items });
   }
 
-  async createPlan({ request, inspection, source, onProgress } = {}) {
+  async createPlan({ request, inspection, source, onProgress, preparationAttempt = null } = {}) {
     if (!request || !inspection || !source || request.inspectionId !== inspection.inspectionId ||
         typeof request.instanceId !== 'string') throw invalid();
     const reportProgress = createProgressReporter(onProgress);
@@ -743,6 +743,7 @@ class ProductionPlanningAdapter {
     reportProgress({ phase: 'preparing-candidate' });
     const prepared = await this.preparePlanInputs({
       inspection,
+      preparationAttempt,
       operationKind,
       selections,
       serverKind,

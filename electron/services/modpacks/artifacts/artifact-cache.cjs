@@ -233,8 +233,19 @@ class ArtifactCache {
     for (const candidate of [resolved]) { try { await this.fs.lstat(candidate); invalid('destination'); } catch (error) { if (error?.code !== 'ENOENT') throw error; } }
     return resolved;
   }
-  async materializeSet(verifiedSet, destination) {
+  async materializeSet(verifiedSet, destination, { onDestinationCreated = null } = {}) {
+    if (onDestinationCreated !== null && typeof onDestinationCreated !== 'function') invalid('onDestinationCreated');
     const { parts, primary } = this.validateVerifiedSet(verifiedSet); const published = await this.assertFreshDirectDestination(destination);
+    if (onDestinationCreated) {
+      // Exclusive creation is the ownership boundary. Report it before any copy can fail.
+      await this.fs.mkdir(published, { recursive: false });
+      onDestinationCreated();
+      for (const part of parts) {
+        const target = path.join(published, part.fileName);
+        if (!await this.copyAndVerify(this.pathForSha256(part.calculatedDigests.sha256), target, { ...part.calculatedDigests, size: part.measuredSize, sourceRoot: this.root, targetRoot: this.workspaceRoot })) throw new ModpackError('HASH_MISMATCH', 'Artifact cache bytes changed during materialization');
+      }
+      return path.join(published, primary.fileName);
+    }
     const staging = path.join(this.workspaceRoot, `.${path.basename(published)}.${randomUUID()}.partial`); await this.assertSafePath(staging, this.workspaceRoot, 'destination'); await this.fs.mkdir(staging, { recursive: false });
     try {
       for (const part of parts) { const target = path.join(staging, part.fileName); if (!await this.copyAndVerify(this.pathForSha256(part.calculatedDigests.sha256), target, { ...part.calculatedDigests, size: part.measuredSize, sourceRoot: this.root, targetRoot: this.workspaceRoot })) throw new ModpackError('HASH_MISMATCH', 'Artifact cache bytes changed during materialization'); }

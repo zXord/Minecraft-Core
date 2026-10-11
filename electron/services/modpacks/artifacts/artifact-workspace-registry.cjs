@@ -184,6 +184,7 @@ async function reclaimOrphanedWorkspaces({ root, reparseInspector, reclaimIdFact
 }
 
 class ArtifactWorkspaceRegistry {
+  #preparationAttempts = new Map();
   constructor({ root, artifactCache = null, clock = () => Date.now(), idFactory = () => crypto.randomUUID(), ttlMs = TTL_MS,
     rootLease = null, rootIdentity = null, reparseInspector = null, reclaimIdFactory = () => crypto.randomUUID(),
     removeTree = defaultRemoveTree, renameWorkspace = (source, destination) => fsp.rename(source, destination) } = {}) {
@@ -246,9 +247,55 @@ class ArtifactWorkspaceRegistry {
   createPlanningSession() { this.assertLease(); const id = this.newId('planning'); this.allocatedIds.add(id); return id; }
   newId(kind) { for (let attempt = 0; attempt < 10; attempt += 1) { const value = this.idFactory(); if (typeof value !== 'string' || !OWNER.test(value)) invalid('idFactory'); const id = `${kind}-${value}`; if (!this.records.has(id) && !this.allocatedIds.has(id)) return id; } throw new Error('Unable to allocate workspace ID'); }
   assertOwner(ownerId) { if (typeof ownerId !== 'string' || !OWNER.test(ownerId)) invalid('ownerId'); }
-  assertAvailable(ownerId) {
+  assertAvailable(ownerId, preparationAttempt = null) {
     this.assertLease(); this.assertOwner(ownerId);
     if (this.busyOwners.has(ownerId) || this.ownerReleases.has(ownerId)) stale();
+    const active = this.#preparationAttempts.get(ownerId);
+    if (preparationAttempt !== null ? active?.capability !== preparationAttempt : active) stale();
+  }
+  beginPreparationAttempt({ ownerId } = {}) {
+    this.assertAvailable(ownerId);
+    const state = { ownerId, recordIds: new Set(), capability: null, retiring: false, retired: false };
+    const capability = Object.freeze({
+      createStagingOutput: () => this.createStagingOutput({ ownerId, preparationAttempt: capability }),
+      materializeInput: artifactSetId => this.materializeInput({ ownerId, artifactSetId, preparationAttempt: capability }),
+      retire: options => this.#retirePreparationAttempt(state, options),
+      finish: () => this.#finishPreparationAttempt(state)
+    });
+    state.capability = capability;
+    this.#preparationAttempts.set(ownerId, state);
+    return capability;
+  }
+  #preparationAllocation(ownerId, capability) {
+    this.assertAvailable(ownerId, capability);
+    if (capability === null) return null;
+    const state = this.#preparationAttempts.get(ownerId);
+    if (state.retiring || state.retired) stale();
+    return state;
+  }
+  async #retirePreparationAttempt(state, { templateOutputId = null } = {}) {
+    this.assertAvailable(state.ownerId, state.capability);
+    if (state.retiring) stale();
+    if (templateOutputId !== null) {
+      if (!state.recordIds.has(templateOutputId)) stale();
+      this.resolveOwnedWorkspace({ ownerId: state.ownerId, id: templateOutputId, kind: 'output' });
+    }
+    const recordIds = [...state.recordIds].filter(id => id !== templateOutputId);
+    state.retiring = true;
+    try {
+      await this.#startOwnerRelease(state.ownerId, recordIds, false);
+      state.recordIds = new Set(templateOutputId === null ? [] : [templateOutputId]);
+      state.retired = true;
+    } catch (cause) {
+      throw new ModpackError('CLEANUP_FAILED', 'Prepared archive cleanup failed; discard the inspection and try again', { cause, retryable: true });
+    } finally { state.retiring = false; }
+  }
+  #finishPreparationAttempt(state) {
+    if (this.#preparationAttempts.get(state.ownerId) !== state) return false;
+    if (this.busyOwners.has(state.ownerId) || state.retiring ||
+        (!state.retired && state.recordIds.size && !this.ownerReleases.has(state.ownerId))) stale();
+    this.#preparationAttempts.delete(state.ownerId);
+    return true;
   }
   addRecord({ ownerId, kind, value, workspacePath, cacheDigests: digests = [] }) { this.assertAvailable(ownerId); const id = this.newId(kind); this.allocatedIds.add(id); this.records.set(id, { id, ownerId, kind, value: storedValue(kind, value), ...(workspacePath ? { path: workspacePath } : {}), cacheReleaseIndex: 0, cacheDigests: [...digests], lastUsedAt: this.clock(), pinned: false, pending: false }); return id; }
   registerVerifiedSet({ ownerId, verifiedSet } = {}) {
@@ -283,38 +330,55 @@ class ArtifactWorkspaceRegistry {
         path.isAbsolute(realRelative) || !samePath(candidateReal, candidate)) stale();
     return deepFreeze({ id: record.id, kind: record.kind, path: candidate });
   }
-  async materializeInput({ ownerId, artifactSetId } = {}) {
-    this.assertAvailable(ownerId); const artifact = this._resolve({ ownerId, id: artifactSetId, kind: 'artifact-set' }); if (!this.artifactCache || typeof this.artifactCache.materializeSet !== 'function') invalid('artifactCache');
+  async materializeInput({ ownerId, artifactSetId, preparationAttempt = null } = {}) {
+    const attempt = this.#preparationAllocation(ownerId, preparationAttempt);
+    const artifact = this._resolve({ ownerId, id: artifactSetId, kind: 'artifact-set' }); if (!this.artifactCache || typeof this.artifactCache.materializeSet !== 'function') invalid('artifactCache');
     const binding = sourceBinding(artifactSetId, artifact.value);
-    const id = this.newId('input'); this.allocatedIds.add(id); const workspacePath = path.join(this.root, id); const record = { id, ownerId, kind: 'input', value: binding, path: workspacePath, identity: null, cleanupPath: null, cleanupState: 'owned', cacheReleaseIndex: 0, cacheDigests: [], lastUsedAt: this.clock(), pinned: false, pending: true };
-    this.records.set(id, record); this.busyOwners.add(ownerId);
+    const id = this.newId('input'); this.allocatedIds.add(id); const workspacePath = path.join(this.root, id); const record = { id, ownerId, kind: 'input', value: binding, identity: null, cleanupPath: null, cleanupState: 'owned', cacheReleaseIndex: 0, cacheDigests: [], lastUsedAt: this.clock(), pinned: false, pending: true };
+    this.records.set(id, record); attempt?.recordIds.add(id); this.busyOwners.add(ownerId);
     try {
-      const primaryPath = await this.artifactCache.materializeSet(artifact.value, workspacePath);
+      const primaryPath = await this.artifactCache.materializeSet(artifact.value, workspacePath, {
+        onDestinationCreated: () => {
+          if (record.path) stale();
+          record.path = workspacePath;
+          record.identity = statIdentity(fs.lstatSync(workspacePath));
+        }
+      });
+      if (!record.path) stale();
       this.assertLease();
       record.identity = await this.#assertExactDirectory(workspacePath, null);
       record.value = { primaryPath, ...binding }; record.pending = false; record.lastUsedAt = this.clock(); return id;
     } catch (error) {
       record.pending = false;
       this.busyOwners.delete(ownerId);
-      try { await this.releaseOwner(ownerId); } catch { /* preserve the materialization failure */ }
+      if (!attempt) try { await this.releaseOwner(ownerId); } catch { /* preserve the materialization failure */ }
       throw error;
     }
     finally { this.busyOwners.delete(ownerId); }
   }
-  createStagingOutput({ ownerId } = {}) {
-    this.assertAvailable(ownerId);
+  createStagingOutput({ ownerId, preparationAttempt = null } = {}) {
+    const attempt = this.#preparationAllocation(ownerId, preparationAttempt);
     const id = this.newId('output'); this.allocatedIds.add(id); const workspacePath = path.join(this.root, id);
-    fs.mkdirSync(workspacePath, { recursive: false });
-    const identity = statIdentity(fs.lstatSync(workspacePath));
-    this.records.set(id, { id, ownerId, kind: 'output', value: {}, path: workspacePath, identity, cleanupPath: null,
-      cleanupState: 'owned', cacheReleaseIndex: 0, cacheDigests: [], lastUsedAt: this.clock(), pinned: false, pending: false });
+    const record = { id, ownerId, kind: 'output', value: {}, identity: null, cleanupPath: null,
+      cleanupState: 'owned', cacheReleaseIndex: 0, cacheDigests: [], lastUsedAt: this.clock(), pinned: false, pending: true };
+    this.records.set(id, record);
+    attempt?.recordIds.add(id);
+    try {
+      fs.mkdirSync(workspacePath, { recursive: false });
+      // Claim the path only after mkdir succeeds: EEXIST must never authorize deleting a sibling.
+      record.path = workspacePath;
+      record.identity = statIdentity(fs.lstatSync(workspacePath));
+    } finally { record.pending = false; }
     return id;
   }
   createInspection({ ownerId, artifactSetId, result } = {}) { this._resolve({ ownerId, id: artifactSetId, kind: 'artifact-set' }); assertNoPathFields(result, 'result'); return this.addRecord({ ownerId, kind: 'inspection', value: { artifactSetId, result } }); }
-  transferOwnership({ fromOwnerId, toOwnerId } = {}) {
-    this.assertAvailable(fromOwnerId); this.assertAvailable(toOwnerId); if (fromOwnerId === toOwnerId || this.consumedOwners.has(fromOwnerId)) stale(); const records = [...this.records.values()].filter((record) => record.ownerId === fromOwnerId); const now = this.clock();
+  transferOwnership({ fromOwnerId, toOwnerId, preparationAttempt = null } = {}) {
+    this.assertAvailable(fromOwnerId, preparationAttempt); this.assertAvailable(toOwnerId);
+    if (preparationAttempt !== null && !this.#preparationAttempts.get(fromOwnerId)?.retired) stale();
+    if (fromOwnerId === toOwnerId || this.consumedOwners.has(fromOwnerId)) stale(); const records = [...this.records.values()].filter((record) => record.ownerId === fromOwnerId); const now = this.clock();
     if (!records.length || records.some((record) => record.pending || (!record.pinned && now - record.lastUsedAt >= this.ttlMs))) stale();
-    for (const record of records) { record.ownerId = toOwnerId; record.lastUsedAt = now; record.pinned = true; } this.consumedOwners.add(fromOwnerId); return records.length;
+    for (const record of records) { record.ownerId = toOwnerId; record.lastUsedAt = now; record.pinned = true; }
+    this.consumedOwners.add(fromOwnerId); this.#preparationAttempts.delete(fromOwnerId); return records.length;
   }
   async #assertExactDirectory(candidate, expectedIdentity) {
     this.assertLease();
@@ -459,6 +523,7 @@ class ArtifactWorkspaceRegistry {
   releaseOwner(ownerId) {
     this.assertLease();
     this.assertOwner(ownerId);
+    if (this.#preparationAttempts.has(ownerId)) stale();
     const existing = this.ownerReleases.get(ownerId);
     if (existing) {
       const resumed = this.#runOwnerRelease(existing);
@@ -475,7 +540,7 @@ class ArtifactWorkspaceRegistry {
     if (!Number.isFinite(now)) invalid('now');
     const byOwner = new Map();
     for (const record of this.records.values()) {
-      if (record.pinned || record.pending || this.busyOwners.has(record.ownerId) || this.ownerReleases.has(record.ownerId) ||
+      if (record.pinned || record.pending || this.busyOwners.has(record.ownerId) || this.ownerReleases.has(record.ownerId) || this.#preparationAttempts.has(record.ownerId) ||
           now - record.lastUsedAt < this.ttlMs) continue;
       if (!byOwner.has(record.ownerId)) byOwner.set(record.ownerId, []);
       byOwner.get(record.ownerId).push(record.id);
@@ -486,7 +551,7 @@ class ArtifactWorkspaceRegistry {
   }
   async dispose() {
     if (this.disposed || !this.rootLease) return false;
-    if (this.records.size || this.busyOwners.size || this.ownerReleases.size) return false;
+    if (this.records.size || this.busyOwners.size || this.ownerReleases.size || this.#preparationAttempts.size) return false;
     const lease = this.rootLease;
     await lease.close();
     this.rootLease = null;

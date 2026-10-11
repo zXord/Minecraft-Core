@@ -152,7 +152,8 @@ class PlanRegistry {
   }
 
   create(request) {
-    const descriptors = strictObject(request, ['plan', 'sanitizedView', 'fingerprint', 'planningSessionId']);
+    const descriptors = strictObject(request, ['plan', 'sanitizedView', 'fingerprint', 'planningSessionId', 'preparationAttempt'],
+      ['plan', 'sanitizedView', 'fingerprint', 'planningSessionId']);
     const suppliedPlan = descriptors.plan.value;
     const clonedPlan = clone(suppliedPlan);
     if (!clonedPlan || typeof clonedPlan !== 'object' || Array.isArray(clonedPlan) ||
@@ -177,7 +178,8 @@ class PlanRegistry {
       expiresAtMs,
       expiresAt: new Date(expiresAtMs).toISOString()
     };
-    this.workspaceRegistry.transferOwnership({ fromOwnerId: planningSessionId, toOwnerId: planId });
+    this.workspaceRegistry.transferOwnership({ fromOwnerId: planningSessionId, toOwnerId: planId,
+      ...(descriptors.preparationAttempt ? { preparationAttempt: descriptors.preparationAttempt.value } : {}) });
     this.plans.set(planId, record);
     return publicCreated(record);
   }

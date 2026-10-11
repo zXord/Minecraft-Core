@@ -502,6 +502,7 @@ class ProductionCandidatePreparer {
 
   async preparePlanInputs({
     inspection,
+    preparationAttempt = null,
     operationKind = 'install',
     selections,
     signal,
@@ -514,11 +515,14 @@ class ProductionCandidatePreparer {
     const reportProgress = candidateProgressReporter(onProgress);
     blockedAlwaysClassification(inspection.result.classification);
     const ownerId = inspection.inspectionId;
-    const rawOutputId = this.workspaceRegistry.createStagingOutput({ ownerId });
+    const rawOutputId = preparationAttempt
+      ? preparationAttempt.createStagingOutput()
+      : this.workspaceRegistry.createStagingOutput({ ownerId });
     reportProgress({ activity: 'extracting' });
     await this.archiveExtractor.extractArchive({
       inspectionId: ownerId,
       destinationId: rawOutputId,
+      preparationAttempt,
       signal,
       onProgress: progress => {
         if (progress?.phase === 'postwalk') reportProgress({ activity: 'verifying-archive' });
@@ -565,7 +569,9 @@ class ProductionCandidatePreparer {
     const rootStat = await fsp.lstat(root);
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink() ||
         await this.reparseInspector.isReparsePoint(root, signal ? { signal } : undefined) !== false) throw unsafe();
-    const templateOutputId = this.workspaceRegistry.createStagingOutput({ ownerId });
+    const templateOutputId = preparationAttempt
+      ? preparationAttempt.createStagingOutput()
+      : this.workspaceRegistry.createStagingOutput({ ownerId });
     const templatePath = this.workspaceRegistry.resolveOwnedWorkspace({
       ownerId, id: templateOutputId, kind: 'output'
     }).path;
