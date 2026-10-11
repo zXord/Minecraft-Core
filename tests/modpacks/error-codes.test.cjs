@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const ts = require('typescript');
 
-const { FAILURE_CODES, ModpackError, PUBLIC_ERROR_DETAILS_BY_CODE } = require('../../electron/services/modpacks/errors.cjs');
+const { FAILURE_CODES, ModpackError, PUBLIC_ERROR_DETAILS_BY_CODE, isValidPublicErrorResult } = require('../../electron/services/modpacks/errors.cjs');
 
 const APPROVED_CODES = [
   'INVALID_RELEASE_URL', 'RATE_LIMITED', 'REPOSITORY_NOT_FOUND', 'RELEASE_NOT_FOUND', 'ASSET_AMBIGUOUS', 'ASSET_SELECTION_REQUIRED', 'ASSET_CHANGED', 'ARTIFACT_UNAVAILABLE',
@@ -13,7 +13,8 @@ const APPROVED_CODES = [
   'UNSAFE_ARCHIVE_ENTRY', 'ARCHIVE_ENTRY_COLLISION', 'EXTRACTOR_UNAVAILABLE', 'EXTRACTOR_FAILED', 'MANIFEST_INVALID', 'CLIENT_ONLY_PACK',
   'MISSING_PROVIDER_DIGEST', 'HASH_MISMATCH', 'PACK_ROOT_AMBIGUOUS', 'LOADER_CONFLICT', 'UNSUPPORTED_LOADER', 'UNSUPPORTED_RUNTIME_LAYOUT',
   'RUNTIME_INCOMPLETE', 'SERVER_PATH_TOO_LONG', 'DOWNGRADE_REQUIRED', 'SWITCH_REQUIRED', 'PLAN_STALE', 'SERVER_RUNNING', 'OPERATION_IN_PROGRESS', 'CANCELLED', 'TARGET_EXISTS', 'INSUFFICIENT_DISK',
-  'BACKUP_FAILED', 'COMMIT_FAILED', 'HEALTH_CHECK_FAILED', 'ROLLBACK_FAILED', 'RECOVERY_REQUIRED', 'CLEANUP_FAILED', 'INVALID_REQUEST', 'NO_INSTALLABLE_ASSET', 'CLIENT_PACK_UNAVAILABLE', 'CLIENT_PACK_SERVER_CHANGED', 'CLIENT_RUNNING', 'MANAGED_MOD_EDIT_BLOCKED'
+  'BACKUP_FAILED', 'COMMIT_FAILED', 'HEALTH_CHECK_FAILED', 'ROLLBACK_FAILED', 'RECOVERY_REQUIRED', 'CLEANUP_FAILED', 'INVALID_REQUEST', 'NO_INSTALLABLE_ASSET', 'CLIENT_PACK_UNAVAILABLE', 'CLIENT_PACK_SERVER_CHANGED', 'CLIENT_RUNNING', 'MANAGED_MOD_EDIT_BLOCKED',
+  'LAUNCH_CURSOR_EXPIRED', 'LAUNCH_DISCOVERY_CAPACITY', 'LAUNCH_LIST_LIMIT_EXCEEDED'
 ];
 
 test('failure code registry contains exactly the approved public and boundary codes', () => {
@@ -38,6 +39,9 @@ test('renderer type contract accepts the runtime-direction failure codes', t => 
     "const pairClient: ModpackFailureCode = 'CLIENT_PACK_UNAVAILABLE';",
     "const refuseManagedModEdit: ModpackFailureCode = 'MANAGED_MOD_EDIT_BLOCKED';",
     "const stopClient: ModpackFailureCode = 'CLIENT_RUNNING';",
+    "const refreshSetupList: ModpackFailureCode = 'LAUNCH_CURSOR_EXPIRED';",
+    "const retrySetupList: ModpackFailureCode = 'LAUNCH_DISCOVERY_CAPACITY';",
+    "const useExactSetup: ModpackFailureCode = 'LAUNCH_LIST_LIMIT_EXCEEDED';",
     'void retryAsDowngrade;',
     'void retryAsSwitch;',
     'void retryAfterRateLimit;',
@@ -52,6 +56,34 @@ test('renderer type contract accepts the runtime-direction failure codes', t => 
   const diagnostics = ts.getPreEmitDiagnostics(program);
   assert.deepEqual(diagnostics.map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')), []);
 });
+
+for (const { code, message, retryable } of [
+  { code: 'LAUNCH_CURSOR_EXPIRED', message: 'The setup list expired. Refresh it to continue.', retryable: true },
+  { code: 'LAUNCH_DISCOVERY_CAPACITY', message: 'The setup list is busy. Try again shortly.', retryable: true },
+  { code: 'LAUNCH_LIST_LIMIT_EXCEEDED', message: 'Too many setups are available to list. Use an exact setup reference.', retryable: false }
+]) {
+  test(`${code} preserves its caller message and retryability with closed empty details`, () => {
+    const privateDetails = {
+      cursor: 'private-cursor',
+      path: 'C:\\secret\\server',
+      snapshot: { id: 'private-snapshot', setups: ['private-setup'] },
+      owner: 'private-owner',
+      operationId: 'private-operation',
+      count: '1001'
+    };
+    const result = new ModpackError(code, message, { details: privateDetails, retryable }).toPublicResult();
+
+    assert.deepEqual(result, { ok: false, error: { code, message, details: {}, retryable } });
+    assert.equal(isValidPublicErrorResult(result), true);
+    assert.deepEqual(PUBLIC_ERROR_DETAILS_BY_CODE[code], {});
+    for (const [key, value] of Object.entries(privateDetails)) {
+      assert.equal(isValidPublicErrorResult({
+        ok: false,
+        error: { code, message, details: { [key]: value }, retryable }
+      }), false, `${code} must reject public ${key} details`);
+    }
+  });
+}
 
 test('public error details cannot leak paths or signed URLs', () => {
   const error = new ModpackError('HASH_MISMATCH', 'Integrity check failed', {
