@@ -235,7 +235,8 @@ Settlement status and actual recorded disposition remain distinct: active may ca
 
   ```powershell
   $launchTestRun = [guid]::NewGuid().ToString('N')
-  npx --no-install playwright test tests/e2e/modpack-launch-reconciliation.spec.js --workers=1 --output=("test-results/launch-reconciliation-" + $launchTestRun)
+  $launchTestOutput = 'test-results/launch-reconciliation-' + $launchTestRun
+  npx --no-install playwright test tests/e2e/modpack-launch-reconciliation.spec.js --workers=1 --output $launchTestOutput
   ```
 
   Expected RED for missing reconciliation/selection behavior, then GREEN after local setup/review parent callback integration. Never release pending/job-owned/unknown reservation from renderer cleanup; not-started is navigation/replan permission, not directory deletion.
