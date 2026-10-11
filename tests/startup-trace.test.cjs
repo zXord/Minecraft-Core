@@ -13,8 +13,20 @@ const markers = [
   'early:icon:start', 'early:icon:complete', 'early:shortcut-attempt:start', 'early:shortcut-attempt:complete',
   'early:window:create:start', 'early:window:create:complete', 'early:document:start', 'early:document:complete',
   'early:main-load:start', 'early:main-load:complete', 'early:failed',
-  'main:entry', 'main:imports:complete', 'main:graph:start', 'main:graph:complete',
-  'main:before-ready:start', 'main:before-ready:complete', 'main:ipc:start', 'main:ipc:complete',
+  'main:entry',
+  'main:import:path:complete', 'main:import:electron:complete', 'main:import:fs:complete',
+  'main:import:runtime-flags:complete', 'main:import:packaged-smoke-guard:complete',
+  'main:import:main-bootstrap:complete', 'main:import:modpack-service-graph:complete',
+  'main:import:test-modpack-factory:complete', 'main:import:app-cleanup:complete',
+  'main:import:safe-send:complete', 'main:import:app-store:complete', 'main:import:navigation-policy:complete',
+  'main:import:runtime-paths:complete', 'main:import:tls-utils:complete', 'main:import:runtime-mode:complete',
+  'main:import:renderer-loader:complete', 'main:import:asset-resolver:complete',
+  'main:import:orderly-quit-barrier:complete', 'main:import:startup-window:complete',
+  'main:import:startup-entry:complete', 'main:import:update-service:complete',
+  'main:import:server-mutation-context:complete', 'main:import:dev-config:complete',
+  'main:imports:complete', 'main:graph:start', 'main:graph:complete',
+  'main:before-ready:start', 'main:before-ready:complete', 'main:ipc:start',
+  'main:ipc:listeners:complete', 'main:ipc:handler-module:complete', 'main:ipc:complete',
   'update-service:get:start', 'update-service:get:complete', 'recovery:start', 'recovery:complete',
   'server-config:start', 'server-config:complete', 'cleanup:start', 'cleanup:complete',
   'main-window:create:start', 'main-window:create:complete',
@@ -65,18 +77,22 @@ test('trace captures one initial baseline and emits only the bounded four-field 
   assert.doesNotMatch(lines.join(''), /SECRET|PRIVATE/);
 });
 
-test('trace admits all 48 startup markers once and rejects unknown inputs without coercion', () => {
+test('trace admits all 73 startup markers once and rejects unknown inputs without coercion', () => {
   const { mark, lines } = fixture();
   let coercions = 0;
   const privateMarker = { toString() { coercions += 1; return 'SECRET_PATH'; } };
-  for (const unknown of [privateMarker, null, undefined, 42, 'SECRET_PATH', 'main:entry\nSECRET']) {
+  for (const unknown of [privateMarker, null, undefined, 42, 'SECRET_PATH', 'main:entry\nSECRET',
+    'main:import:SECRET_PATH:complete', 'main:ipc:SECRET_HANDLER:complete']) {
     assert.equal(mark(unknown), false);
   }
   for (const marker of markers) assert.equal(mark(marker), true, marker);
   for (const marker of markers) assert.equal(mark(marker), false, marker);
-  assert.equal(lines.length, 48);
+  assert.equal(lines.length, 73);
   assert.equal(coercions, 0);
   assert.deepEqual(lines.map(line => JSON.parse(line.slice(prefix.length)).marker), markers);
+  for (const line of lines) {
+    assert.deepEqual(Object.keys(JSON.parse(line.slice(prefix.length))), ['marker', 'pid', 'utc', 'elapsedMs']);
+  }
   assert.doesNotMatch(lines.join(''), /SECRET/);
 });
 

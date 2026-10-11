@@ -1758,7 +1758,7 @@
       </div>
     {/if}
 
-    <div class="main-content">
+    <div class="main-content" class:modpack-route={step === 'done' && $route === '/modpack'}>
       {#if step === "chooseFolder"}
         <div class="setup-container">
           {#if instanceType === "server"}
@@ -2375,6 +2375,12 @@
     box-sizing: border-box !important;
     padding: 0 !important; /* Consistent padding */
   }
+
+  /* This flow fits the available window; other routes retain their sizing. */
+  .main-content.modpack-route { min-width: 0; }
+  .modpack-route .server-header,
+  .modpack-route .tab-content { min-width: 0; max-width: 100%; box-sizing: border-box; }
+  .modpack-route .content-panel { width: 100% !important; min-width: 0; max-width: 1120px; }
 
   /* Force consistent dimensions for server tab content only - don't interfere with client */
   .content-panel > :global(.dashboard-panel),

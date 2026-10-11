@@ -81,6 +81,62 @@ test('missing required published file stays a review failure with actionable saf
   expect(await page.evaluate(() => window.calls.filter(call => call.channel === 'client-packs:install'))).toEqual([]);
 });
 
+test('Verify shows indeterminate activity until success settles without changing readiness', async ({page}) => {
+  await start(page,'ready');
+  await page.evaluate(() => window.pending['client-packs:verify']=[]);
+  await page.getByRole('button',{name:'Verify matching pack'}).click();
+
+  const activity=page.getByRole('status').filter({hasText:'Verifying installed client pack'});
+  await expect(activity).toBeVisible();
+  await expect(activity.locator('progress')).toBeVisible();
+  await expect(activity.locator('progress')).not.toHaveAttribute('value',/.*/);
+  await expect(page.getByRole('button',{name:'Verify matching pack'})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'Refresh requirement'})).toBeDisabled();
+  await expect(page.getByRole('button',{name:'Cancel request'})).toHaveCount(0);
+  expect(await page.evaluate(()=>window.calls.filter(call=>call.channel.startsWith('client-packs:')))).toHaveLength(2); // initial state and one verify
+  expect(await page.evaluate(()=>window.calls.filter(call=>/client-packs:(verify|install|preview|recover)$/.test(call.channel)).map(call=>call.channel))).toEqual(['client-packs:verify']);
+
+  await page.evaluate(()=>window.pending['client-packs:verify'][0].resolve({ok:true,value:{clientId:'a',status:'ready',verified:true,descriptor:window.descriptor}}));
+  await expect(activity).toHaveCount(0);
+  await expect(page.getByText('Matching pack ready',{exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Verify matching pack'})).toBeEnabled();
+  await expect(page.getByRole('button',{name:'Refresh requirement'})).toBeEnabled();
+});
+
+test('Verify error refresh keeps activity visible through the awaited state refresh', async ({page}) => {
+  await start(page,'ready');
+  await page.evaluate(() => {window.fail={'client-packs:verify':{code:'RECOVERY_REQUIRED',message:'Verification refused'}};window.pending['client-packs:get-state']=[];});
+  await page.getByRole('button',{name:'Verify matching pack'}).click();
+  const activity=page.getByRole('status').filter({hasText:'Verifying installed client pack'});
+  await expect(activity).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('Verification refused');
+  await expect.poll(()=>page.evaluate(()=>window.calls.filter(call=>call.channel==='client-packs:get-state').length)).toBe(2);
+  await expect(activity).toBeVisible();
+  await expect(page.getByRole('button',{name:'Verify matching pack'})).toBeDisabled();
+  await page.evaluate(()=>window.pending['client-packs:get-state'][0].resolve({ok:true,value:{clientId:'a',status:'ready',verified:true,descriptor:window.descriptor}}));
+  await expect(activity).toHaveCount(0);
+  await expect(page.getByRole('alert')).toContainText('Verification refused');
+  await expect(page.getByText('Matching pack ready',{exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Verify matching pack'})).toBeEnabled();
+});
+
+test('switching client fences a held Verify indicator and its late result', async ({page}) => {
+  await start(page,'ready');
+  await page.evaluate(() => window.pending['client-packs:verify']=[]);
+  await page.getByRole('button',{name:'Verify matching pack'}).click();
+  const activity=page.getByRole('status').filter({hasText:'Verifying installed client pack'});
+  await expect(activity).toBeVisible();
+  await page.evaluate(()=>window.show('client','b'));
+  await expect(page.getByRole('heading',{name:'Checking matching pack…'})).toHaveCount(0);
+  await expect(page.getByText('Matching pack ready',{exact:true})).toBeVisible();
+  await expect(activity).toHaveCount(0);
+  await page.evaluate(()=>window.pending['client-packs:verify'][0].resolve({ok:true,value:{clientId:'a',status:'modified',verified:false,descriptor:window.descriptor}}));
+  await expect(page.getByText('Matching pack ready',{exact:true})).toBeVisible();
+  await expect(page.getByRole('heading',{name:'Matching pack modified'})).toHaveCount(0);
+  await expect(activity).toHaveCount(0);
+  expect(await page.evaluate(()=>window.classified)).toMatchObject({clientId:'b',status:'ready'});
+});
+
 async function companionEvidence(page, label, errors) {
   if (!process.env.COMPANION_WARNING_EVIDENCE) return;
   const prefix = path.join(process.env.COMPANION_WARNING_EVIDENCE, `${process.env.COMPANION_WARNING_PHASE ?? 'fixture'}-${label}`);

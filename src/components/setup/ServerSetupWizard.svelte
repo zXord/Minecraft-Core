@@ -411,6 +411,9 @@
     <ModpackSourceChoice {busy} on:select={chooseSource} on:back={() => navigateStage('method')} />
     {#if busy}<div class="mp-state">Opening the native archive picker…</div>{/if}
   {:else if stage === 'modrinth'}
+    {#if busy && inspectionProgress}
+      <div class="modrinth-inspection-status"><ModpackInspectionProgress progress={inspectionProgress} /></div>
+    {/if}
     <ModrinthPackBrowser {busy} on:select={(event) => inspectSelection(event.detail.request, event.detail.label)} on:inspectionreset={invalidateInspectionRequests} on:github={reviewLinkedGithub} on:back={goToSource} on:local={selectLocalArchive} on:custom={() => navigateStage('custom')} />
   {:else if stage === 'github'}
     <GitHubReleasePicker {suggestedRepositoryUrl} suggestedModrinthProjectId={linkedModrinthProjectId} on:assets={handleGithubAssets} on:back={goToSource} on:local={selectLocalArchive} on:custom={() => navigateStage('custom')} />
@@ -425,7 +428,7 @@
     <ModpackJobProgress {job} on:terminal={completeSetup} on:action={handleOutcomeAction} on:return={() => { job = null; navigateStage('source'); }} />
   {/if}
 
-  {#if busy && inspectionProgress && stage !== 'github-assets' && !['review', 'progress'].includes(stage)}
+  {#if busy && inspectionProgress && !['modrinth', 'github-assets', 'review', 'progress'].includes(stage)}
     <ModpackInspectionProgress progress={inspectionProgress} />
   {/if}
 </div>
@@ -433,6 +436,7 @@
 <style>
   @import '../modpacks/modpack-ui.css';
   .setup-shell { display: grid; gap: 1rem; }
+  .modrinth-inspection-status { position: sticky; top: 4rem; z-index: 2; align-self: start; min-height: 7rem; border-radius: 8px; background: var(--mp-panel); }
   .stepper { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.35rem; padding: 0.55rem; border: 1px solid var(--mp-border); border-radius: 10px; background: rgba(0, 0, 0, 0.16); }
   .stepper span { display: flex; align-items: center; justify-content: center; gap: 0.4rem; min-height: 38px; padding: 0.25rem; color: var(--mp-muted); font-size: 0.8rem; text-align: center; border-radius: 7px; }
   .stepper span b { display: inline-grid; place-items: center; width: 1.35rem; height: 1.35rem; border-radius: 999px; border: 1px solid var(--mp-border); }

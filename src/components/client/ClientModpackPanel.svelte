@@ -145,7 +145,7 @@
       applyState({...state,...value});
     },true);
   }
-  function verify() {return run(id => clientPackApi.verify(id), applyState);}
+  function verify() {return run(id => clientPackApi.verify(id), applyState,false,false,'verifying-installation');}
   function recover() {
     return run(async id => {await clientPackApi.recover(id);return clientPackApi.getState(id);},applyState,false,true,'recovering-installation');
   }

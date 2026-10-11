@@ -996,6 +996,9 @@
   {:else if flow === 'source'}
     <ModpackSourceChoice {busy} on:select={(event) => event.detail.source === 'local' ? selectLocalArchive() : navigateSelectionFlow(event.detail.source)} on:back={returnToDashboard} />
   {:else if flow === 'modrinth'}
+    {#if busy && inspectionProgress}
+      <div class="modrinth-inspection-status"><ModpackInspectionProgress progress={inspectionProgress} /></div>
+    {/if}
     <ModrinthPackBrowser currentRuntime={state?.runtime || null} {busy} on:select={(event) => inspectSelection(event.detail.request, operationKind)} on:inspectionreset={invalidateInspectionRequests} on:github={reviewLinkedGithub} on:back={() => navigateSelectionFlow('source')} on:local={selectLocalArchive} on:custom={returnToDashboard} />
   {:else if flow === 'github'}
     <GitHubReleasePicker {serverId} {suggestedRepositoryUrl} suggestedModrinthProjectId={linkedModrinthProjectId} currentReleaseId={currentGithubReleaseId} requestedReleaseId={requestedGithubReleaseId} requestedNavigationToken={requestedGithubNavigationToken} allowCurrentReleaseReview={allowCurrentGithubReleaseReview} on:assets={handleGithubAssets} on:back={() => navigateSelectionFlow('source')} on:local={selectLocalArchive} on:custom={returnToDashboard} />
@@ -1010,14 +1013,15 @@
   {:else if flow === 'job'}
     {#key job?.jobId}<ModpackJobProgress bind:job on:return={returnToDashboard} on:terminal={(event) => { if (event.detail.job.operationKind === 'verify') verification = event.detail.job; }} on:action={handleOutcomeAction} />{/key}
   {/if}
-  {#if busy && inspectionProgress && flow !== 'github-assets' && !['inspection', 'review', 'job'].includes(flow)}
+  {#if busy && inspectionProgress && !['modrinth', 'github-assets', 'inspection', 'review', 'job'].includes(flow)}
     <ModpackInspectionProgress progress={inspectionProgress} />
   {/if}
 </div>
 
 <style>
   @import '../components/modpacks/modpack-ui.css';
-  .modpack-page { padding: 0.5rem 0 2rem; }
+  .modpack-page { padding: 0.5rem 0 2rem; min-width: 0; }
+  .modrinth-inspection-status { position: sticky; top: 4rem; z-index: 2; align-self: start; min-height: 7rem; border-radius: 8px; background: var(--mp-panel); }
   .page-header { padding: 0.4rem 0; }
   .page-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.55rem; min-height: 42px; }
   .section-tabs { display: flex; gap: 0.45rem; overflow-x: auto; padding: 0.4rem; border: 1px solid var(--mp-border); border-radius: 10px; background: rgba(0, 0, 0, 0.15); }

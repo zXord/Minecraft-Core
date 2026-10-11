@@ -2,10 +2,15 @@
 const { markStartupTrace } = require('./utils/startup-trace.cjs');
 markStartupTrace('main:entry');
 const path = require('path');
+markStartupTrace('main:import:path:complete');
 const { app, BrowserWindow, Menu, Tray, Notification, dialog, ipcMain, shell, session } = require('electron');
+markStartupTrace('main:import:electron:complete');
 const fs = require('fs');
+markStartupTrace('main:import:fs:complete');
 const { createRuntimeFlags } = require('./bootstrap/runtime-flags.cjs');
+markStartupTrace('main:import:runtime-flags:complete');
 const { createPackagedSmokeGuard } = require('./bootstrap/packaged-smoke-guard.cjs');
+markStartupTrace('main:import:packaged-smoke-guard:complete');
 const runtimeFlags = createRuntimeFlags({ isPackaged: Boolean(app.isPackaged) });
 const packagedSmokeGuard = runtimeFlags.packagedSmokeMode ? createPackagedSmokeGuard({ app }) : null;
 if (runtimeFlags.packagedSmokeMode) {
@@ -20,28 +25,46 @@ if (runtimeFlags.testMode) {
   process.env.MINECRAFT_CORE_USER_DATA_DIR = runtimeFlags.isolatedUserDataPath;
 }
 const { createMainBootstrap } = require('./bootstrap/create-main-bootstrap.cjs');
+markStartupTrace('main:import:main-bootstrap:complete');
 const { createModpackServiceGraph } = require('./bootstrap/create-modpack-service-graph.cjs');
+markStartupTrace('main:import:modpack-service-graph:complete');
 const { loadTestIpcOverrides, loadTestModpackFactory, loadTestRecoveryFactory, resolveServiceGraphUserData } = require('./bootstrap/load-test-modpack-factory.cjs');
+markStartupTrace('main:import:test-modpack-factory:complete');
 const { setupAppCleanup } = require('./utils/app-cleanup.cjs');
+markStartupTrace('main:import:app-cleanup:complete');
 const { setMainWindow } = require('./utils/safe-send.cjs');
+markStartupTrace('main:import:safe-send:complete');
 const appStore = require('./utils/app-store.cjs');
+markStartupTrace('main:import:app-store:complete');
 const { shouldAllowNavigation } = require('./utils/navigation-policy.cjs');
+markStartupTrace('main:import:navigation-policy:complete');
 const { cleanupRuntimeFiles } = require('./utils/runtime-paths.cjs');
+markStartupTrace('main:import:runtime-paths:complete');
 const { getTlsFingerprint, normalizeFingerprint } = require('./utils/tls-utils.cjs');
+markStartupTrace('main:import:tls-utils:complete');
 const { shouldUseDevServer } = require('./utils/runtime-mode.cjs');
+markStartupTrace('main:import:runtime-mode:complete');
 const { loadRendererContent } = require('./utils/renderer-loader.cjs');
+markStartupTrace('main:import:renderer-loader:complete');
 const { resolveWindowIconPath } = require('./utils/asset-resolver.cjs');
+markStartupTrace('main:import:asset-resolver:complete');
 const { createOrderlyQuitBarrier } = require('./utils/orderly-quit-barrier.cjs');
+markStartupTrace('main:import:orderly-quit-barrier:complete');
 const {
   applyWindowsTaskbarDetails,
   createStartupWindow,
   createWindowReadyTracker,
   startApplicationAfterReady
 } = require('./utils/startup-window.cjs');
+markStartupTrace('main:import:startup-window:complete');
 const { claimEarlyStartupWindow } = require('./startup-entry.cjs');
+markStartupTrace('main:import:startup-entry:complete');
 const { getUpdateService } = require('./services/update-service.cjs');
+markStartupTrace('main:import:update-service:complete');
 const { installServerMutationCoordinator } = require('./services/server-mutation-context.cjs');
+markStartupTrace('main:import:server-mutation-context:complete');
 const devConfig = require('../config/dev-config.cjs');
+markStartupTrace('main:import:dev-config:complete');
 markStartupTrace('main:imports:complete');
 const startupStartedAt = Date.now();
 const mainWindowReadyTrackers = new WeakMap();
@@ -1078,7 +1101,9 @@ function createWindow() {
     
     markStartupTrace('main:ipc:start');
     initializePostRecoveryListeners();
+    markStartupTrace('main:ipc:listeners:complete');
     const { setupIpcHandlers } = require('./ipc-handlers.cjs');
+    markStartupTrace('main:ipc:handler-module:complete');
     setupIpcHandlers(win, serviceGraph);
     markStartupTrace('main:ipc:complete');
     handlersInitialized = true;

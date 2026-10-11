@@ -1159,12 +1159,47 @@ function createComposition({ input, scenarioFile }) {
         repositoryId: request.repositoryId, releaseId: request.releaseId, assetIds: request.assetIds
       });
       const selectedAssetId = Array.isArray(request.assetIds) ? request.assetIds[0] : null;
+      // Serialized, fixture-only progress holds. Each phase releases explicitly
+      // through updateScenario, on abort, or after its independent 8s fail-safe.
+      const controlledProgress = scenario().inspectionFixture?.holdProgress === true;
+      const holdPhase = async (step, progress) => {
+        emitProgress(progress);
+        await new Promise((resolve, reject) => {
+          let poll;
+          let failSafe;
+          const finish = error => {
+            clearInterval(poll);
+            clearTimeout(failSafe);
+            signal?.removeEventListener('abort', onAbort);
+            error ? reject(error) : resolve();
+          };
+          const onAbort = () => finish(new ModpackError('CANCELLED', 'Archive inspection was cancelled.'));
+          if (signal?.aborted) return onAbort();
+          signal?.addEventListener('abort', onAbort, { once: true });
+          poll = setInterval(() => {
+            const control = scenario().inspectionFixture;
+            if (!control?.holdProgress || Number(control.phaseStep || 0) > step) finish();
+          }, 20);
+          failSafe = setTimeout(() => finish(), 8000);
+        });
+      };
+      if (controlledProgress) {
+        try {
+          await holdPhase(0, { phase: 'downloading', transferredBytes: 512, totalBytes: 1024, percent: 50 });
+          await holdPhase(1, { phase: 'downloading', transferredBytes: 768, totalBytes: 1024, percent: 75 });
+          await holdPhase(2, { phase: 'materialize' });
+        } catch (error) {
+          record('lifecycleCalls', { method: 'inspectSourceCancelled', provider: request.provider,
+            projectId: request.projectId, versionId: request.versionId });
+          throw error;
+        }
+      }
       const configuredDelay = Number(
         scenario().inspectionFixture?.delayMsByAssetId?.[selectedAssetId] ||
         scenario().modrinthFixture?.inspectionDelayMsByVersionId?.[request.versionId] ||
         0
       );
-      if (Number.isFinite(configuredDelay) && configuredDelay > 0) {
+      if (!controlledProgress && Number.isFinite(configuredDelay) && configuredDelay > 0) {
         emitProgress({ phase: 'downloading', transferredBytes: 512, totalBytes: 1024, percent: 50 });
         try {
           await new Promise((resolve, reject) => {

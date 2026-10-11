@@ -444,12 +444,39 @@ test('startup rejects a factory that neither returns nor publishes a window', as
   assert.equal(afterWindowCalls, 0);
 });
 
-async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false, brokenSink = false, ipcError = null, loggerNull = false } = {}) {
+const mainImportCheckpoints = [
+  ['path', 'main:import:path:complete'],
+  ['electron', 'main:import:electron:complete'],
+  ['fs', 'main:import:fs:complete'],
+  ['./bootstrap/runtime-flags.cjs', 'main:import:runtime-flags:complete'],
+  ['./bootstrap/packaged-smoke-guard.cjs', 'main:import:packaged-smoke-guard:complete'],
+  ['./bootstrap/create-main-bootstrap.cjs', 'main:import:main-bootstrap:complete'],
+  ['./bootstrap/create-modpack-service-graph.cjs', 'main:import:modpack-service-graph:complete'],
+  ['./bootstrap/load-test-modpack-factory.cjs', 'main:import:test-modpack-factory:complete'],
+  ['./utils/app-cleanup.cjs', 'main:import:app-cleanup:complete'],
+  ['./utils/safe-send.cjs', 'main:import:safe-send:complete'],
+  ['./utils/app-store.cjs', 'main:import:app-store:complete'],
+  ['./utils/navigation-policy.cjs', 'main:import:navigation-policy:complete'],
+  ['./utils/runtime-paths.cjs', 'main:import:runtime-paths:complete'],
+  ['./utils/tls-utils.cjs', 'main:import:tls-utils:complete'],
+  ['./utils/runtime-mode.cjs', 'main:import:runtime-mode:complete'],
+  ['./utils/renderer-loader.cjs', 'main:import:renderer-loader:complete'],
+  ['./utils/asset-resolver.cjs', 'main:import:asset-resolver:complete'],
+  ['./utils/orderly-quit-barrier.cjs', 'main:import:orderly-quit-barrier:complete'],
+  ['./utils/startup-window.cjs', 'main:import:startup-window:complete'],
+  ['./startup-entry.cjs', 'main:import:startup-entry:complete'],
+  ['./services/update-service.cjs', 'main:import:update-service:complete'],
+  ['./services/server-mutation-context.cjs', 'main:import:server-mutation-context:complete'],
+  ['../config/dev-config.cjs', 'main:import:dev-config:complete']
+];
+
+async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false, brokenSink = false, ipcError = null, listenerError = null, ipcModuleError = null, loggerNull = false } = {}) {
   const mainPath = path.resolve(__dirname, '../electron/main.cjs');
   const originalLoad = Module._load;
   const calls = [];
   const boundaries = [];
   const traceLines = [];
+  const importEvents = [];
   let capturedGraphDependencies;
   let publishedWindow;
   let finishNavigation;
@@ -504,7 +531,7 @@ async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false
     dispose() { calls.push('bootstrap:dispose'); return disposal; }
   };
 
-  Module._load = function loadMainFixture(request, parent, isMain) {
+  function loadMainFixture(request, parent, isMain) {
     if (request === './utils/startup-trace.cjs' && parent.filename === mainPath) {
       const { createStartupTrace } = originalLoad(request, parent, isMain);
       return { markStartupTrace: createStartupTrace({
@@ -513,7 +540,11 @@ async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false
         sink(line) {
           if (brokenSink) throw new Error('PRIVATE_SINK_FAILURE');
           traceLines.push(line);
-          boundaries.push(JSON.parse(line.slice('[Minecraft Core startup trace] '.length)).marker);
+          const marker = JSON.parse(line.slice('[Minecraft Core startup trace] '.length)).marker;
+          boundaries.push(marker);
+          if (marker === 'main:entry' || marker === 'main:imports:complete' || marker.startsWith('main:import:')) {
+            importEvents.push(marker);
+          }
         }
       }) };
     }
@@ -521,6 +552,7 @@ async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false
     if (request === './ipc-handlers.cjs') {
       calls.push('ipc-module:load');
       boundaries.push('ipc-module:load');
+      if (ipcModuleError) throw ipcModuleError;
       return { setupIpcHandlers(window, suppliedGraph) {
         assert.equal(window, publishedWindow);
         assert.equal(suppliedGraph, graph);
@@ -528,7 +560,10 @@ async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false
         if (ipcError) throw ipcError;
       } };
     }
-    if (request === './services/auto-restart.cjs') return { initializeAutoRestartListeners() { boundaries.push('listeners:initialize'); } };
+    if (request === './services/auto-restart.cjs') return { initializeAutoRestartListeners() {
+      boundaries.push('listeners:initialize');
+      if (listenerError) throw listenerError;
+    } };
     if (request === './utils/asset-resolver.cjs') return { resolveWindowIconPath: () => null };
     if (request === './utils/renderer-loader.cjs') return { loadRendererContent(options) {
       assert.equal(options.window, publishedWindow);
@@ -581,6 +616,13 @@ async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false
       };
     }
     return originalLoad(request, parent, isMain);
+  }
+  Module._load = function observeMainImports(request, parent, isMain) {
+    const result = loadMainFixture.call(this, request, parent, isMain);
+    if (parent?.filename === mainPath && mainImportCheckpoints.some(([expected]) => expected === request)) {
+      importEvents.push(`import:return:${request}`);
+    }
+    return result;
   };
   delete require.cache[mainPath];
   try {
@@ -594,7 +636,7 @@ async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false
       'bootstrap:initialize',
       'app:when-ready'
     ]);
-    await inspect({ boundaries, traceLines, dependencies: capturedGraphDependencies,
+    await inspect({ boundaries, traceLines, importEvents, dependencies: capturedGraphDependencies,
       getWindow: () => publishedWindow, finishNavigation });
     const firstQuit = { prevented: 0, preventDefault() { this.prevented += 1; } };
     appHandlers.get('before-quit')(firstQuit);
@@ -620,15 +662,29 @@ test('production main entry delegates lifecycle ownership and holds quit until b
   await mainEntryFixture();
 });
 
+test('startup trace real main emits each fixed import checkpoint only after its require returns in original order', async () => {
+  await mainEntryFixture(async ({ importEvents }) => {
+    assert.deepEqual(importEvents, [
+      'main:entry',
+      ...mainImportCheckpoints.flatMap(([request, marker]) => [`import:return:${request}`, marker]),
+      'main:imports:complete'
+    ]);
+  }, { traceEnabled: true, loggerNull: true });
+});
+
 test('startup trace real main brackets imports graph before-ready and forwards timing without a logger or details', async () => {
   await mainEntryFixture(async ({ boundaries, traceLines, dependencies }) => {
-    assert.deepEqual(boundaries, [
+    assert.deepEqual(boundaries.filter(marker => !marker.startsWith('main:import:')), [
       'main:entry', 'imports:last', 'main:imports:complete', 'main:graph:start', 'graph:work',
       'main:graph:complete', 'main:before-ready:start', 'before-ready:work', 'main:before-ready:complete'
     ]);
     dependencies.startup.markTiming('recovery:start', { path: 'PRIVATE_PATH', error: new Error('PRIVATE_ERROR') });
     assert.equal(boundaries.at(-1), 'recovery:start');
-    assert.doesNotMatch(traceLines.join(''), /PRIVATE|path|error/);
+    assert.doesNotMatch(traceLines.join(''), /PRIVATE|"path"\s*:|"error"\s*:/);
+    for (const line of traceLines) {
+      assert.deepEqual(Object.keys(JSON.parse(line.slice('[Minecraft Core startup trace] '.length))),
+        ['marker', 'pid', 'utc', 'elapsedMs']);
+    }
   }, { traceEnabled: true, loggerNull: true });
 });
 
@@ -638,7 +694,8 @@ test('startup trace real window IPC boundary precedes listeners import setup and
     dependencies.windowFactory();
     assert.deepEqual(boundaries, [
       'main-window:browser-window:create:start', 'browser-window:work', 'main-window:browser-window:create:complete',
-      'main:ipc:start', 'listeners:initialize', 'ipc-module:load', 'ipc:setup', 'main:ipc:complete',
+      'main:ipc:start', 'listeners:initialize', 'main:ipc:listeners:complete',
+      'ipc-module:load', 'main:ipc:handler-module:complete', 'ipc:setup', 'main:ipc:complete',
       'main-window:navigation:start', 'navigation:work'
     ]);
     getWindow().emit('ready-to-show');
@@ -653,15 +710,23 @@ test('startup trace real window IPC boundary precedes listeners import setup and
   }, { traceEnabled: true, loggerNull: true });
 });
 
-test('startup trace real main preserves IPC failure identity without false completion or navigation', async () => {
-  const ipcError = new Error('PRIVATE_ORIGINAL_IPC');
-  await mainEntryFixture(async ({ boundaries, dependencies }) => {
-    boundaries.length = 0;
-    assert.throws(() => dependencies.windowFactory(), actual => actual === ipcError);
-    assert.deepEqual(boundaries.slice(-4), ['main:ipc:start', 'listeners:initialize', 'ipc-module:load', 'ipc:setup']);
-    assert.equal(boundaries.includes('main:ipc:complete'), false);
-    assert.equal(boundaries.includes('navigation:work'), false);
-  }, { traceEnabled: true, loggerNull: true, ipcError });
+test('startup trace real main preserves each IPC stage failure identity without false completion or navigation', async () => {
+  const failure = new Error('PRIVATE_ORIGINAL_IPC');
+  for (const [option, expected] of [
+    ['listenerError', ['main:ipc:start', 'listeners:initialize']],
+    ['ipcModuleError', ['main:ipc:start', 'listeners:initialize', 'main:ipc:listeners:complete', 'ipc-module:load']],
+    ['ipcError', ['main:ipc:start', 'listeners:initialize', 'main:ipc:listeners:complete',
+      'ipc-module:load', 'main:ipc:handler-module:complete', 'ipc:setup']]
+  ]) {
+    await mainEntryFixture(async ({ boundaries, dependencies, traceLines }) => {
+      boundaries.length = 0;
+      assert.throws(() => dependencies.windowFactory(), actual => actual === failure);
+      assert.deepEqual(boundaries.slice(3), expected);
+      assert.equal(boundaries.includes('main:ipc:complete'), false);
+      assert.equal(boundaries.includes('navigation:work'), false);
+      assert.doesNotMatch(traceLines.join(''), /PRIVATE_ORIGINAL_IPC/);
+    }, { traceEnabled: true, loggerNull: true, [option]: failure });
+  }
 });
 
 test('startup trace disabled and broken sink leave actual main graph bootstrap and IPC behavior unchanged', async () => {
