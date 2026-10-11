@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { Readable } = require('node:stream');
+const { BoundedApiClient } = require('../../electron/services/modpacks/network/bounded-api-client.cjs');
 
 const {
   MODRINTH_ARTIFACT_HOSTS,
@@ -24,6 +26,30 @@ function makeHttp(routes) {
       return route;
     }
   };
+}
+
+function makeBoundedHistoryHttp(history) {
+  const fullBody = jsonResponse(history).body;
+  const lightBody = jsonResponse(history.map(({ changelog, ...metadata }) => metadata)).body;
+  const calls = [];
+  const responses = [];
+  const http = new BoundedApiClient({
+    baseUrl: 'https://api.modrinth.com/v2/',
+    client: {
+      async request(url) {
+        const parsed = new URL(url);
+        calls.push(parsed);
+        assert.equal(parsed.pathname, '/v2/project/project-exact/version');
+        const body = parsed.searchParams.get('include_changelog') === 'false' ? lightBody : fullBody;
+        const response = Readable.from([body.subarray(0, 1024 * 1024), body.subarray(1024 * 1024)]);
+        response.statusCode = 200;
+        response.headers = {};
+        responses.push(response);
+        return response;
+      }
+    }
+  });
+  return { http, calls, responses, fullBody, lightBody };
 }
 
 function version(overrides = {}) {
@@ -233,7 +259,7 @@ test('project detail uses the exact endpoint and keeps gallery and upstream link
 test('version listing preserves IDs, timestamps, and release beta alpha channels while filtering exact values', async () => {
   const http = makeHttp({
     '/project/project-exact/version': ({ query }) => {
-      assert.deepEqual(query, { game_versions: '["1.21.1"]', loaders: '["fabric"]' });
+      assert.deepEqual(query, { include_changelog: 'false', game_versions: '["1.21.1"]', loaders: '["fabric"]' });
       return jsonResponse([
         version({ id: 'release-id', version_type: 'release' }),
         version({ id: 'beta-id', version_type: 'beta', date_published: '2026-06-02T00:00:00.000Z' }),
@@ -250,6 +276,91 @@ test('version listing preserves IDs, timestamps, and release beta alpha channels
     { versionId: 'release-id', channel: 'release', publishedAt: '2026-07-01T02:03:04.000Z' },
     { versionId: 'alpha-id', channel: 'alpha', publishedAt: '2026-07-01T02:03:04.000Z' }
   ]);
+});
+
+test('version history omits unused changelogs to preserve every runtime loader channel and ordered ID within the byte limit', async () => {
+  const runtimes = ['1.21.1', '1.20.1', '1.19.2'];
+  const upstreamLoaders = ['minecraft', 'fabric', 'forge', 'neoforge', 'quilt'];
+  const appLoaders = ['vanilla', 'fabric', 'forge', 'neoforge', 'quilt'];
+  const channels = ['release', 'beta', 'alpha'];
+  const history = Array.from({ length: 783 }, (_, index) => version({
+    id: `history-${index}`, changelog: 'x'.repeat(3000),
+    game_versions: [runtimes[index % 3]], loaders: [upstreamLoaders[index % 5]],
+    version_type: channels[index % 3]
+  }));
+  const transport = makeBoundedHistoryHttp(history);
+  assert.ok(transport.fullBody.length > 2 * 1024 * 1024);
+  assert.ok(transport.lightBody.length < 2 * 1024 * 1024);
+  const provider = new ModrinthModpackProvider({ http: transport.http });
+
+  const listed = await provider.listVersions({ projectId: 'project-exact' });
+  assert.deepEqual(listed.map(item => [item.versionId, item.minecraftVersions, item.loaders, item.channel]),
+    Array.from({ length: 783 }, (_, index) => [
+      `history-${index}`, [runtimes[index % 3]], [appLoaders[index % 5]], channels[index % 3]
+    ]));
+  assert.ok(listed.every(item => item.changelog === null));
+  assert.equal(transport.calls.length, 1);
+  assert.deepEqual([...transport.calls[0].searchParams], [['include_changelog', 'false']]);
+});
+
+test('version history rejects a still-oversized changelog-free response without a partial result or fallback', async () => {
+  const history = Array.from({ length: 783 }, (_, index) => version({
+    id: `history-${index}`, changelog: null,
+    files: Array.from({ length: 8 }, () => version().files[0])
+  }));
+  const transport = makeBoundedHistoryHttp(history);
+  assert.ok(transport.lightBody.length > 2 * 1024 * 1024);
+  const provider = new ModrinthModpackProvider({ http: transport.http });
+  await assert.rejects(provider.listVersions({ projectId: 'project-exact' }), {
+    code: 'ARCHIVE_LIMIT_EXCEEDED', message: 'Provider response exceeded the configured byte limit'
+  });
+  assert.equal(transport.calls.length, 1);
+  assert.deepEqual([...transport.calls[0].searchParams], [['include_changelog', 'false']]);
+  assert.equal(transport.responses[0].destroyed, true);
+});
+
+test('version history rejects 1001 versions rather than returning a truncated success', async () => {
+  const history = Array.from({ length: 1001 }, (_, index) => version({ id: `history-${index}`, changelog: undefined }));
+  const http = makeHttp({ '/project/project-exact/version': jsonResponse(history) });
+  const provider = new ModrinthModpackProvider({ http });
+  await assert.rejects(provider.listVersions({ projectId: 'project-exact' }), { code: 'INVALID_REQUEST' });
+  assert.deepEqual(http.requestedPaths, ['/project/project-exact/version']);
+});
+
+test('changelog-free history normalizes absence and null while exact getVersion retains full changelog and file authority', async () => {
+  const http = makeHttp({
+    '/project/project-exact/version': jsonResponse([
+      version({ changelog: undefined }), version({ id: 'null-changelog', changelog: null })
+    ]),
+    '/version/version-exact': jsonResponse(version())
+  });
+  const provider = new ModrinthModpackProvider({ http });
+  assert.deepEqual((await provider.listVersions({ projectId: 'project-exact' })).map(item => item.changelog), [null, null]);
+  const exact = await provider.getVersion('version-exact');
+  assert.equal(exact.versionId, 'version-exact');
+  assert.equal(exact.projectId, 'project-exact');
+  assert.equal(exact.changelog, 'Changes');
+  assert.deepEqual(exact.files, [{
+    hashes: { sha1: '1'.repeat(40), sha512: '5'.repeat(128) },
+    downloadUrlCandidate: 'https://cdn.modrinth.com/data/project-exact/versions/version-exact/server.mrpack',
+    fileName: 'server.mrpack', primary: true, size: '1234', fileType: 'required-resource-pack'
+  }]);
+  assert.deepEqual(http.calls, [
+    { path: '/project/project-exact/version', options: { query: { include_changelog: 'false' } } },
+    { path: '/version/version-exact', options: {} }
+  ]);
+});
+
+test('changelog-free history still rejects malformed required version and file metadata', async () => {
+  for (const overrides of [
+    { name: '' }, { game_versions: '1.21.1' }, { loaders: ['bukkit'] }, { version_type: 'unknown' },
+    { files: [{ ...version().files[0], hashes: { sha1: 'bad', sha512: '5'.repeat(128) } }] }
+  ]) {
+    const provider = new ModrinthModpackProvider({ http: makeHttp({
+      '/project/project-exact/version': jsonResponse([version({ changelog: undefined, ...overrides })])
+    }) });
+    await assert.rejects(provider.listVersions({ projectId: 'project-exact' }), { code: 'INVALID_REQUEST' });
+  }
 });
 
 test('execution resolves the selected Modrinth version and never latest', async () => {
@@ -411,7 +522,7 @@ test('loader normalization is closed deduplicated and list queries serialize exa
       return jsonResponse({ hits: [], offset: 0, limit: 10, total_hits: 0 });
     },
     '/project/project-exact/version': ({ query }) => {
-      assert.deepEqual(query, { loaders: '["minecraft","fabric","forge","neoforge","quilt"]' });
+      assert.deepEqual(query, { include_changelog: 'false', loaders: '["minecraft","fabric","forge","neoforge","quilt"]' });
       return jsonResponse([version({ loaders: ['minecraft', 'vanilla', 'fabric', 'fabric-loader', 'forge', 'neoforge', 'quilt-loader'] })]);
     }
   });

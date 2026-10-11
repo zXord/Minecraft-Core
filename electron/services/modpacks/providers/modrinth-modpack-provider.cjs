@@ -291,7 +291,7 @@ class ModrinthModpackProvider {
     gameVersions = requestFilterStrings(gameVersions, 'gameVersions');
     loaders = requestFilterStrings(loaders, 'loaders', { pattern: /^(?:vanilla|fabric|forge|neoforge|quilt)$/ });
     channels = requestFilterStrings(channels, 'channels', { pattern: /^(?:release|beta|alpha)$/ });
-    const query = {};
+    const query = { include_changelog: 'false' };
     if (gameVersions.length) query.game_versions = JSON.stringify(gameVersions);
     if (loaders.length) query.loaders = JSON.stringify(loaders.map(loader => APP_LOADER_TO_VERSION_API.get(loader)));
     const value = await this.requestJson(`/project/${projectId}/version`, { query }, { missingCode: 'REPOSITORY_NOT_FOUND', missingId: projectId });
