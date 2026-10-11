@@ -135,6 +135,13 @@ for (const closing of [false, true]) test(`actual facade onResolved ${closing ? 
     e.events.push('source-released'); return { resolved: true, action: 'pre-swap-restored' };
   }, async rollback() {}, async retryCommittedCleanup() {} } });
   await composition.initialize();
+  const noticePublished = deferred();
+  const originalUpsert = composition.notificationStore.upsertRetirementNotice.bind(composition.notificationStore);
+  composition.notificationStore.upsertRetirementNotice = async request => {
+    const notice = await originalUpsert(request);
+    if (request.jobId === old.jobId) noticePublished.resolve({ request, notice });
+    return notice;
+  };
   const originalRelease = composition.planRegistry.releaseClaim.bind(composition.planRegistry);
   composition.planRegistry.releaseClaim = async jobId => { e.events.push('claim-reconciled'); return originalRelease(jobId); };
   const recovery = composition.recoveryService.recover({ recoveryId: recoveryIdFor(active.jobId), actionId: 'retry-recovery' });
@@ -148,12 +155,19 @@ for (const closing of [false, true]) test(`actual facade onResolved ${closing ? 
     assert.equal(e.events.filter(x => x === 'archive').length, priorArchiveEffects);
     assert.equal(fs.existsSync(old.point.archivePath), true);
   } else {
-    // Receipt publication after deletion supplies an event-driven completion boundary.
-    for (let turn = 0; turn < 2000 && fs.existsSync(old.point.metadataPath); turn++) await tick();
-    await composition.dispose();
+    // Observe the real durable notice upsert before disposal can drain the pass.
+    const published = await noticePublished.promise;
+    assert.equal(published.request.state, 'reclaimed');
+    assert.equal(published.request.reason, null);
+    assert.equal(published.notice.title, 'Backup cleanup complete');
+    assert.equal(published.notice.read, true);
+    assert.equal((await e.registry.loadRestorePointRetirement(old.jobId)).value.progress, 'deleted');
     assert.equal(fs.existsSync(old.point.archivePath), false);
+    assert.equal(fs.existsSync(old.point.metadataPath), false);
+    assert.equal(e.events.includes('hash-dispose'), false);
     const released = e.events.indexOf('source-released'); const claim = e.events.indexOf('claim-reconciled');
     const deleted = e.events.lastIndexOf('archive'); assert.ok(released < claim && claim < deleted);
+    await composition.dispose();
   }
   assert.equal(fs.existsSync(active.point.archivePath), true, 'unreceipted source recovery cannot mint cleanup proof');
 });
