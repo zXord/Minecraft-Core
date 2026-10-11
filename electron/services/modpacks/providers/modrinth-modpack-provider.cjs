@@ -102,6 +102,10 @@ function optionalString(value, max = 1024, options) {
   return value === null || value === undefined ? null : text(value, max, options);
 }
 
+function optionalIconCandidate(value) {
+  return value === null || value === undefined || value === '' ? null : candidateUrl(value);
+}
+
 function normalizeCompatibility(value) {
   return SERVER_COMPATIBILITY.has(value) ? value : 'unknown';
 }
@@ -115,7 +119,7 @@ function normalizeSearchHit(hit) {
     slug: text(hit.slug, 256),
     title: text(hit.title, 256),
     summary: text(hit.description, 4096, { multiline: true, empty: true }),
-    iconUrlCandidate: optionalString(hit.icon_url, 4096),
+    iconUrlCandidate: optionalIconCandidate(hit.icon_url),
     galleryUrlCandidates: gallery,
     categories,
     minecraftVersions: strings(hit.versions, { maxItems: 256, maxLength: 64 }),
@@ -158,7 +162,7 @@ function normalizeProject(project) {
     title: text(project.title, 256),
     summary: text(project.description, 4096, { multiline: true, empty: true }),
     body: text(project.body, 1024 * 1024, { multiline: true, empty: true }),
-    iconUrlCandidate: optionalString(project.icon_url, 4096),
+    iconUrlCandidate: optionalIconCandidate(project.icon_url),
     galleryCandidates: normalizeGallery(project.gallery ?? []),
     runtimes: {
       minecraftVersions: strings(project.game_versions, { maxItems: 256, maxLength: 64 }),

@@ -55,6 +55,89 @@ function version(overrides = {}) {
   };
 }
 
+function searchHit(overrides = {}) {
+  return {
+    project_id: 'project-exact', project_type: 'modpack', slug: 'exact-pack', title: 'Exact Pack', description: '',
+    categories: ['fabric'], display_categories: ['fabric'], versions: ['1.21.1'], client_side: 'required',
+    server_side: 'required', downloads: 1, icon_url: 'https://images.example/icon.png', gallery: [],
+    date_modified: '2026-01-01T00:00:00.000Z', ...overrides
+  };
+}
+
+function project(overrides = {}) {
+  return {
+    id: 'project-exact', project_type: 'modpack', slug: 'exact-pack', title: 'Exact Pack', description: '', body: '',
+    icon_url: 'https://images.example/icon.png', gallery: [], game_versions: ['1.21.1'], loaders: ['fabric'],
+    client_side: 'required', server_side: 'required', updated: '2026-01-01T00:00:00.000Z', downloads: 1,
+    donation_urls: [], ...overrides
+  };
+}
+
+test('optional icons preserve every mixed search hit in order and upstream pagination', async () => {
+  const provider = new ModrinthModpackProvider({ http: makeHttp({ '/search': jsonResponse({
+    hits: [searchHit({ project_id: 'first' }), searchHit({ project_id: 'empty-icon', icon_url: '' }), searchHit({ project_id: 'last' })],
+    offset: 20, limit: 20, total_hits: 83
+  }) }) });
+  const result = await provider.searchProjects({ offset: 20, limit: 20 });
+  assert.deepEqual(result.items.map(item => [item.projectId, item.iconUrlCandidate]), [
+    ['first', 'https://images.example/icon.png'], ['empty-icon', null], ['last', 'https://images.example/icon.png']
+  ]);
+  assert.deepEqual(result.pagination, { offset: 20, limit: 20, total: 83 });
+});
+
+for (const [label, icon] of [['null', null], ['absent', undefined], ['empty', '']]) {
+  for (const endpoint of ['search', 'project']) {
+    test(`optional icons normalize ${label} to null in ${endpoint} metadata`, async () => {
+      const provider = new ModrinthModpackProvider({ http: makeHttp({
+        '/search': jsonResponse({ hits: [searchHit({ icon_url: icon })], offset: 0, limit: 20, total_hits: 1 }),
+        '/project/project-exact': jsonResponse(project({ icon_url: icon }))
+      }) });
+      const result = endpoint === 'search' ? (await provider.searchProjects()).items[0] : await provider.getProject('project-exact');
+      assert.equal(result.iconUrlCandidate, null);
+    });
+  }
+}
+
+for (const [label, icon] of [['wrong type', 42], ['control character', 'https://images.example/\u0001'], ['overlong', 'x'.repeat(4097)]]) {
+  test(`optional icons still reject ${label} in search and project metadata`, async () => {
+    const provider = new ModrinthModpackProvider({ http: makeHttp({
+      '/search': jsonResponse({ hits: [searchHit({ icon_url: icon })], offset: 0, limit: 20, total_hits: 1 }),
+      '/project/project-exact': jsonResponse(project({ icon_url: icon }))
+    }) });
+    await assert.rejects(provider.searchProjects(), { code: 'INVALID_REQUEST' });
+    await assert.rejects(provider.getProject('project-exact'), { code: 'INVALID_REQUEST' });
+  });
+}
+
+test('optional icons preserve nonempty candidates at the existing 4096 character boundary', async () => {
+  const icon = 'x'.repeat(4096);
+  const provider = new ModrinthModpackProvider({ http: makeHttp({
+    '/search': jsonResponse({ hits: [searchHit({ icon_url: icon })], offset: 0, limit: 20, total_hits: 1 }),
+    '/project/project-exact': jsonResponse(project({ icon_url: icon }))
+  }) });
+  assert.equal((await provider.searchProjects()).items[0].iconUrlCandidate, icon);
+  assert.equal((await provider.getProject('project-exact')).iconUrlCandidate, icon);
+});
+
+test('optional icons do not loosen required titles slugs galleries links or artifact URLs', async () => {
+  for (const overrides of [{ title: '' }, { slug: '' }, { gallery: [''] }]) {
+    const provider = new ModrinthModpackProvider({ http: makeHttp({ '/search': jsonResponse({
+      hits: [searchHit({ icon_url: null, ...overrides })], offset: 0, limit: 20, total_hits: 1
+    }) }) });
+    await assert.rejects(provider.searchProjects(), { code: 'INVALID_REQUEST' });
+  }
+  for (const overrides of [{ title: '' }, { slug: '' }, { gallery: [{ url: '', featured: true }] }, { source_url: '' }]) {
+    const provider = new ModrinthModpackProvider({ http: makeHttp({
+      '/project/project-exact': jsonResponse(project({ icon_url: null, ...overrides }))
+    }) });
+    await assert.rejects(provider.getProject('project-exact'), { code: 'INVALID_REQUEST' });
+  }
+  const provider = new ModrinthModpackProvider({ http: makeHttp({
+    '/version/version-exact': jsonResponse(version({ files: [{ ...version().files[0], url: '' }] }))
+  }) });
+  await assert.rejects(provider.resolveArtifactSetPlan('version-exact'), { code: 'INVALID_REQUEST' });
+});
+
 test('search serializes Modrinth modpack facets, paging, compatibility, and supported sorts', async () => {
   const http = makeHttp({
     '/search': jsonResponse({ hits: [], offset: 20, limit: 25, total_hits: 0 })
