@@ -25,7 +25,7 @@ test('verify is available without immediately scheduling repair', () => {
   const panel = source('src/components/modpacks/ModpackActionPanel.svelte');
   assert.match(panel, />\s*Verify\s*</);
   assert.match(panel, /verifyModpack|dispatch\(['"]verify/);
-  assert.match(panel, />\s*Repair\s*</);
+  assert.match(panel, />\s*Review repair\s*</);
   assert.doesNotMatch(panel, /function\s+verify[\s\S]{0,300}operationKind:\s*['"]repair/);
 });
 

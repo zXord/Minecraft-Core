@@ -6,6 +6,7 @@
   const dispatch = createEventDispatcher();
   export let reviewedPlan;
   export let operationKind = '';
+  export let targetLabel = '';
   export let busy = false;
   export let restorePointId = null;
   let showConfirmation = false;
@@ -29,6 +30,8 @@
   $: canRun = hasReviewedPlan && !planStale && blockers.length === 0 && (!sourceMutation || acceptEula);
   $: isDetach = operationKind === 'detach';
   $: isUninstall = ['uninstall', 'uninstall-managed'].includes(operationKind);
+  $: isRollback = operationKind === 'rollback-restore-point';
+  $: providerLabel = { github: 'GitHub Releases', modrinth: 'Modrinth', local: 'Local archive' }[plan.source?.provider] || '';
 
   function resetPlanState(nextPlan) {
     activePlanId = nextPlan?.planId || null;
@@ -62,6 +65,14 @@
 
 <section class="modpack-surface mp-panel mp-stack" aria-label="Reviewed modpack operation plan">
   <div class="mp-toolbar"><div class="grow"><p class="mp-kicker">Reviewed lifecycle plan</p><h2 class="mp-title">{plan.title || operationKind.replaceAll('-', ' ')}</h2><p class="mp-subtitle">This one-use plan is bound to the exact server revision, selected artifacts, ownership evidence, and preflight checks.</p></div><button class="mp-button" type="button" on:click={() => dispatch('cancel')}>Change selection</button></div>
+
+  <dl class="review-context" aria-label="Reviewed operation details">
+    {#if targetLabel}<div><dt>Server</dt><dd>{targetLabel}</dd></div>{/if}
+    {#if providerLabel || plan.source?.version}<div><dt>{isRollback || destructive ? 'Current release' : 'Selected release'}</dt><dd>{providerLabel}{providerLabel && plan.source?.version ? ' · ' : ''}{plan.source?.version || ''}</dd></div>{/if}
+    {#if isRollback && plan.rollback?.id}<div><dt>Restore point</dt><dd>{plan.rollback.id}</dd></div>{/if}
+    {#if plan.runtime}<div><dt>{isRollback ? 'Restored runtime' : 'Runtime'}</dt><dd>Minecraft {plan.runtime.minecraft} · {plan.runtime.loader} {plan.runtime.loaderVersion}{#if plan.runtime.java} · Java {plan.runtime.java}{/if}</dd></div>
+    {:else if ['files-only', 'import-files-only-new'].includes(operationKind)}<div><dt>Runtime</dt><dd>Files only — no managed runtime</dd></div>{/if}
+  </dl>
 
   {#if planStale}<div class="mp-state warning" tabindex="-1" aria-live="assertive"><strong>Reviewed plan needs a fresh preflight</strong><p>The server revision or one-use plan changed before the operation started. Nothing from this stale plan will run.</p><button class="mp-button" type="button" disabled={busy} on:click={() => dispatch('stale')}>Run a fresh preflight review</button></div>
   {:else if error}<div class="mp-state error" tabindex="-1" aria-live="assertive"><strong>Could not start the reviewed plan</strong><p>{error.message}</p></div>{/if}
@@ -98,4 +109,9 @@
   .behavior-card p, .behavior-card li { color: var(--mp-muted); }
   .acknowledgement { display: flex; gap: 0.65rem; align-items: flex-start; }
   .acknowledgement input { margin-top: 0.25rem; }
+  .review-context { display: grid; gap: 0.6rem; margin: 0; }
+  .review-context > div { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: 0.75rem; }
+  .review-context dt { color: var(--mp-muted); }
+  .review-context dd { margin: 0; overflow-wrap: anywhere; }
+  @media (max-width: 520px) { .review-context > div { grid-template-columns: 1fr; gap: 0.2rem; } }
 </style>
