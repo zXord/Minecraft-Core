@@ -44,6 +44,7 @@ try {
 class UpdateService extends EventEmitter {
   constructor() {
     super();
+    this.updateCheckTimeout = null;
     this.updateCheckInterval = null;
     this.isCheckingForUpdates = false;
     this.downloadProgress = {
@@ -822,7 +823,7 @@ class UpdateService extends EventEmitter {
 
   // Start periodic update checks (every 12 hours)
   startPeriodicChecks() {
-    this.stopPeriodicChecks(); // Clear any existing interval
+    this.stopPeriodicChecks(); // Clear any pending startup check and interval
     
     // Handle development mode
     if (this.isDevelopmentMode()) {
@@ -830,7 +831,8 @@ class UpdateService extends EventEmitter {
     }
     
     // Check immediately on startup
-    setTimeout(() => {
+    this.updateCheckTimeout = setTimeout(() => {
+      this.updateCheckTimeout = null;
       this.checkForUpdates();
     }, 10000); // Wait 10 seconds after startup
     
@@ -844,6 +846,10 @@ class UpdateService extends EventEmitter {
 
   // Stop periodic update checks
   stopPeriodicChecks() {
+    if (this.updateCheckTimeout !== null) {
+      clearTimeout(this.updateCheckTimeout);
+      this.updateCheckTimeout = null;
+    }
     if (this.updateCheckInterval) {
       clearInterval(this.updateCheckInterval);
       this.updateCheckInterval = null;
