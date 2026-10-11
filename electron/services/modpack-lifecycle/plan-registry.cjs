@@ -1,8 +1,12 @@
 const crypto = require('node:crypto');
+const path = require('node:path');
 
 const { strictJsonClone } = require('../../utils/durable-fs.cjs');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { compactOperationIdFromRandomSource } = require('./operation-id.cjs');
+const { normalizeRetirementCandidate } = require('./failed-restorepoint-retirement-evidence.cjs');
+const { isSafeWindowsBasename } = require('../modpacks/windows-basename.cjs');
+const { normalizeRecoveryTargetPath } = require('./recovery-target-envelope.cjs');
 const {
   PREFLIGHT_PLAN_JSON_LIMITS,
   computePreflightPlanFingerprint
@@ -144,6 +148,7 @@ class PlanRegistry {
     this.plans = new Map();
     this.allocatedIds = new Set();
     this.claimedJobIds = new Set();
+    this.claimedPlans = new Map();
   }
 
   create(request) {
@@ -187,6 +192,7 @@ class PlanRegistry {
     const jobId = this.#newId('job');
     this.workspaceRegistry.transferOwnership({ fromOwnerId: record.planId, toOwnerId: jobId });
     this.claimedJobIds.add(jobId);
+    this.claimedPlans.set(jobId, record);
     this.plans.delete(record.planId);
     return deepFreeze({
       jobId,
@@ -199,7 +205,54 @@ class PlanRegistry {
     if (!isIdentifier(jobId) || !this.claimedJobIds.has(jobId)) return false;
     await this.workspaceRegistry.releaseOwner(jobId);
     this.claimedJobIds.delete(jobId);
+    this.claimedPlans.delete(jobId);
     return true;
+  }
+
+  hasRestorePointReference(request) {
+    strictObject(request, ['instanceId', 'candidate', 'excludingJobId']);
+    const instanceId = assertIdentifier(request.instanceId);
+    assertIdentifier(request.excludingJobId);
+    const candidate = normalizeRetirementCandidate(request.candidate);
+    let owned = false;
+    const references = new Map();
+    // Do not use get(): expiration releases ownership, which is forbidden in this query.
+    for (const record of [...this.plans.values(), ...this.claimedPlans.values()]) {
+      const plan = record.plan;
+      if (plan.operation?.serverKind === 'new' && plan.operation.instanceId === null) continue;
+      if (!plan.operation || !isIdentifier(plan.operation.instanceId)) throw invalid();
+      if (plan.operation.instanceId !== instanceId) continue;
+      if (!Array.isArray(plan.restorePoints) || plan.restorePoints.length > 10000) throw invalid();
+      for (const point of plan.restorePoints) {
+        if (!point || typeof point !== 'object' || Array.isArray(point) || Object.getPrototypeOf(point) !== Object.prototype ||
+            !isIdentifier(point.id) || typeof point.sha256 !== 'string' || !SHA256.test(point.sha256)) throw invalid();
+        const sameId = point.id === candidate.id;
+        const prior = references.get(point.id);
+        if (prior && (prior.sha256 !== point.sha256 || ['name', 'metadataName', 'archivePath', 'metadataPath'].some(key =>
+          Object.hasOwn(prior, key) && Object.hasOwn(point, key) && prior[key] !== point[key]))) throw invalid();
+        references.set(point.id, { ...prior, ...point });
+        let sameLocator = false;
+        for (const [key, expected] of [['name', candidate.name], ['metadataName', candidate.metadataName]]) {
+          if (Object.hasOwn(point, key)) {
+            if (typeof point[key] !== 'string' || !isSafeWindowsBasename(point[key])) throw invalid();
+            if (point[key].toLocaleLowerCase('en-US') === expected.toLocaleLowerCase('en-US')) sameLocator = true;
+            else if (sameId) throw invalid();
+          }
+        }
+        // Private full references can also carry exact leaf paths.
+        for (const [key, expected] of [['archivePath', candidate.name], ['metadataPath', candidate.metadataName]]) {
+          if (Object.hasOwn(point, key)) {
+            const canonical = normalizeRecoveryTargetPath(point[key]);
+            if (path.win32.basename(canonical) === expected.toLocaleLowerCase('en-US')) sameLocator = true;
+            else if (sameId) throw invalid();
+          }
+        }
+        if ((sameId && point.sha256 !== candidate.sha256) || (sameLocator && !sameId)) throw invalid();
+        // Exclusion never hides a selected rollback/downgrade point, even in the failed job's own plan.
+        if (sameId || sameLocator) owned = true;
+      }
+    }
+    return owned;
   }
 
   async invalidate(planId) {

@@ -1037,6 +1037,8 @@ test('unmanaged existing revalidation pins the reviewed directory and creates a 
         restoreOptions.push({ stage: 'create', options });
         return {
           id: 'restore-unmanaged', sha256: '9'.repeat(64),
+          name: 'restore-point-unmanaged.zip', size: 31, totalBytes: '22', scopeSha256: 'b'.repeat(64),
+          operationId: request.operationId, createdAt: '2026-08-01T00:00:00.000Z',
           sourceRevision: request.sourceRevision, sourceRuntime: request.sourceRuntime
         };
       },
@@ -1091,6 +1093,11 @@ test('unmanaged existing revalidation pins the reviewed directory and creates a 
     { event: { activity: 'record-reference', phase: 'record-reference', kind: 'start', processedBytes: 0, totalBytes: null }, reference: null }
   ]);
   assert.equal(recoveryRegistry.record.restorePoint.id, 'restore-unmanaged');
+  assert.deepEqual(recoveryRegistry.record.outcome.failedPointRetirementCandidate, {
+    schemaVersion: 1, id: 'restore-unmanaged', name: 'restore-point-unmanaged.zip', metadataName: 'restore-point-unmanaged.json',
+    sha256: '9'.repeat(64), size: 31, totalBytes: '22', scopeSha256: 'b'.repeat(64), operationId: 'job-adoption',
+    createdAt: '2026-08-01T00:00:00.000Z', sourceRevision: 0, sourceRuntime: null
+  });
 
   assert.equal(recoveryRegistry.record.target.kind, 'existing');
   assert.equal(recoveryRegistry.record.outcome.runtime.source, null);
@@ -1989,6 +1996,8 @@ async function targetedRepairFixture(t, {
       async createVerifiedRestorePoint(request) {
         return {
           id: 'restore-reviewed-revision', sha256: 'a'.repeat(64),
+          name: 'restore-point-reviewed-revision.zip', size: 31, totalBytes: '22', scopeSha256: 'b'.repeat(64),
+          operationId: request.operationId, createdAt: '2026-08-01T00:00:00.000Z',
           sourceRevision: request.sourceRevision, sourceRuntime: request.sourceRuntime
         };
       },

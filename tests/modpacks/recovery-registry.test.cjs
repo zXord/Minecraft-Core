@@ -12,6 +12,298 @@ const {
   verifyRecoveryTargetEnvelope
 } = require('../../electron/services/modpack-lifecycle/recovery-target-envelope.cjs');
 
+function retirementCandidate(overrides = {}) {
+  return { schemaVersion: 1, id: 'restore-0001', name: 'restore-point-0001.zip',
+    metadataName: 'restore-point-0001.json', sha256: 'a'.repeat(64), size: 31, totalBytes: '22',
+    scopeSha256: 'b'.repeat(64), sourceRevision: 7, sourceRuntime: null,
+    operationId: 'job-0001', createdAt: '2026-08-01T00:00:00.000Z', ...overrides };
+}
+
+function retirementReceipt(proof, overrides = {}) {
+  const directory = { fileType: 'directory', dev: '1', ino: '2', size: '0', birthtime: '3', mtime: '4', ctime: '5' };
+  const file = { ...directory, fileType: 'file', size: '31', sha256: 'a'.repeat(64) };
+  return { schemaVersion: 1, policyVersion: 1, sequence: 0, jobId: 'job-0001', operationKind: 'install',
+    target: { kind: 'existing', stableServerId: 'server-0001', path: 'c:\\minecraft\\servers\\example' },
+    candidate: retirementCandidate(), terminal: { recordSha256: proof.recordSha256, envelopeSha256: proof.envelopeSha256,
+      targetPathHash: proof.envelope.targetPathHash, envelopeChecksum: proof.envelope.checksum },
+    lineage: { parent: directory, target: { ...directory, ino: '6' }, backups: { ...directory, ino: '7' } },
+    files: { archive: file, sidecar: { ...file, ino: '8', sha256: 'c'.repeat(64) } }, pinOwner: 'job-0001',
+    settlement: { caller: 'live-precommit-final-policy', action: 'pre-swap-restored', swapStep: 'none', commitStarted: false, policyRestored: true },
+    progress: 'authorized', durability: { archive: 'not-started', sidecar: 'not-started' }, diagnostic: null,
+    lastAttemptAt: null, createdAt: '2026-08-01T00:00:10.000Z', updatedAt: '2026-08-01T00:00:10.000Z', ...overrides };
+}
+
+async function publishRetirementCandidate(registry, { terminalPhase = 'failed', clear = false } = {}) {
+  await registry.initialize();
+  await registry.create(record());
+  await registry.transition('job-0001', { expectedPhase: 'queued', nextPhase: 'snapshotting', patch: {
+    outcome: { failedPointRetirementCandidate: retirementCandidate() }
+  } });
+  if (clear) await registry.transition('job-0001', { expectedPhase: 'snapshotting', nextPhase: 'staging', patch: { restorePoint: null } });
+  await registry.finish('job-0001', { terminalPhase, outcome: { recovery: { action: 'pre-swap-restored' } } });
+}
+
+test('retirement DTOs reject unsafe, forged and nonmonotonic authority', () => {
+  const { normalizeRetirementCandidate, normalizeRetirementReceipt, assertRetirementReceiptTransition } =
+    require('../../electron/services/modpack-lifecycle/failed-restorepoint-retirement-evidence.cjs');
+  const proof = { recordSha256: 'd'.repeat(64), envelopeSha256: 'e'.repeat(64), envelope: { targetPathHash: 'f'.repeat(64), checksum: '0'.repeat(64) } };
+  const valid = retirementReceipt(proof);
+  assert.deepEqual(normalizeRetirementReceipt(valid), valid);
+  assert.equal(normalizeRetirementCandidate(retirementCandidate({ totalBytes: '1'.repeat(30) })).totalBytes, '1'.repeat(30));
+  let getterCalls = 0;
+  const accessor = retirementCandidate();
+  Object.defineProperty(accessor, 'name', { enumerable: true, get() { getterCalls++; return 'restore-point-safe.zip'; } });
+  assert.throws(() => normalizeRetirementCandidate(accessor));
+  assert.equal(getterCalls, 0);
+  assert.throws(() => normalizeRetirementCandidate(Object.assign(Object.create(null), retirementCandidate())));
+  for (const candidate of [{ ...retirementCandidate(), extra: true }, retirementCandidate({ name: '../bad.zip' }),
+    retirementCandidate({ schemaVersion: 2 }), retirementCandidate({ size: 0 }), retirementCandidate({ totalBytes: '01' })]) {
+    assert.throws(() => normalizeRetirementCandidate(candidate));
+  }
+  for (const bad of [{ ...valid, extra: true }, { ...valid, schemaVersion: 2 }, { ...valid, pinOwner: 'other' },
+    { ...valid, candidate: retirementCandidate({ operationId: 'other' }) },
+    { ...valid, target: { ...valid.target, kind: 'new' } }, { ...valid, diagnostic: { reason: 'io-failure', at: 'x'.repeat(66000) } },
+    { ...valid, progress: 'deleted' }, { ...valid, lastAttemptAt: '2026-08-02T00:00:00.000Z' }]) assert.throws(() => normalizeRetirementReceipt(bad));
+  const next = { ...valid, sequence: 1, lastAttemptAt: '2026-08-01T00:00:11.000Z', updatedAt: '2026-08-01T00:00:11.000Z' };
+  assert.doesNotThrow(() => assertRetirementReceiptTransition(valid, next));
+  for (const bad of [{ ...next, sequence: 0 }, { ...next, candidate: retirementCandidate({ id: 'replacement' }) },
+    { ...next, files: { ...next.files, archive: { ...next.files.archive, ino: '99' } } },
+    { ...next, terminal: { ...next.terminal, recordSha256: '1'.repeat(64) } }]) assert.throws(() => assertRetirementReceiptTransition(valid, bad));
+  assert.throws(() => assertRetirementReceiptTransition(next, { ...next, sequence: 2, lastAttemptAt: null }));
+  assert.throws(() => assertRetirementReceiptTransition(next, { ...next, sequence: 2, lastAttemptAt: valid.createdAt }));
+  const drifted = { ...next, lineage: { ...next.lineage, target: { ...next.lineage.target, size: '19', mtime: '20', ctime: '21' } },
+    files: { ...next.files, archive: { ...next.files.archive, ctime: '22' } } };
+  assert.doesNotThrow(() => assertRetirementReceiptTransition(valid, drifted));
+  const deleting = { ...next, sequence: 2, progress: 'deleting', durability: { archive: 'intent', sidecar: 'not-started' } };
+  assert.throws(() => assertRetirementReceiptTransition(deleting, { ...next, sequence: 3 }));
+  assert.throws(() => assertRetirementReceiptTransition(valid, { ...next, progress: 'archive-deleted', durability: { archive: 'durable', sidecar: 'not-started' } }));
+});
+
+test('published terminal proof is read-only and rejects active, split and duplicate publication', async t => {
+  for (const mode of ['active', 'record-split', 'envelope-split', 'duplicate-record', 'duplicate-envelope', 'published']) {
+    const { registry, userDataPath, calls } = fixture(t);
+    await publishRetirementCandidate(registry);
+    const root = path.join(userDataPath, 'modpack-lifecycle');
+    if (mode === 'active' || mode === 'envelope-split') fs.renameSync(path.join(root, 'history', 'job-0001.json'), path.join(root, 'active', 'job-0001.json'));
+    if (mode === 'active' || mode === 'record-split') fs.renameSync(path.join(root, 'history', 'job-0001.target.json'), path.join(root, 'active', 'job-0001.target.json'));
+    if (mode === 'duplicate-record') fs.copyFileSync(path.join(root, 'history', 'job-0001.json'), path.join(root, 'active', 'job-0001.json'));
+    if (mode === 'duplicate-envelope') fs.copyFileSync(path.join(root, 'history', 'job-0001.target.json'), path.join(root, 'active', 'job-0001.target.json'));
+    const before = calls.length;
+    const binding = { expectedTarget: record().target, expectedOperationKind: 'install' };
+    if (mode === 'published') {
+      const evidence = await registry.loadPublishedTerminalEvidence('job-0001', binding);
+      assert.equal(evidence.record.phase, 'failed');
+      assert.equal(evidence.recordSha256, crypto.createHash('sha256').update(fs.readFileSync(path.join(root, 'history', 'job-0001.json'))).digest('hex'));
+      await assert.rejects(registry.loadPublishedTerminalEvidence('job-0001', { ...binding, expectedOperationKind: 'repair' }));
+    } else await assert.rejects(registry.loadPublishedTerminalEvidence('job-0001', binding));
+    assert.equal(calls.length, before);
+  }
+});
+
+test('immutable candidate survives outcome replacement and remains non-authorizing without a point', async t => {
+  const { registry } = fixture(t);
+  await registry.initialize();
+  await registry.create(record());
+  await assert.rejects(registry.transition('job-0001', { expectedPhase: 'queued', nextPhase: 'snapshotting', patch: {
+    outcome: { failedPointRetirementCandidate: retirementCandidate({ operationId: 'other' }) }
+  } }));
+  await registry.transition('job-0001', { expectedPhase: 'queued', nextPhase: 'snapshotting', patch: {
+    outcome: { failedPointRetirementCandidate: retirementCandidate() }
+  } });
+  await assert.rejects(registry.transition('job-0001', { expectedPhase: 'snapshotting', nextPhase: 'staging', patch: {
+    outcome: { failedPointRetirementCandidate: retirementCandidate({ name: 'restore-point-other.zip', metadataName: 'restore-point-other.json' }) }
+  } }));
+  await registry.finish('job-0001', { terminalPhase: 'failed', outcome: { recovery: { action: 'pre-swap-restored' } } });
+  assert.equal((await registry.loadHistory('job-0001')).outcome.failedPointRetirementCandidate.name, 'restore-point-0001.zip');
+  const scan = await registry.initialize();
+  assert.equal(scan.pendingRestorePointRetirements[0].state, 'deferred-proof');
+  assert.deepEqual(registry.listRestorePointRetirementItems({ selector: null }), scan.pendingRestorePointRetirements);
+  assert.equal(registry.listRestorePointRetirementItems({ selector: { instanceId: 'another', serverPath: record().target.path } }).length, 0);
+  for (const settings of [{ terminalPhase: 'completed' }, { clear: true }]) {
+    const other = fixture(t);
+    await publishRetirementCandidate(other.registry, settings);
+    assert.equal((await other.registry.initialize()).pendingRestorePointRetirements.length, 0);
+    assert.equal((await other.registry.loadHistory('job-0001')).outcome.failedPointRetirementCandidate.id, 'restore-0001');
+  }
+});
+
+test('receipt create and CAS authenticate immutable terminal bytes and preserve them', async t => {
+  const { registry, userDataPath } = fixture(t);
+  await publishRetirementCandidate(registry);
+  const binding = { expectedTarget: record().target, expectedOperationKind: 'install' };
+  const proof = await registry.loadPublishedTerminalEvidence('job-0001', binding);
+  const history = path.join(userDataPath, 'modpack-lifecycle', 'history');
+  const bytes = ['job-0001.json', 'job-0001.target.json'].map(name => fs.readFileSync(path.join(history, name)));
+  assert.equal(await registry.loadRestorePointRetirement('job-0001'), null);
+  const receipt = retirementReceipt(proof);
+  for (const bad of [{ ...receipt, jobId: 'wrong' }, { ...receipt, target: { ...receipt.target, stableServerId: 'wrong' } },
+    { ...receipt, terminal: { ...receipt.terminal, recordSha256: '1'.repeat(64) } }]) {
+    await assert.rejects(registry.writeRestorePointRetirement('job-0001', { expectedSha256: null, value: bad }));
+    assert.equal(await registry.loadRestorePointRetirement('job-0001'), null);
+  }
+  const created = await registry.writeRestorePointRetirement('job-0001', { expectedSha256: null, value: receipt });
+  assert.equal(created.sha256, crypto.createHash('sha256').update(fs.readFileSync(path.join(userDataPath, 'modpack-lifecycle', 'retirements', 'job-0001.json'))).digest('hex'));
+  const next = { ...receipt, sequence: 1, lastAttemptAt: '2026-08-01T00:00:11.000Z', updatedAt: '2026-08-01T00:00:11.000Z' };
+  const results = await Promise.allSettled([1, 2].map(() => registry.writeRestorePointRetirement('job-0001', { expectedSha256: created.sha256, value: next })));
+  assert.deepEqual(results.map(item => item.status).sort(), ['fulfilled', 'rejected']);
+  await assert.rejects(registry.writeRestorePointRetirement('job-0001', { expectedSha256: null, value: receipt }));
+  assert.equal(registry.listRestorePointRetirementItems({ selector: null })[0].state, 'authorized-retry');
+  assert.equal(registry.listRestorePointRetirementItems({ selector: null })[0].lastAttemptAt, '2026-08-01T00:00:11.000Z');
+  for (let i = 0; i < bytes.length; i++) assert.deepEqual(fs.readFileSync(path.join(history, ['job-0001.json', 'job-0001.target.json'][i])), bytes[i]);
+});
+
+test('strict new byte readers reject duplicate keys and oversize receipts without recovery admission block', async t => {
+  const { registry, userDataPath } = fixture(t);
+  await publishRetirementCandidate(registry);
+  const binding = { expectedTarget: record().target, expectedOperationKind: 'install' };
+  const proof = await registry.loadPublishedTerminalEvidence('job-0001', binding);
+  const receiptPath = path.join(userDataPath, 'modpack-lifecycle', 'retirements', 'job-0001.json');
+  for (const bytes of [JSON.stringify(retirementReceipt(proof)).replace('"sequence":0', '"sequence":0,"sequence":0'), ' '.repeat(65537)]) {
+    fs.writeFileSync(receiptPath, bytes);
+    await assert.rejects(registry.loadRestorePointRetirement('job-0001'));
+    const scan = await registry.initialize();
+    assert.equal(scan.globalBlock, false);
+    assert.equal(scan.blocks.length, 0);
+    assert.equal(scan.pendingRestorePointRetirements[0].state, 'deferred-proof');
+  }
+  const recordPath = path.join(userDataPath, 'modpack-lifecycle', 'history', 'job-0001.json');
+  fs.writeFileSync(recordPath, fs.readFileSync(recordPath, 'utf8').replace('"sequence": 2', '"sequence": 2,"sequence": 2'));
+  await assert.rejects(registry.loadPublishedTerminalEvidence('job-0001', binding));
+});
+
+test('target-scoped active and historical references compare IDs rather than equal digests', async t => {
+  for (const published of [false, true]) for (const point of [
+    { id: 'different', sha256: 'a'.repeat(64), want: false }, { id: 'restore-0001', sha256: 'a'.repeat(64), want: true },
+    { id: 'restore-0001', sha256: 'b'.repeat(64), error: true }
+  ]) {
+    const { registry } = fixture(t);
+    await registry.initialize();
+    await registry.create(record({ jobId: 'other', restorePoint: { id: point.id, sha256: point.sha256 } }));
+    if (published) await registry.finish('other', { terminalPhase: 'completed', outcome: null });
+    await registry.initialize();
+    const query = { target: record().target, candidate: retirementCandidate(), excludingJobId: 'job-0001' };
+    if (point.error) await assert.rejects(registry.hasOtherActiveRestorePointReference(query));
+    else assert.equal(await registry.hasOtherActiveRestorePointReference(query), point.want);
+  }
+});
+
+test('duplicate-ID conflicting records and partial reference evidence never prove absence', async t => {
+  for (const malformed of [false, true]) {
+    const { registry, userDataPath } = fixture(t);
+    await registry.initialize();
+    await registry.create(record({ jobId: 'one', restorePoint: { id: 'unrelated-point', sha256: 'c'.repeat(64) } }));
+    await registry.create(record({ jobId: 'two', restorePoint: { id: 'unrelated-point', sha256: 'd'.repeat(64) } }));
+    if (malformed) {
+      const file = path.join(userDataPath, 'modpack-lifecycle', 'active', 'two.json');
+      const value = JSON.parse(fs.readFileSync(file));
+      delete value.restorePoint.sha256;
+      fs.writeFileSync(file, JSON.stringify(value));
+    }
+    await registry.initialize();
+    await assert.rejects(registry.hasOtherActiveRestorePointReference({ target: record().target, candidate: retirementCandidate(), excludingJobId: 'job-0001' }));
+  }
+});
+
+test('same physical candidate locator with a different ID and global unknown binding defer reference proof', async t => {
+  const { registry, userDataPath } = fixture(t);
+  await registry.initialize();
+  await registry.create(record({ jobId: 'other', restorePoint: { id: 'other-point', sha256: 'a'.repeat(64) } }));
+  await registry.transition('other', { expectedPhase: 'queued', nextPhase: 'snapshotting', patch: { outcome: {
+    failedPointRetirementCandidate: retirementCandidate({ id: 'other-point', operationId: 'other' })
+  } } });
+  const query = { target: record().target, candidate: retirementCandidate(), excludingJobId: 'job-0001' };
+  await assert.rejects(registry.hasOtherActiveRestorePointReference(query));
+  const latest = await registry.load('other');
+  const file = path.join(userDataPath, 'modpack-lifecycle', 'active', 'other.json');
+  // Case variants identify the same Windows leaf.
+  latest.outcome.failedPointRetirementCandidate.name = 'restore-point-CASE.zip';
+  latest.outcome.failedPointRetirementCandidate.metadataName = 'restore-point-CASE.json';
+  fs.writeFileSync(file, JSON.stringify(latest));
+  await registry.initialize();
+  await assert.rejects(registry.hasOtherActiveRestorePointReference({ ...query,
+    candidate: retirementCandidate({ name: 'restore-point-case.zip', metadataName: 'restore-point-case.json' }) }));
+  fs.writeFileSync(path.join(userDataPath, 'modpack-lifecycle', 'active', 'unknown.json'), '{}');
+  await registry.initialize();
+  await assert.rejects(registry.hasOtherActiveRestorePointReference(query));
+});
+
+test('receipt intent stages survive restart and deleted receipts remain notice-only', async t => {
+  const { registry, userDataPath, durableFs } = fixture(t);
+  await publishRetirementCandidate(registry);
+  const proof = await registry.loadPublishedTerminalEvidence('job-0001', { expectedTarget: record().target, expectedOperationKind: 'install' });
+  let loaded = await registry.writeRestorePointRetirement('job-0001', { expectedSha256: null, value: retirementReceipt(proof) });
+  for (const [progress, archive, sidecar] of [['deleting', 'intent', 'not-started'], ['archive-deleted', 'durable', 'not-started'],
+    ['archive-deleted', 'durable', 'intent'], ['deleted', 'durable', 'durable']]) {
+    loaded = await registry.writeRestorePointRetirement('job-0001', { expectedSha256: loaded.sha256, value: {
+      ...loaded.value, sequence: loaded.value.sequence + 1, progress, durability: { archive, sidecar }
+    } });
+  }
+  const restarted = new RecoveryRegistry({ userDataPath, fsApi: fs, durableFs });
+  const scan = await restarted.initialize();
+  assert.equal(scan.pendingRestorePointRetirements.length, 0);
+  assert.equal(restarted.listRestorePointRetirementItems({ selector: null })[0].state, 'reclaimed');
+  assert.equal((await restarted.loadRestorePointRetirement('job-0001')).value.progress, 'deleted');
+});
+
+test('retirement directory disappearance or substitution defers without blocking source metadata', async t => {
+  for (const replacement of [false, true]) {
+    const { registry, userDataPath } = fixture(t);
+    await publishRetirementCandidate(registry);
+    const proof = await registry.loadPublishedTerminalEvidence('job-0001', { expectedTarget: record().target, expectedOperationKind: 'install' });
+    await registry.writeRestorePointRetirement('job-0001', { expectedSha256: null, value: retirementReceipt(proof) });
+    const directory = path.join(userDataPath, 'modpack-lifecycle', 'retirements');
+    fs.renameSync(directory, `${directory}-held`);
+    if (replacement) fs.mkdirSync(directory);
+    await assert.rejects(registry.loadRestorePointRetirement('job-0001'));
+    await assert.rejects(registry.writeRestorePointRetirement('job-0001', { expectedSha256: null, value: retirementReceipt(proof) }));
+    assert.equal(registry.listRestorePointRetirementItems({ selector: null })[0].state, 'deferred-proof');
+    const scan = await registry.initialize();
+    assert.equal(scan.globalBlock, false);
+    assert.equal(scan.blocks.length, 0);
+    assert.equal(scan.pendingRestorePointRetirements[0].state, 'deferred-proof');
+    await registry.create(record({ jobId: 'new-operation' }));
+    await registry.transition('new-operation', { expectedPhase: 'queued', nextPhase: 'preflight', patch: {} });
+    await registry.finish('new-operation', { terminalPhase: 'failed', outcome: null });
+    assert.equal((await registry.loadHistory('new-operation')).phase, 'failed');
+    if (replacement) assert.deepEqual(fs.readdirSync(directory), []);
+    else assert.equal(fs.existsSync(directory), false);
+  }
+});
+
+test('failed live metadata publication cannot prove reference absence before reinitialization', async t => {
+  const { registry } = fixture(t, { uncertainWriteNumber: 2 });
+  await registry.initialize();
+  await assert.rejects(registry.create(record({ jobId: 'uncertain-owner' })));
+  await assert.rejects(registry.hasOtherActiveRestorePointReference({ target: record().target, candidate: retirementCandidate(), excludingJobId: 'job-0001' }));
+});
+
+test('duplicate-key target binding cannot disappear behind an unrelated permissive history target', async t => {
+  const { registry, userDataPath } = fixture(t);
+  await registry.initialize();
+  await registry.create(record({ jobId: 'ambiguous', target: { kind: 'existing', stableServerId: 'other-server', path: 'C:\\Other\\server' },
+    candidatePath: null, rollbackPath: null, failedPath: null }));
+  await registry.finish('ambiguous', { terminalPhase: 'completed', outcome: null });
+  const file = path.join(userDataPath, 'modpack-lifecycle', 'history', 'ambiguous.json');
+  const bytes = fs.readFileSync(file, 'utf8');
+  fs.writeFileSync(file, bytes.replace('"target": {', `"target": ${JSON.stringify(record().target)}, "target": {`));
+  await assert.rejects(registry.hasOtherActiveRestorePointReference({ target: record().target, candidate: retirementCandidate(), excludingJobId: 'job-0001' }));
+  const scan = await registry.initialize();
+  assert.equal(scan.globalBlock, false); // General legacy read behavior is deliberately unchanged.
+  await assert.rejects(registry.hasOtherActiveRestorePointReference({ target: record().target, candidate: retirementCandidate(), excludingJobId: 'job-0001' }));
+});
+
+test('uncertain retirement directory creation durability stays notice-only without source block', async t => {
+  const { registry } = fixture(t, { failFlushNumber: 4 });
+  await publishRetirementCandidate(registry);
+  const proof = await registry.loadPublishedTerminalEvidence('job-0001', { expectedTarget: record().target, expectedOperationKind: 'install' });
+  await assert.rejects(registry.loadRestorePointRetirement('job-0001'));
+  await assert.rejects(registry.writeRestorePointRetirement('job-0001', { expectedSha256: null, value: retirementReceipt(proof) }));
+  const scan = await registry.initialize();
+  assert.equal(scan.globalBlock, false);
+  assert.equal(scan.blocks.length, 0);
+  assert.equal(scan.pendingRestorePointRetirements[0].state, 'deferred-proof');
+});
+
 function record(overrides = {}) {
   return {
     schemaVersion: 1,
@@ -201,10 +493,12 @@ test('initialize durably creates only the registry directories', async (t) => {
   assert.deepEqual(calls.filter(call => call.kind === 'flush-directory').map(call => call.directoryPath), [
     userDataPath,
     registryRoot,
+    registryRoot,
     registryRoot
   ]);
   assert.equal(fs.lstatSync(path.join(registryRoot, 'active')).isDirectory(), true);
   assert.equal(fs.lstatSync(path.join(registryRoot, 'history')).isDirectory(), true);
+  assert.equal(fs.lstatSync(path.join(registryRoot, 'retirements')).isDirectory(), true);
 });
 
 test('initialize retries directory flush failure without accepting replacement directories', async (t) => {
@@ -642,7 +936,8 @@ test('schema two durably anchors an exact restore creation while legacy records 
         ...creation,
         partIdentity: { dev: '11', ino: '44', birthtimeNs: '55' },
         state: 'writing'
-      }
+      },
+      outcome: { failedPointRetirementCandidate: retirementCandidate() }
     }
   });
   await assert.rejects(
@@ -671,6 +966,11 @@ test('schema two durably anchors an exact restore creation while legacy records 
   assert.equal(cleared.phase, 'snapshotting');
   assert.equal(cleared.restoreCreation, null);
   assert.equal(cleared.restorePoint, null);
+  assert.equal(cleared.outcome.failedPointRetirementCandidate.id, 'restore-0001');
+  await monotonicFixture.registry.finish('job-0001', { terminalPhase: 'failed', outcome: { recovery: { action: 'pre-swap-restored' } } });
+  assert.equal((await monotonicFixture.registry.initialize()).pendingRestorePointRetirements.length, 0);
+  const proof = await monotonicFixture.registry.loadPublishedTerminalEvidence('job-0001', { expectedTarget: record().target, expectedOperationKind: 'install' });
+  await assert.rejects(monotonicFixture.registry.writeRestorePointRetirement('job-0001', { expectedSha256: null, value: retirementReceipt(proof) }));
 });
 
 test('a corrupt record with a valid envelope creates an exact target block and is retained', async (t) => {

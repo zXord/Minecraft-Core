@@ -38,6 +38,7 @@ const {
 const { assertPlanStillValid } = require('../modpacks/planning/preflight-planner.cjs');
 const { computePreflightPlanFingerprint } = require('../modpacks/planning/plan-fingerprint.cjs');
 const { createVerifiedRestoreExtractor } = require('./verified-restore-extractor.cjs');
+const { normalizeRetirementCandidate } = require('./failed-restorepoint-retirement-evidence.cjs');
 const { RestorePointService } = require('./restore-point-service.cjs');
 const { RECORD_SCHEMA_VERSION } = require('./recovery-registry.cjs');
 const {
@@ -1419,10 +1420,18 @@ class ProductionMutationRuntime {
         }));
       } catch { /* progress observers never decide reference publication */ }
     }
+    const latest = await this.recoveryRegistry.load(jobId);
+    if (!latest || latest.phase !== 'snapshotting') throw invalid();
     const recorded = await this.recoveryRegistry.transition(jobId, {
       expectedPhase: 'snapshotting',
       nextPhase: 'snapshotting',
-      patch: { restorePoint: { id: reference.id, sha256: reference.sha256 } }
+      patch: { restorePoint: { id: reference.id, sha256: reference.sha256 },
+        outcome: { ...(latest.outcome || {}), failedPointRetirementCandidate: normalizeRetirementCandidate({
+          schemaVersion: 1, id: reference.id, name: reference.name, metadataName: reference.name?.replace(/\.zip$/, '.json'),
+          sha256: reference.sha256, size: reference.size, totalBytes: reference.totalBytes, scopeSha256: reference.scopeSha256,
+          sourceRevision: reference.sourceRevision, sourceRuntime: reference.sourceRuntime, operationId: reference.operationId,
+          createdAt: reference.createdAt
+        }) } }
     });
     context.restorePoint = reference;
     context.forgeCandidateHealthAuthorization = null;

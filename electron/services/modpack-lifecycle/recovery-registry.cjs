@@ -18,6 +18,8 @@ const { normalizeFailureDiagnostic } = require('./publication-failure-diagnostic
 const { normalizeRuntimeWriterAuthority } = require('./server-runtime-writer-authority.cjs');
 const { FAILURE_CODES } = require('../modpacks/errors.cjs');
 const { normalizeRuntimeDiagnostic } = require('../runtime-diagnostic.cjs');
+const { normalizeRetirementCandidate, normalizeRetirementReceipt, assertRetirementReceiptTransition } =
+  require('./failed-restorepoint-retirement-evidence.cjs');
 
 const LEGACY_RECORD_SCHEMA_VERSION = 1;
 const RECORD_SCHEMA_VERSION = 2;
@@ -140,6 +142,9 @@ function normalizeOutcome(value) {
     throw invalid(error);
   }
   if (!clone || typeof clone !== 'object' || Array.isArray(clone)) throw invalid();
+  if (Object.hasOwn(clone, 'failedPointRetirementCandidate')) {
+    clone.failedPointRetirementCandidate = normalizeRetirementCandidate(clone.failedPointRetirementCandidate);
+  }
   if (Object.hasOwn(clone, 'runtimeWriterProtocol') && clone.runtimeWriterProtocol !== 1) throw invalid();
   if (Object.hasOwn(clone, 'runtimeWriterFailure')) {
     assertStrictObject(clone.runtimeWriterFailure, ['code', ...(Object.hasOwn(clone.runtimeWriterFailure, 'diagnostic') ? ['diagnostic'] : [])]);
@@ -211,7 +216,72 @@ function normalizeRecord(value) {
   if (result.outcome && Object.hasOwn(result.outcome, 'runtimeWriterAuthority')) {
     result.outcome.runtimeWriterAuthority = normalizeRuntimeWriterAuthority(result.outcome.runtimeWriterAuthority, result);
   }
+  const pointCandidate = result.outcome?.failedPointRetirementCandidate;
+  if (pointCandidate && (pointCandidate.operationId !== result.jobId || result.target.kind !== 'existing' ||
+      (result.restorePoint !== null && (result.restorePoint.id !== pointCandidate.id || result.restorePoint.sha256 !== pointCandidate.sha256)))) throw invalid();
   return result;
+}
+
+// New authority reads must reject duplicate keys before JSON.parse can erase them.
+// This scanner validates structure/key uniqueness; JSON.parse remains the value parser.
+function parseAuthorityJson(bytes) {
+  const source = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  let offset = 0;
+  let values = 0;
+  const white = () => { while (/[\t\n\r ]/.test(source[offset] || '\0')) offset++; };
+  function string() {
+    const start = offset++;
+    while (offset < source.length) {
+      const next = source[offset++];
+      if (next === '\\') { offset++; continue; }
+      if (next === '"') return JSON.parse(source.slice(start, offset));
+    }
+    throw invalid();
+  }
+  function value(depth) {
+    if (depth > 32 || ++values > 50000) throw invalid();
+    white();
+    const next = source[offset];
+    if (next === '"') { string(); return; }
+    if (next === '{' || next === '[') {
+      offset++;
+      white();
+      const end = next === '{' ? '}' : ']';
+      const keys = new Set();
+      if (source[offset] === end) { offset++; return; }
+      while (true) {
+        white();
+        if (next === '{') {
+          if (source[offset] !== '"') throw invalid();
+          const key = string();
+          if (keys.has(key)) throw invalid();
+          keys.add(key);
+          white();
+          if (source[offset++] !== ':') throw invalid();
+        }
+        value(depth + 1);
+        white();
+        const separator = source[offset++];
+        if (separator === end) return;
+        if (separator !== ',') throw invalid();
+      }
+    }
+    const match = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(source.slice(offset));
+    if (!match) throw invalid();
+    offset += match[0].length;
+  }
+  value(0); white();
+  if (offset !== source.length) throw invalid();
+  return strictJsonClone(JSON.parse(source), { maxDepth: 32, maxCollection: 4096, maxStringBytes: 256 * 1024 });
+}
+
+function isRetirementCandidateRecord(record) {
+  const candidate = record.outcome?.failedPointRetirementCandidate;
+  return Boolean(candidate && record.phase === 'failed' && record.target.kind === 'existing' && record.swapStep === 'none' &&
+    record.restoreCreation === null && record.restorePoint?.id === candidate.id && record.restorePoint.sha256 === candidate.sha256 &&
+    record.outcome?.recovery?.action === 'pre-swap-restored' && record.outcome?.runtimeWriterAuthority?.state !== 'unproven' &&
+    record.outcome?.commitStarted !== true && record.outcome?.possibleNonRunnable !== true &&
+    !['publication', 'registration', 'liveValidation', 'revisionEvent'].some(key => record.outcome?.[key] != null));
 }
 
 function digest(bytes) {
@@ -280,19 +350,30 @@ class RecoveryRegistry {
     this.rootPath = path.join(this.userDataPath, 'modpack-lifecycle');
     this.activePath = path.join(this.rootPath, 'active');
     this.historyPath = path.join(this.rootPath, 'history');
+    this.retirementsPath = path.join(this.rootPath, 'retirements');
     this.directoryPins = {
       userData: registryDirectoryIdentity(userDataStat),
       root: null,
       active: null,
-      history: null
+      history: null,
+      retirements: null
     };
     this.initialized = false;
     this.historyPublication = Promise.resolve();
+    this.retirementPublication = Promise.resolve();
+    this.metadataInventory = new Map();
+    this.retirementItems = new Map();
+    this.retirementStorageReady = false;
+    this.referenceGlobalBlock = false;
+    this.referenceCorruptBlocks = [];
   }
 
   async initialize() {
     await this.#awaitHistoryStable();
-    if (this.initialized) this.#revalidateRegistryDirectories();
+    if (this.initialized) {
+      this.#revalidateRegistryDirectories();
+      if (!this.retirementStorageReady && this.directoryPins.retirements) this.#initializeRetirementStorage();
+    }
     else this.#initializeDirectories();
     this.#revalidateRegistryDirectories();
     const jobs = new Map();
@@ -318,14 +399,31 @@ class RecoveryRegistry {
     }
 
     const records = [];
+    this.metadataInventory = new Map();
+    this.retirementItems = new Map();
+    this.referenceCorruptBlocks = [];
     const pendingTerminalPublications = [];
     const corrupt = [];
     const blocks = [];
+    let referenceIncomplete = false;
     for (const [jobId, presence] of [...jobs].sort(([left], [right]) => left.localeCompare(right))) {
+      // Do not trust a permissively parsed target to skip strict owner checks.
+      // Ambiguous byte/schema binding anywhere makes global absence unproven,
+      // without changing legacy source-recovery admission behavior.
+      for (const [present, filePath] of [[presence.record, this.#recordPath(jobId)],
+        [presence.historyRecord, this.#historyRecordPath(jobId)], [presence.envelope, this.#envelopePath(jobId)],
+        [presence.historyEnvelope, this.#historyEnvelopePath(jobId)]]) {
+        if (!present) continue;
+        try { this.#readAuthorityJson(filePath, MAX_RECORD_BYTES, false); } catch { referenceIncomplete = true; }
+      }
       let publication = null;
       if (presence.historyRecord || presence.historyEnvelope) {
         try { publication = this.#classifyTerminalPublication(jobId); } catch { /* Retain all identifying blocks below. */ }
-        if (publication?.status === 'already-published') continue;
+        if (publication?.status === 'already-published') {
+          this.metadataInventory.set(jobId, publication.record.value);
+          this.#refreshRetirementItem(publication.record.value);
+          continue;
+        }
         if (publication?.status === 'pending') pendingTerminalPublications.push(publication.record.value);
       }
       let recordFromHistory = false;
@@ -339,9 +437,11 @@ class RecoveryRegistry {
           recordFromHistory = true;
         }
       }
+      if (!recordResult.value) referenceIncomplete = true;
       const envelopeResult = presence.envelope ? this.#tryReadEnvelope(this.#envelopePath(jobId)) : { value: null, error: null };
       const identifyingEnvelopes = [];
       if (recordResult.value) {
+        this.metadataInventory.set(jobId, recordResult.value);
         if (!recordFromHistory) records.push(recordResult.value);
         identifyingEnvelopes.push(createRecoveryTargetEnvelope(recordResult.value));
       } else if (recordResult.identifyingValue) {
@@ -377,6 +477,7 @@ class RecoveryRegistry {
             (envelopeResult.value && envelopeResult.value.jobId !== jobId)
           )
         });
+        this.referenceCorruptBlocks.push(...identifyingEnvelopes);
       }
       if (identifyingEnvelopes.length === 0) {
         globalBlock = true;
@@ -396,9 +497,12 @@ class RecoveryRegistry {
       }
     }
 
+    this.referenceGlobalBlock = globalBlock || referenceIncomplete;
+    const pendingRestorePointRetirements = this.listRestorePointRetirementItems({ selector: null }).filter(item => item.state !== 'reclaimed');
     return Object.freeze({
       records: Object.freeze(records.map(item => Object.freeze(strictJsonClone(item)))),
       pendingTerminalPublications: Object.freeze(pendingTerminalPublications.map(item => Object.freeze(strictJsonClone(item)))),
+      pendingRestorePointRetirements: Object.freeze(pendingRestorePointRetirements),
       corrupt: Object.freeze(corrupt.map(item => Object.freeze(item))),
       blocks: Object.freeze(blocks.map(item => Object.freeze(item))),
       globalBlock
@@ -433,8 +537,10 @@ class RecoveryRegistry {
       this.#revalidateRegistryDirectories();
       await this.durableFs.writeJsonAtomicAsync(recordPath, normalized, { expectedTargetSha256: null });
       this.#revalidateRegistryDirectories();
+      this.metadataInventory.set(normalized.jobId, normalized);
       return Object.freeze(strictJsonClone(normalized));
     } catch (error) {
+      this.referenceGlobalBlock = true;
       throw commitFailure(error);
     }
   }
@@ -463,6 +569,181 @@ class RecoveryRegistry {
     return scan.records;
   }
 
+  async loadPublishedTerminalEvidence(jobId, binding) {
+    await this.#awaitHistoryStable();
+    this.#assertInitialized();
+    return this.#publishedEvidence(jobId, binding);
+  }
+
+  #publishedEvidence(jobId, request) {
+    assertIdentifier(jobId, JOB_ID_PATTERN);
+    assertStrictObject(request, ['expectedTarget', 'expectedOperationKind']);
+    assertStrictObject(request.expectedTarget, TARGET_KEYS);
+    const target = request.expectedTarget;
+    if (!['new', 'existing'].includes(target.kind) || !OPERATION_KINDS.has(request.expectedOperationKind)) throw invalid();
+    const stableServerId = target.stableServerId === null ? null : assertIdentifier(target.stableServerId);
+    if (target.kind === 'existing' && stableServerId === null) throw invalid();
+    const binding = { target: { kind: target.kind, stableServerId, path: normalizeRecoveryTargetPath(target.path) }, operationKind: request.expectedOperationKind };
+    const publication = this.#classifyTerminalPublication(jobId, binding);
+    if (publication.status !== 'already-published') throw recoveryRequired();
+    const record = this.#readAuthorityJson(this.#historyRecordPath(jobId), MAX_RECORD_BYTES, false);
+    const envelope = this.#readAuthorityJson(this.#historyEnvelopePath(jobId), MAX_RECORD_BYTES, false);
+    const normalized = normalizeRecord(record.value);
+    const verified = verifyRecoveryTargetEnvelope(envelope.value);
+    if (record.sha256 !== publication.record.sha256 || envelope.sha256 !== publication.envelope.sha256 ||
+        !sameJson(normalized, publication.record.value) || !sameJson(verified, publication.envelope.value)) throw recoveryRequired();
+    return Object.freeze({ record: Object.freeze(normalized), recordSha256: record.sha256,
+      envelope: verified, envelopeSha256: envelope.sha256 });
+  }
+
+  async loadRestorePointRetirement(jobId) {
+    await this.#awaitHistoryStable();
+    await this.retirementPublication;
+    this.#assertInitialized();
+    assertIdentifier(jobId, JOB_ID_PATTERN);
+    return this.#readRetirement(jobId);
+  }
+
+  #readRetirement(jobId) {
+    const loaded = this.#readAuthorityJson(path.join(this.retirementsPath, `${jobId}.json`), 64 * 1024, true);
+    if (!loaded) return null;
+    const value = normalizeRetirementReceipt(loaded.value);
+    if (value.jobId !== jobId) throw invalid();
+    const proof = this.#publishedEvidence(jobId, { expectedTarget: value.target, expectedOperationKind: value.operationKind });
+    this.#assertReceiptProof(value, proof);
+    return Object.freeze({ value, sha256: loaded.sha256 });
+  }
+
+  #assertReceiptProof(value, proof) {
+    if (!isRetirementCandidateRecord(proof.record) || !sameJson(value.candidate, proof.record.outcome.failedPointRetirementCandidate) ||
+        value.terminal.recordSha256 !== proof.recordSha256 || value.terminal.envelopeSha256 !== proof.envelopeSha256 ||
+        value.terminal.targetPathHash !== proof.envelope.targetPathHash || value.terminal.envelopeChecksum !== proof.envelope.checksum) throw invalid();
+  }
+
+  async writeRestorePointRetirement(jobId, request) {
+    await this.#awaitHistoryStable();
+    this.#assertInitialized();
+    assertIdentifier(jobId, JOB_ID_PATTERN);
+    assertStrictObject(request, ['expectedSha256', 'value']);
+    if (request.expectedSha256 !== null && (typeof request.expectedSha256 !== 'string' || !SHA256_PATTERN.test(request.expectedSha256))) throw invalid();
+    const expectedSha256 = request.expectedSha256;
+    const value = normalizeRetirementReceipt(request.value);
+    if (value.jobId !== jobId) throw invalid();
+    const previous = this.retirementPublication;
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    this.retirementPublication = previous.then(() => gate, () => gate);
+    await previous;
+    // Share the publication gate as well so terminal evidence cannot be moved mid-CAS.
+    const releaseHistory = await this.#acquireHistoryPublication();
+    try {
+      const loaded = this.#readRetirement(jobId);
+      if ((loaded?.sha256 ?? null) !== expectedSha256) throw stale();
+      if (loaded) assertRetirementReceiptTransition(loaded.value, value);
+      else if (value.sequence !== 0 || value.progress !== 'authorized') throw invalid();
+      const proof = this.#publishedEvidence(jobId, { expectedTarget: value.target, expectedOperationKind: value.operationKind });
+      this.#assertReceiptProof(value, proof);
+      this.#revalidateRetirementDirectory();
+      await this.durableFs.writeJsonAtomicAsync(path.join(this.retirementsPath, `${jobId}.json`), value,
+        { expectedTargetSha256: expectedSha256 });
+      this.#revalidateRegistryDirectories();
+      this.#revalidateRetirementDirectory();
+      const persisted = this.#readRetirement(jobId);
+      if (!persisted || !sameJson(persisted.value, value)) throw recoveryRequired();
+      this.#refreshRetirementItem(proof.record);
+      return persisted;
+    } catch (error) {
+      throw commitFailure(error);
+    } finally { releaseHistory(); release(); }
+  }
+
+  #refreshRetirementItem(record) {
+    this.retirementItems.delete(record.jobId);
+    if (!isRetirementCandidateRecord(record)) return;
+    let receipt = null;
+    try {
+      this.#publishedEvidence(record.jobId, { expectedTarget: record.target, expectedOperationKind: record.operationKind });
+      receipt = this.#readRetirement(record.jobId);
+    } catch { /* Invalid/incomplete retirement proof is notice-only, never a source-recovery block. */ }
+    this.retirementItems.set(record.jobId, Object.freeze({ jobId: record.jobId,
+      selector: Object.freeze({ instanceId: record.target.stableServerId, serverPath: record.target.path }),
+      state: receipt ? (receipt.value.progress === 'deleted' ? 'reclaimed' : 'authorized-retry') : 'deferred-proof',
+      createdAt: receipt?.value.createdAt ?? record.outcome.failedPointRetirementCandidate.createdAt,
+      lastAttemptAt: receipt?.value.lastAttemptAt ?? null }));
+  }
+
+  listRestorePointRetirementItems(request) {
+    this.#assertInitialized();
+    assertStrictObject(request, ['selector']);
+    let selector = null;
+    if (request.selector !== null) {
+      assertStrictObject(request.selector, ['instanceId', 'serverPath']);
+      selector = { instanceId: assertIdentifier(request.selector.instanceId), serverPath: normalizeRecoveryTargetPath(request.selector.serverPath) };
+    }
+    let readable = true;
+    try { this.#revalidateRetirementDirectory(); } catch { readable = false; }
+    return Object.freeze([...this.retirementItems.values()].map(item => readable ? item : Object.freeze({ ...item, state: 'deferred-proof' })).filter(item => !selector ||
+      (selector.instanceId === item.selector.instanceId && selector.serverPath === item.selector.serverPath))
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.jobId.localeCompare(right.jobId)));
+  }
+
+  async hasOtherActiveRestorePointReference(request) {
+    await this.#awaitHistoryStable();
+    this.#assertInitialized();
+    assertStrictObject(request, ['target', 'candidate', 'excludingJobId']);
+    assertStrictObject(request.target, TARGET_KEYS);
+    if (request.target.kind !== 'existing') throw invalid();
+    const target = { kind: 'existing', stableServerId: assertIdentifier(request.target.stableServerId), path: normalizeRecoveryTargetPath(request.target.path) };
+    const candidate = normalizeRetirementCandidate(request.candidate);
+    assertIdentifier(request.excludingJobId, JOB_ID_PATTERN);
+    const expectedEnvelope = createRecoveryTargetEnvelope({ jobId: request.excludingJobId, target });
+    if (this.referenceGlobalBlock || this.referenceCorruptBlocks.some(block => block.targetPathHash === expectedEnvelope.targetPathHash ||
+        block.stableServerId === target.stableServerId)) throw recoveryRequired();
+    let owned = false;
+    const references = new Map();
+    for (const [jobId, inventoryRecord] of this.metadataInventory) {
+      const active = this.#entryExists(this.#recordPath(jobId));
+      let record;
+      if (active) {
+        if (this.#entryExists(this.#historyRecordPath(jobId)) || this.#entryExists(this.#historyEnvelopePath(jobId))) throw recoveryRequired();
+        const loaded = this.#readAuthorityJson(this.#recordPath(jobId), MAX_RECORD_BYTES, false);
+        record = normalizeRecord(loaded.value);
+        const envelope = this.#readAuthorityJson(this.#envelopePath(jobId), MAX_RECORD_BYTES, false);
+        if (!sameJson(verifyRecoveryTargetEnvelope(envelope.value), createRecoveryTargetEnvelope(record))) throw recoveryRequired();
+      } else {
+        const publication = this.#classifyTerminalPublication(jobId, { target: inventoryRecord.target, operationKind: inventoryRecord.operationKind });
+        record = publication.record.value;
+        // Pending publication is still protective, but its bytes must be unambiguous.
+        this.#readAuthorityJson(this.#historyRecordPath(jobId), MAX_RECORD_BYTES, false);
+        this.#readAuthorityJson(publication.status === 'pending' ? this.#envelopePath(jobId) : this.#historyEnvelopePath(jobId), MAX_RECORD_BYTES, false);
+      }
+      if (record.jobId !== jobId || !sameJson(record.target, inventoryRecord.target) ||
+          record.operationKind !== inventoryRecord.operationKind) throw recoveryRequired();
+      // Reauthenticate before skipping another target: cached/defaulted binding is not absence proof.
+      const sameId = record.target.stableServerId === target.stableServerId;
+      const samePath = record.target.path === target.path;
+      if (!sameId && !samePath) continue;
+      if (!sameId || !samePath || record.target.kind !== 'existing') throw recoveryRequired();
+      const point = record.restorePoint;
+      const locator = record.outcome?.failedPointRetirementCandidate;
+      if (point === null && !locator) continue;
+      const reference = point || locator;
+      const prior = references.get(reference.id);
+      if (prior && (prior.sha256 !== reference.sha256 || (prior.locator && locator &&
+          (prior.locator.name !== locator.name || prior.locator.metadataName !== locator.metadataName)))) throw recoveryRequired();
+      references.set(reference.id, { sha256: reference.sha256, locator: locator || prior?.locator });
+      const samePoint = reference.id === candidate.id;
+      const sameLocator = locator && (locator.name.toLocaleLowerCase('en-US') === candidate.name.toLocaleLowerCase('en-US') ||
+        locator.metadataName.toLocaleLowerCase('en-US') === candidate.metadataName.toLocaleLowerCase('en-US'));
+      if (samePoint && (reference.sha256 !== candidate.sha256 || (locator && !sameLocator))) throw recoveryRequired();
+      if (sameLocator && !samePoint) throw recoveryRequired();
+      const ownNewPoint = jobId === request.excludingJobId && locator && locator.operationId === jobId && samePoint &&
+        sameJson(locator, candidate) && point?.id === locator.id && point.sha256 === locator.sha256;
+      if ((samePoint || sameLocator) && !ownNewPoint) owned = true;
+    }
+    return owned;
+  }
+
   async retryTerminalPublication(jobId, request) {
     this.#assertInitialized();
     assertIdentifier(jobId, JOB_ID_PATTERN);
@@ -478,6 +759,8 @@ class RecoveryRegistry {
     try {
       const before = this.#classifyTerminalPublication(jobId, binding);
       if (before.status === 'already-published') {
+        this.metadataInventory.set(jobId, before.record.value);
+        this.#refreshRetirementItem(before.record.value);
         return Object.freeze({ status: before.status, record: Object.freeze(strictJsonClone(before.record.value)) });
       }
       await this.yieldControl();
@@ -491,8 +774,11 @@ class RecoveryRegistry {
       const after = this.#classifyTerminalPublication(jobId, binding);
       if (after.status !== 'already-published' || after.record.sha256 !== before.record.sha256 ||
           !sameJson(after.record.value, before.record.value)) throw recoveryRequired();
+      this.metadataInventory.set(jobId, after.record.value);
+      this.#refreshRetirementItem(after.record.value);
       return Object.freeze({ status: 'published', record: Object.freeze(strictJsonClone(after.record.value)) });
     } catch (error) {
+      this.referenceGlobalBlock = true;
       throw commitFailure(error);
     } finally {
       release();
@@ -544,6 +830,8 @@ class RecoveryRegistry {
       phase: request.nextPhase,
       updatedAt: this.#now()
     });
+    if (!loaded.value.outcome?.failedPointRetirementCandidate && candidate.outcome?.failedPointRetirementCandidate &&
+        (candidate.phase !== 'snapshotting' || candidate.restorePoint === null)) throw invalid();
     assertRestoreCreationTransition(loaded.value.restoreCreation, candidate.restoreCreation, {
       previousPhase: loaded.value.phase,
       nextPhase: candidate.phase,
@@ -554,6 +842,7 @@ class RecoveryRegistry {
       this.#revalidateRegistryDirectories();
       await this.durableFs.writeJsonAtomicAsync(this.#recordPath(jobId), candidate, { expectedTargetSha256: loaded.sha256 });
       this.#revalidateRegistryDirectories();
+      this.metadataInventory.set(jobId, candidate);
       return Object.freeze(strictJsonClone(candidate));
     } catch (error) {
       throw commitFailure(error);
@@ -562,6 +851,12 @@ class RecoveryRegistry {
 
   #preserveRuntimeAuthority(previous, outcome, declaringProtocol = false) {
     const result = outcome === null ? {} : { ...outcome };
+    const pointCandidate = previous.outcome?.failedPointRetirementCandidate;
+    if (pointCandidate) {
+      if (Object.hasOwn(result, 'failedPointRetirementCandidate') &&
+          !sameJson(normalizeRetirementCandidate(result.failedPointRetirementCandidate), pointCandidate)) throw stale();
+      result.failedPointRetirementCandidate = pointCandidate;
+    }
     for (const field of ['runtimeWriterAuthority', 'runtimeWriterProtocol', 'runtimeWriterFailure']) {
       const before = previous.outcome?.[field];
       if (before !== undefined) {
@@ -601,7 +896,7 @@ class RecoveryRegistry {
     try {
       this.#revalidateRegistryDirectories();
       await this.durableFs.writeJsonAtomicAsync(this.#recordPath(jobId), candidate, { expectedTargetSha256: loaded.sha256 });
-      this.#revalidateRegistryDirectories(); return Object.freeze(strictJsonClone(candidate));
+      this.#revalidateRegistryDirectories(); this.metadataInventory.set(jobId, candidate); return Object.freeze(strictJsonClone(candidate));
     } catch (cause) { throw commitFailure(cause); }
   }
 
@@ -627,6 +922,7 @@ class RecoveryRegistry {
       this.#revalidateRegistryDirectories();
       await this.durableFs.writeJsonAtomicAsync(this.#recordPath(jobId), candidate, { expectedTargetSha256: loaded.sha256 });
       this.#revalidateRegistryDirectories();
+      this.metadataInventory.set(jobId, candidate);
       return Object.freeze(strictJsonClone(candidate));
     } catch (error) {
       throw commitFailure(error);
@@ -715,6 +1011,8 @@ class RecoveryRegistry {
       const publishedRecord = this.#readRecord(historyRecordPath, { allowMissing: false, expectedJobId: jobId });
       if (!sameJson(publishedRecord.value, terminal)) throw recoveryRequired();
       this.#assertEnvelopeMatches(publishedRecord.value);
+      this.metadataInventory.set(jobId, publishedRecord.value);
+      this.#refreshRetirementItem(publishedRecord.value);
       return Object.freeze(strictJsonClone(terminal));
     } catch (error) {
       throw commitFailure(error);
@@ -772,7 +1070,33 @@ class RecoveryRegistry {
       this.durableFs.flushDirectory(parent);
     }
     this.#revalidateRegistryDirectories();
+    this.#initializeRetirementStorage();
     this.initialized = true;
+  }
+
+  #initializeRetirementStorage() {
+    // Retirement storage is independently pinned, but never gates safe source recovery.
+    // Once pinned, a missing/substituted directory is not recreated or repinned.
+    try {
+      if (this.directoryPins.retirements) this.#revalidatePinnedDirectory('retirements', this.retirementsPath);
+      else {
+        try { this.fs.lstatSync(this.retirementsPath, { bigint: true }); }
+        catch (error) {
+          if (error?.code !== 'ENOENT') throw error;
+          this.fs.mkdirSync(this.retirementsPath, { recursive: false, mode: 0o700 });
+        }
+        const stat = this.fs.lstatSync(this.retirementsPath, { bigint: true });
+        if (!stat.isDirectory() || stat.isSymbolicLink() || !sameLocalPath(this.fs.realpathSync.native(this.retirementsPath), this.retirementsPath)) throw recoveryRequired();
+        this.directoryPins.retirements = registryDirectoryIdentity(stat);
+      }
+      this.durableFs.flushDirectory(this.rootPath);
+      this.retirementStorageReady = true;
+    } catch { /* Retirement reads/writes fail closed; source metadata remains available. */ }
+  }
+
+  #revalidateRetirementDirectory() {
+    if (!this.retirementStorageReady) throw recoveryRequired();
+    this.#revalidatePinnedDirectory('retirements', this.retirementsPath);
   }
 
   #assertInitialized() {
@@ -822,6 +1146,24 @@ class RecoveryRegistry {
   #envelopePath(jobId) { return path.join(this.activePath, `${jobId}.target.json`); }
   #historyRecordPath(jobId) { return path.join(this.historyPath, `${jobId}.json`); }
   #historyEnvelopePath(jobId) { return path.join(this.historyPath, `${jobId}.target.json`); }
+
+  #readAuthorityJson(filePath, maxBytes, allowMissing) {
+    this.#revalidateRegistryDirectories();
+    const retirement = sameLocalPath(path.dirname(filePath), this.retirementsPath);
+    if (retirement) this.#revalidateRetirementDirectory();
+    const bytes = this.durableFs.readFileBounded(filePath, { allowMissing, maxBytes });
+    if (bytes === null) {
+      this.#revalidateRegistryDirectories();
+      if (retirement) this.#revalidateRetirementDirectory();
+      return null;
+    }
+    const stat = this.fs.lstatSync(filePath, { bigint: true });
+    if (!stat.isFile() || stat.isSymbolicLink() || BigInt(stat.nlink) !== 1n) throw recoveryRequired();
+    const value = parseAuthorityJson(bytes);
+    this.#revalidateRegistryDirectories();
+    if (retirement) this.#revalidateRetirementDirectory();
+    return { value, sha256: digest(bytes) };
+  }
 
   #readJson(filePath, { allowMissing }) {
     this.#revalidateRegistryDirectories();

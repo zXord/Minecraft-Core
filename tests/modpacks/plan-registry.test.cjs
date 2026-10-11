@@ -9,6 +9,73 @@ const { PlanRegistry, PLAN_TTL_MS } = require('../../electron/services/modpack-l
 const { deepFreeze } = require('../../electron/services/modpacks/errors.cjs');
 const { computePreflightPlanFingerprint } = require('../../electron/services/modpacks/planning/plan-fingerprint.cjs');
 
+function referenceCandidate() {
+  return { schemaVersion: 1, id: 'restore-safety', name: 'restore-point-safety.zip', metadataName: 'restore-point-safety.json',
+    sha256: 'a'.repeat(64), size: 31, totalBytes: '22', scopeSha256: 'b'.repeat(64), sourceRevision: 7,
+    sourceRuntime: null, operationId: 'job-failed', createdAt: '2026-08-01T00:00:00.000Z' };
+}
+
+test('claimed rollback plan protects selected point after claim removes reviewed plan', async t => {
+  const { registry, workspaceRegistry, advance } = fixture(t);
+  const { planningSessionId } = planningWorkspace(workspaceRegistry);
+  const base = internalPlan();
+  const plan = { ...base, restorePoints: [{ id: 'restore-safety', sha256: 'a'.repeat(64) }] };
+  plan.fingerprint = computePreflightPlanFingerprint(plan);
+  const reviewed = registry.create({ plan, sanitizedView: publicView(), fingerprint: plan.fingerprint, planningSessionId });
+  const query = { instanceId: 'server-a', candidate: referenceCandidate(), excludingJobId: 'job-failed' };
+  assert.equal(registry.hasRestorePointReference(query), true);
+  const claimed = await registry.claim({ planId: reviewed.planId, fingerprint: reviewed.fingerprint });
+  advance(PLAN_TTL_MS + 1);
+  assert.equal(registry.hasRestorePointReference({ ...query, excludingJobId: claimed.jobId }), true);
+  assert.equal(await registry.releaseClaim(claimed.jobId), true);
+  assert.equal(registry.hasRestorePointReference(query), false);
+});
+
+test('reviewed and claimed plan references fail closed on partial or conflicting identity, not equal digests', async t => {
+  for (const reference of [
+    { id: 'different', sha256: 'a'.repeat(64), want: false },
+    { id: 'restore-safety', sha256: 'a'.repeat(64), want: true },
+    { id: 'restore-safety', sha256: 'b'.repeat(64), error: true },
+    { id: 'restore-safety', error: true },
+    { id: 'different', sha256: 'a'.repeat(64), name: 'restore-point-safety.zip', error: true }
+  ]) {
+    const { registry, workspaceRegistry } = fixture(t);
+    const { planningSessionId } = planningWorkspace(workspaceRegistry);
+    const { want, error, ...point } = reference;
+    const plan = { ...internalPlan(), restorePoints: [point] };
+    plan.fingerprint = computePreflightPlanFingerprint(plan);
+    const reviewed = registry.create({ plan, sanitizedView: publicView(), fingerprint: plan.fingerprint, planningSessionId });
+    const query = { instanceId: 'server-a', candidate: referenceCandidate(), excludingJobId: 'job-failed' };
+    for (const stage of ['reviewed', 'claimed']) {
+      if (stage === 'claimed') await registry.claim({ planId: reviewed.planId, fingerprint: reviewed.fingerprint });
+      if (error) assert.throws(() => registry.hasRestorePointReference(query));
+      else assert.equal(registry.hasRestorePointReference(query), want);
+    }
+  }
+});
+
+test('failed claim release keeps private selected-point ownership', async t => {
+  const { registry, workspaceRegistry } = fixture(t, { releaseFailure: () => true });
+  const { planningSessionId } = planningWorkspace(workspaceRegistry);
+  const plan = { ...internalPlan(), restorePoints: [{ id: 'restore-safety', sha256: 'a'.repeat(64) }] };
+  plan.fingerprint = computePreflightPlanFingerprint(plan);
+  const reviewed = registry.create({ plan, sanitizedView: publicView(), fingerprint: plan.fingerprint, planningSessionId });
+  const claimed = await registry.claim({ planId: reviewed.planId, fingerprint: reviewed.fingerprint });
+  await assert.rejects(registry.releaseClaim(claimed.jobId));
+  assert.equal(registry.hasRestorePointReference({ instanceId: 'server-a', candidate: referenceCandidate(), excludingJobId: 'other' }), true);
+});
+
+test('duplicate-ID conflicting plans are incomplete reference proof even for another candidate', t => {
+  const { registry, workspaceRegistry } = fixture(t);
+  for (const sha256 of ['c'.repeat(64), 'd'.repeat(64)]) {
+    const { planningSessionId } = planningWorkspace(workspaceRegistry);
+    const plan = { ...internalPlan(), restorePoints: [{ id: 'unrelated-point', sha256 }] };
+    plan.fingerprint = computePreflightPlanFingerprint(plan);
+    registry.create({ plan, sanitizedView: publicView(), fingerprint: plan.fingerprint, planningSessionId });
+  }
+  assert.throws(() => registry.hasRestorePointReference({ instanceId: 'server-a', candidate: referenceCandidate(), excludingJobId: 'job-failed' }));
+});
+
 function fixture(t, { transferFailure = null, releaseFailure = null } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-plan-registry-'));
   let workspaceId = 0;
