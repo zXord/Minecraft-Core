@@ -2,7 +2,13 @@
 
 Updated 11 October 2026 after reconciling the saved b1 cleanup recovery trace and current durable checkpoint, Asia/Riyadh. **Not release ready.** This is the restart checklist for normal, visible app testing. Automated tests support these checks; they do not replace installing the real pack, running Minecraft, and joining the server.
 
-## Current working summary — 11 October, b1 client installed
+## Current working summary — 11 October, b1 server 0.13.5 / client 0.13.4
+
+**21:32 — companion pairing PASS / new permission overlay:** normal second inspection and Accept matching client pack succeeded for exact 0.13.5 MultiMC. B1 Minecraft is Stopped; its existing management service on 8080 started normally and is Running. A new Windows Security firewall prompt for Minecraft Core overlays the app and was not operated. Client 0.13.5 review/install/Verify and actual game join remain unpassed; source fixes continue while this requires user dismissal. No real instances or a1 were touched.
+
+**21:27 — normal matching-client upgrade test:** official 0.13.5 MultiMC inspection passed at 21:24 with exact Minecraft 1.20.1 / Forge 47.4.13 and no additional pack-file downloads. Normal Dashboard Stop settled b1 at 21:25; Java process 129004 is absent. Returning to Modpack cleared the review, so same-asset reinspection began with the server stopped. This exposed two bounded UX corrections: show the already-reported checked-file counts and disclose the stopped-server prerequisite before inspection. See `native-client-upgrade-0135-20261011.md` in the current UI evidence workspace.
+
+**21:17 — normal UI resumed:** fresh native capture confirmed the earlier Java permission dialog was gone without agent interaction. Return to server showed installed 0.13.5 / revision 17; the same-release companion list correctly offered 0.13.5 assets. Normal selection and Inspect began for the official 828,328,822-byte MultiMC ZIP. The older OpenJDK-blocked notes below describe prior checkpoints only.
 
 **Latest source checkpoint `9558fd2`:** failed restore-point retirement is integrated and independently reviewed; fresh combined checks passed818/818 plus13 native filesystem fixture methods. Normal-app retirement acceptance is still pending a new package. Interrupted new-server Start/retry reconciliation has its storage layer committed and live-owner integration in progress; production v2 creation remains disabled until all four slices pass. The immutable normal b1 app remains on6d31fec with the completed0.13.5 upgrade. A Windows Security OpenJDK permission dialog currently prevents further ordinary UI interaction; it has not been operated. Real profiles and a1 evidence remain untouched.
 
