@@ -78,6 +78,37 @@ function tempEntries(root) {
   return fs.readdirSync(root).filter(name => name.includes('.minecraft-core-tmp-'));
 }
 
+test('exact delete requires original identities and strict capability', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `exact-delete-${crypto.randomUUID()}-`));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const leaf = path.join(root, 'leaf'); fs.writeFileSync(leaf, 'keep');
+  let calls = 0;
+  const client = { moveWriteThrough() {}, replaceFileWriteThrough() {}, flushDirectory() {},
+    async deleteFileExactAsync() { calls++; return { deleted: true, durable: true }; } };
+  const identity = (candidate, fileType) => {
+    const stat = fs.lstatSync(candidate, { bigint: true });
+    return { fileType, dev: String(stat.dev), ino: String(stat.ino), size: String(stat.size),
+      birthtime: String(stat.birthtimeNs), mtime: String(stat.mtimeNs), ctime: String(stat.ctimeNs),
+      ...(fileType === 'file' ? { sha256: crypto.createHash('sha256').update('keep').digest('hex') } : {}) };
+  };
+  const options = { expectedFileIdentity: identity(leaf, 'file'), expectedParentIdentity: identity(root, 'directory'),
+    expectedAllowedRootIdentities: [{ path: root, identity: identity(root, 'directory') }], expectedAncestorIdentities: [], mode: 'delete' };
+  for (const capabilities of [undefined, { deleteFileExactFlushesParent: true },
+    Object.freeze(Object.create({ deleteFileExactFlushesParent: true }))]) {
+    const service = createDurableFs({ durableClient: { ...client, capabilities }, allowedRoots: [root] });
+    await assert.rejects(service.deleteFileExactAsync(leaf, options), { code: 'COMMIT_FAILED', durableEffectState: 'none' });
+  }
+  const service = configureDurableFs({ durableClient: { ...client, capabilities: Object.freeze({ deleteFileExactFlushesParent: true }) },
+    allowedRoots: [root], fsApi: { ...fs, unlinkSync() { throw Error('forbidden fallback'); }, rmSync() { throw Error('forbidden fallback'); } } });
+  for (const key of Object.keys(options)) {
+    const invalid = { ...options }; delete invalid[key];
+    await assert.rejects(service.deleteFileExactAsync(leaf, invalid), { code: 'COMMIT_FAILED' });
+  }
+  assert.equal(calls, 0);
+  assert.deepEqual(await require('../electron/utils/durable-fs.cjs').deleteFileExactAsync(leaf, options), { deleted: true, durable: true });
+  assert.equal(calls, 1); assert.equal(fs.readFileSync(leaf, 'utf8'), 'keep');
+});
+
 function uncertainMoveFixture(t, {
   sourceType = 'directory',
   moveMode = 'rename',

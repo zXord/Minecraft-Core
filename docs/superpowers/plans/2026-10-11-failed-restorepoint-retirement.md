@@ -111,7 +111,7 @@ Local reference proof reads **200** history items/page, at most **50** pages/poi
 
   `dotnet run --project native/ArchiveWorker.RecoveryTests/ArchiveWorker.RecoveryTests.csproj --configuration Release -- --exact-delete-only`
 
-  Expected red: missing exact-delete method/protocol, not missing SDK/fixture contamination. Windows x64 with .NET 8 SDK is required. Native fixture creates a GUID-named temporary root itself, verifies it is newly created, asserts every write target stays inside it, and only removes validated generated files/root. No user-supplied server path. Missing prerequisite is a reported verification gap, not permission to weaken deletion.
+  Expected red: missing exact-delete method/protocol, not missing SDK/fixture contamination. Windows x64 with a compatible installed SDK targeting unchanged `net8.0` and a .NET8 runtime is required; the SDK itself need not be8.x. Record actual SDK/TFM/runtime versions. Native fixture creates a GUID-named temporary root itself, verifies it is newly created, asserts every write target stays inside it, and only removes validated generated files/root. No user-supplied server path. Missing prerequisite is a reported verification gap, not permission to weaken deletion.
 
 - [ ] **Step 3: Implement the strict transport and held-handle deletion.**
 

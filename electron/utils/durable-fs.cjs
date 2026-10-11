@@ -1167,7 +1167,37 @@ function createDurableFs({
     }
   }
 
+  async function deleteFileExactAsync(filePath, options) {
+    let dispatched = false;
+    try {
+      if (!trustedNativeCapability(durableClient, 'deleteFileExactFlushesParent') || typeof durableClient.deleteFileExactAsync !== 'function') throw commitFailure();
+      const { prepareExactDeleteRequest } = require('./windows-durable-fs-client.cjs');
+      // Both layers authenticate the caller's original lineage before dispatch.
+      const request = prepareExactDeleteRequest(filePath, options, roots.map(root => root.path));
+      for (const root of roots) {
+        const current = statIdentity(fsApi.lstatSync(root.path, { bigint: true }));
+        if (!sameObject(root.identity, current)) throw commitFailure();
+      }
+      dispatched = true;
+      const result = await durableClient.deleteFileExactAsync(request.sourcePath, {
+        expectedFileIdentity: request.sourceIdentity, expectedParentIdentity: request.sourceParentIdentity,
+        expectedAllowedRootIdentities: request.allowedRootIdentities, expectedAncestorIdentities: request.ancestorIdentities, mode: request.mode
+      });
+      if (!result || Object.getPrototypeOf(result) !== Object.prototype || Object.keys(result).length !== 2 ||
+          result.deleted !== true || result.durable !== true) throw commitFailure();
+      return Object.freeze({ deleted: true, durable: true });
+    } catch (error) {
+      const failure = commitFailure(error);
+      for (const [key, value] of Object.entries({ durableFailureKind: 'integrity-failure', durableFailureStage: 'request',
+        durableEffectState: dispatched ? 'uncertain' : 'none' })) {
+        if (failure[key] === undefined) Object.defineProperty(failure, key, { value, enumerable: true });
+      }
+      throw failure;
+    }
+  }
+
   return Object.freeze({
+    deleteFileExactAsync,
     flushDirectories,
     flushDirectoriesAsync,
     flushDirectory,
@@ -1248,6 +1278,10 @@ function sha256File(filePath) {
   return getConfiguredDurableFs().sha256File(filePath);
 }
 
+function deleteFileExactAsync(filePath, options) {
+  return getConfiguredDurableFs().deleteFileExactAsync(filePath, options);
+}
+
 module.exports = {
   MAX_ATOMIC_BYTES,
   MAX_FLUSH_DIRECTORIES,
@@ -1255,6 +1289,7 @@ module.exports = {
   MAX_JSON_BYTES,
   configureDurableFs,
   createDurableFs,
+  deleteFileExactAsync,
   flushDirectories,
   flushDirectoriesAsync,
   flushDirectory,

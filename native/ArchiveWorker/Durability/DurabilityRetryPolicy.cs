@@ -11,6 +11,8 @@ internal static class DurabilityRetryPolicy
         out int delayMilliseconds)
     {
         delayMilliseconds = 0;
+        // Disposition/close/parent-flush can already have deleted the leaf.
+        if (failureStage is "handle-disposition" or "delete-close" or "delete-parent-flush") return false;
         if (!string.Equals(failureKind, "sharing-violation", StringComparison.Ordinal) ||
             retryIndex < 0 || retryIndex >= RetryDelaysMilliseconds.Length)
         {

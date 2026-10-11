@@ -27,6 +27,8 @@ internal static partial class NativeMethods
     internal const uint IoReparseTagNameSurrogate = 0x20000000;
     internal const int FileAttributeTagInfo = 9;
     internal const int FileRenameInfoEx = 22;
+    internal const int FileDispositionInfo = 4;
+    internal const uint FileAttributeDirectory = 0x00000010;
     internal const uint FileRenameReplaceIfExists = 0x00000001;
     internal const uint FileRenamePosixSemantics = 0x00000002;
 

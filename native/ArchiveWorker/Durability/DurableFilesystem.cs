@@ -17,12 +17,25 @@ internal static class DurableFilesystem
     private const int MaxFlushDirectories = 512;
 
     internal static void Execute(DurableRequest request)
+        => Execute(request, null);
+
+    // Internal stage observation/fault injection; never deserialized or exposed
+    // through worker arguments. All ordinary validation still runs.
+    internal static void Execute(DurableRequest request, Action<string>? observeStage)
     {
+        // Presence matters, including explicit null mixed-operation fields.
+        if (request.Operation == "delete-file-exact") RequireExactDeleteShape(request);
+        else if (request.SuppliedFields.Contains("mode") || request.SuppliedFields.Contains("ancestorIdentities"))
+            throw new DurabilityFailureException("request", new InvalidDataException("Mixed durability request"));
         using DurableRootPins roots = AtStage("root-open", () => DurableRootPins.Open(request.AllowedRoots, request.AllowedRootIdentities));
         try
         {
             switch (request.Operation)
             {
+                case "delete-file-exact":
+                    RequireExactDeleteShape(request);
+                    DeleteFileExact(request, roots, observeStage);
+                    break;
                 case "move-write-through":
                     RequireShape(request, source: true, destination: true, existingDestination: false, directory: false);
                     Move(request, roots, replace: false);
@@ -55,6 +68,89 @@ internal static class DurableFilesystem
         {
             throw new DurabilityFailureException("request", exception);
         }
+    }
+
+    private static void RequireExactDeleteShape(DurableRequest request)
+    {
+        if (!request.SuppliedFields.SetEquals(new[] { "operation", "sourcePath", "sourceIdentity", "sourceParentIdentity", "allowedRoots", "allowedRootIdentities", "ancestorIdentities", "mode" }) ||
+            request.SourcePath is null || request.SourceIdentity is null || request.SourceParentIdentity is null ||
+            request.Mode is not ("delete" or "reconcile-absent") || request.AncestorIdentities is not { Length: <= 32 } ||
+            request.DestinationPath is not null || request.DestinationIdentity is not null || request.DestinationParentIdentity is not null ||
+            request.DirectoryPath is not null || request.DirectoryIdentity is not null || request.Directories is not null)
+            throw new InvalidDataException("Exact deletion shape invalid");
+    }
+
+    private static void DeleteFileExact(DurableRequest request, DurableRootPins roots, Action<string>? observeStage)
+    {
+        DurableExpectedIdentity expected = AtStage("source-open", () => DurableExpectedIdentity.Parse(request.SourceIdentity!, requireFile: true));
+        string source = AtStage("source-parent-open", () =>
+        {
+            // Validate path spelling without adopting the leaf (which can be absent).
+            string parent = CanonicalPaths.ExistingDirectory(Path.GetDirectoryName(request.SourcePath!) ?? throw new InvalidDataException("Missing parent"));
+            string name = Path.GetFileName(request.SourcePath!);
+            if (!CanonicalPaths.IsSafeWindowsComponent(name) || !Path.IsPathFullyQualified(request.SourcePath!) ||
+                !string.Equals(Path.Combine(parent, name), request.SourcePath, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Invalid exact leaf path");
+            return Path.Combine(parent, name);
+        });
+        if (!roots.Contains(source)) throw new InvalidDataException("Unowned deletion");
+        using DurablePinnedObject parentPin = AtStage("source-parent-open", () => DurablePinnedObject.Open(Path.GetDirectoryName(source)!,
+            DurableExpectedIdentity.Parse(request.SourceParentIdentity!, requireDirectory: true), writeAccess: true, pinRename: true, writeThrough: true));
+        using DurableAncestorPins ancestors = AtStage("ancestor-open", () => DurableAncestorPins.OpenExact(roots, parentPin.Path, request.AncestorIdentities!));
+        DurablePinnedObject? leaf = null;
+        try
+        {
+            if (request.Mode == "delete") leaf = AtStage("source-open", () => DurablePinnedObject.Open(source, expected,
+                writeAccess: false, pinRename: true, pinWrite: true, deleteAccess: true));
+            AtStage("preflight-revalidation", () =>
+            {
+                observeStage?.Invoke("preflight-revalidation");
+                roots.Revalidate(); ancestors.Revalidate(); parentPin.Revalidate(requirePath: true);
+                if (leaf is null) ConfirmAbsent(source);
+                else { leaf.Revalidate(requirePath: true); leaf.RequireSingleRegularFile(); }
+            });
+            if (leaf is not null)
+            {
+                // Even a failed disposition syscall has uncertain effect. No
+                // exception at or beyond this boundary is eligible for retry.
+                AtStage("handle-disposition", () =>
+                {
+                    observeStage?.Invoke("handle-disposition");
+                    leaf.RequireSingleRegularFile();
+                    nint buffer = Marshal.AllocHGlobal(1);
+                    try
+                    {
+                        Marshal.WriteByte(buffer, 1);
+                        if (!NativeMethods.SetFileInformationByHandle(leaf.Handle, NativeMethods.FileDispositionInfo, buffer, 1))
+                            throw new IOException("Handle disposition failed", new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+                        observeStage?.Invoke("after-disposition");
+                    }
+                    finally { Marshal.FreeHGlobal(buffer); }
+                });
+                AtStage("delete-close", () => { observeStage?.Invoke("delete-close"); leaf.CloseChecked(); observeStage?.Invoke("after-close"); });
+            }
+            AtStage("delete-parent-flush", () =>
+            {
+                observeStage?.Invoke("delete-parent-flush");
+                ConfirmAbsent(source);
+                parentPin.Flush();
+                observeStage?.Invoke("after-parent-flush");
+                ConfirmAbsent(source);
+                parentPin.Revalidate(requirePath: true); ancestors.Revalidate(); roots.Revalidate();
+            });
+        }
+        finally { leaf?.Dispose(); }
+    }
+
+    private static void ConfirmAbsent(string source)
+    {
+        // File.Exists hides access errors. Only an exact FILE_NOT_FOUND under
+        // held parent/ancestor pins proves absence; a replacement is untouched.
+        nint probe = NativeMethods.CreateFile(NativeFilePath.ForApi(source), NativeMethods.FileReadAttributes,
+            NativeMethods.FileShareRead | NativeMethods.FileShareWrite | NativeMethods.FileShareDelete,
+            nint.Zero, NativeMethods.OpenExisting, NativeMethods.FileFlagOpenReparsePoint | NativeMethods.FileFlagBackupSemantics, nint.Zero);
+        if (probe != NativeMethods.InvalidHandleValue) { _ = NativeMethods.CloseHandle(probe); throw new InvalidDataException("Exact leaf is present"); }
+        int error = Marshal.GetLastWin32Error();
+        if (error != NativeMethods.ErrorFileNotFound) throw new IOException("Exact absence unconfirmed", new System.ComponentModel.Win32Exception(error));
     }
 
     private static void Move(DurableRequest request, DurableRootPins roots, bool replace)
@@ -272,6 +368,7 @@ internal static class DurableFilesystem
 
     private static void RequireShape(DurableRequest request, bool source, bool destination, bool existingDestination, bool directory)
     {
+        if (request.Mode is not null || request.AncestorIdentities is not null) throw new InvalidDataException("Mixed durability request");
         if ((source != (request.SourcePath is not null && request.SourceIdentity is not null)) ||
             (destination != (request.DestinationPath is not null && request.DestinationParentIdentity is not null)) ||
             (existingDestination != (request.DestinationIdentity is not null)) ||
@@ -282,6 +379,7 @@ internal static class DurableFilesystem
 
     private static void RequireReconcileMoveShape(DurableRequest request)
     {
+        if (request.Mode is not null || request.AncestorIdentities is not null) throw new InvalidDataException("Mixed durability request");
         if (request.SourcePath is null || request.SourceIdentity is null || request.SourceParentIdentity is null ||
             request.DestinationPath is null || request.DestinationParentIdentity is null || request.DestinationIdentity is not null ||
             request.DirectoryPath is not null || request.DirectoryIdentity is not null || request.Directories is not null)
@@ -290,6 +388,7 @@ internal static class DurableFilesystem
 
     private static void RequireFlushDirectoriesShape(DurableRequest request)
     {
+        if (request.Mode is not null || request.AncestorIdentities is not null) throw new InvalidDataException("Mixed durability request");
         if (request.SourcePath is not null || request.SourceIdentity is not null ||
             request.SourceParentIdentity is not null ||
             request.DestinationPath is not null || request.DestinationParentIdentity is not null ||
@@ -302,11 +401,67 @@ internal static class DurableFilesystem
 internal sealed class DurabilityFailureException : Exception
 {
     internal string FailureStage { get; }
+    internal string EffectState => FailureStage is "handle-disposition" or "delete-close" or "delete-parent-flush" ? "uncertain" : "none";
 
     internal DurabilityFailureException(string failureStage, Exception innerException)
         : base("Durable filesystem operation failed", innerException)
     {
         FailureStage = failureStage;
+    }
+}
+
+// Shared production response classification, also consumed by the exact-only
+// fixture so protocol tests exercise the worker's real failure connection.
+internal static class DurableFailureProtocol
+{
+    internal static DurableResponse FailureResponse(Exception exception, bool exactDelete) => new()
+    {
+        Ok = false,
+        FailureKind = ClassifyFailure(exception),
+        FailureStage = ClassifyFailureStage(exception),
+        EffectState = exactDelete ? (exception is DurabilityFailureException failure ? failure.EffectState : "none") : null
+    };
+
+    internal static string ClassifyFailure(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is System.ComponentModel.Win32Exception { NativeErrorCode: 32 or 33 }) return "sharing-violation";
+            if (current is System.ComponentModel.Win32Exception { NativeErrorCode: 5 }) return "access-denied";
+        }
+        if (DurabilityExceptionChainContains<UnauthorizedAccessException>(exception)) return "access-denied";
+        if (DurabilityExceptionChainContains<TimeoutException>(exception)) return "timeout";
+        if (DurabilityExceptionChainContains<InvalidDataException>(exception)) return "integrity-failure";
+        if (DurabilityExceptionChainContains<IOException>(exception)) return "io-failure";
+        return "worker-failure";
+    }
+
+    internal static string ClassifyFailureStage(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is DurabilityFailureException staged)
+            {
+                return staged.FailureStage switch
+                {
+                    "root-open" or "source-open" or "destination-parent-open" or "source-parent-open" or
+                    "ancestor-open" or "preflight-revalidation" or "handle-rename" or "completion-flush" or
+                    "handle-disposition" or "delete-close" or "delete-parent-flush" or
+                    "published-identity" or "final-revalidation" or "request" => staged.FailureStage,
+                    _ => "request"
+                };
+            }
+        }
+        return "request";
+    }
+
+    private static bool DurabilityExceptionChainContains<T>(Exception exception) where T : Exception
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is T) return true;
+        }
+        return false;
     }
 }
 
@@ -384,13 +539,13 @@ internal sealed class DurableRootPins : IDisposable
         return relative != ".." && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) && !Path.IsPathRooted(relative);
     });
 
-    internal DurablePinnedObject ContainingRoot(string candidate) => pins
+    internal DurablePinnedObject ContainingRoot(string candidate, bool outermost = false) => pins
         .Where(pin =>
         {
             string relative = Path.GetRelativePath(pin.Path, candidate);
             return relative != ".." && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) && !Path.IsPathRooted(relative);
         })
-        .OrderByDescending(pin => pin.Path.Length)
+        .OrderBy(pin => outermost ? pin.Path.Length : -pin.Path.Length)
         .FirstOrDefault() ?? throw new InvalidDataException("Unowned path");
 
     internal void Revalidate(bool allowMetadataChange = false)
@@ -409,6 +564,33 @@ internal sealed class DurableAncestorPins : IDisposable
 {
     private readonly List<DurablePinnedObject> pins;
     private DurableAncestorPins(List<DurablePinnedObject> values) => pins = values;
+
+    internal static DurableAncestorPins OpenExact(DurableRootPins roots, string directory, DurableRootIdentity[] supplied)
+    {
+        if (supplied.Length > 32) throw new InvalidDataException("Too many ancestors");
+        string root = roots.ContainingRoot(directory, outermost: true).Path;
+        var paths = new List<string>();
+        string current = directory;
+        while (!string.Equals(current, root, StringComparison.OrdinalIgnoreCase))
+        {
+            current = Path.GetDirectoryName(current) ?? throw new InvalidDataException("Invalid lineage");
+            if (!string.Equals(current, root, StringComparison.OrdinalIgnoreCase)) paths.Insert(0, current);
+        }
+        if (paths.Count != supplied.Length) throw new InvalidDataException("Incomplete exact lineage");
+        var pins = new List<DurablePinnedObject>();
+        try
+        {
+            for (int index = 0; index < paths.Count; index++)
+            {
+                var entry = supplied[index];
+                if (entry?.Path is null || entry.Identity is null || !string.Equals(paths[index], entry.Path, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Incorrect exact lineage");
+                pins.Add(DurablePinnedObject.Open(paths[index], DurableExpectedIdentity.Parse(entry.Identity, requireDirectory: true), writeAccess: false, pinRename: true));
+            }
+            return new DurableAncestorPins(pins);
+        }
+        catch { foreach (var pin in pins) pin.Dispose(); throw; }
+    }
 
     internal static DurableAncestorPins Open(DurableRootPins roots, params string[] directoryValues)
     {
@@ -580,6 +762,22 @@ internal sealed class DurablePinnedObject : IDisposable
     }
 
     internal DurableObjectSnapshot CaptureCurrent() => Capture(Handle, Identity.FileType, includeHash: Identity.FileType == "file");
+
+    internal void RequireSingleRegularFile()
+    {
+        if (!NativeMethods.GetFileInformationByHandle(Handle, out NativeMethods.ByHandleFileInformation info))
+            throw new IOException("File identity unavailable", new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+        if (Identity.FileType != "file" || (info.FileAttributes & NativeMethods.FileAttributeDirectory) != 0 || info.NumberOfLinks != 1)
+            throw new InvalidDataException("Exact deletion requires a single-linked regular file");
+        _ = ReparsePointPolicy.CaptureAllowed(Handle);
+    }
+
+    internal void CloseChecked()
+    {
+        nint value = Interlocked.Exchange(ref handle, nint.Zero);
+        if (value == nint.Zero || !NativeMethods.CloseHandle(value))
+            throw new IOException("Deletion close failed", new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+    }
 
     private static DurableObjectSnapshot Capture(nint handle, string fileType, bool includeHash)
     {

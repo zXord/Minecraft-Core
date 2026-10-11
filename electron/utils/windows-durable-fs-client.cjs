@@ -49,6 +49,7 @@ const DURABLE_FAILURE_STAGES = Object.freeze([
   'request'
 ]);
 const WINDOWS_DURABLE_FS_CAPABILITIES = Object.freeze({
+  deleteFileExactFlushesParent: true,
   moveWriteThroughFlushesParents: true,
   reconcileMoveWriteThrough: true
 });
@@ -57,7 +58,7 @@ function failed(cause) {
   return new ModpackError('COMMIT_FAILED', 'Durable filesystem operation failed', { cause });
 }
 
-function durableFailure(failureKind, failureStage) {
+function durableFailure(failureKind, failureStage, effectState) {
   const error = failed();
   Object.defineProperty(error, 'durableFailureKind', {
     value: failureKind,
@@ -71,6 +72,7 @@ function durableFailure(failureKind, failureStage) {
     configurable: false,
     writable: false
   });
+  if (effectState !== undefined) Object.defineProperty(error, 'durableEffectState', { value: effectState, enumerable: true });
   return error;
 }
 
@@ -101,7 +103,7 @@ function isWithin(root, candidate) {
   return !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
 }
 
-function decodeResponse(stdout) {
+function decodeResponse(stdout, exactDelete = false) {
   if (!Buffer.isBuffer(stdout) || stdout.length < 6 || stdout.length > MAX_RESPONSE_BYTES) throw failed();
   const length = stdout.readUInt32LE(0);
   if (length !== stdout.length - 4) throw failed();
@@ -109,6 +111,18 @@ function decodeResponse(stdout) {
   try { value = parseStrictJson(stdout.subarray(4)); } catch (error) { throw failed(error); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw failed();
   const keys = Object.keys(value);
+  if (exactDelete) {
+    if (keys.length === 2 && value.ok === true && value.deletion === 'durable') return;
+    const postEffect = ['handle-disposition', 'delete-close', 'delete-parent-flush'];
+    const preEffect = ['root-open', 'source-open', 'source-parent-open', 'ancestor-open', 'preflight-revalidation', 'request'];
+    if (keys.length === 4 && ['ok', 'failureKind', 'failureStage', 'effectState'].every(key => Object.hasOwn(value, key)) &&
+        value.ok === false && DURABLE_FAILURE_KINDS.includes(value.failureKind) &&
+        ((postEffect.includes(value.failureStage) && value.effectState === 'uncertain') ||
+         (preEffect.includes(value.failureStage) && value.effectState === 'none'))) {
+      throw durableFailure(value.failureKind, value.failureStage, value.effectState);
+    }
+    throw failed();
+  }
   if (keys.length === 1 && keys[0] === 'ok' && value.ok === true) return;
   if (keys.length === 3 && Object.hasOwn(value, 'ok') && Object.hasOwn(value, 'failureKind') &&
       Object.hasOwn(value, 'failureStage') && value.ok === false && DURABLE_FAILURE_KINDS.includes(value.failureKind) &&
@@ -230,9 +244,9 @@ function publishedExpectationFromIdentity(identity) {
   });
 }
 
-function strictArrayValues(value, maximum) {
+function strictArrayValues(value, maximum, minimum = 1) {
   if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype ||
-      Object.getOwnPropertySymbols(value).length !== 0 || value.length < 1 || value.length > maximum) throw failed();
+      Object.getOwnPropertySymbols(value).length !== 0 || value.length < minimum || value.length > maximum) throw failed();
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const names = Object.keys(descriptors);
   if (names.length !== value.length + 1 || !Object.hasOwn(descriptors, 'length')) throw failed();
@@ -249,6 +263,54 @@ function boundedPositiveInteger(value, fallback, maximum) {
   const result = value === undefined ? fallback : value;
   if (!Number.isSafeInteger(result) || result < 1 || result > maximum) throw failed();
   return result;
+}
+
+// Receipt identities are mandatory: never manufacture deletion authority from
+// the current occupant. Exported only for the durable-fs facade's same guard.
+function prepareExactDeleteRequest(filePath, options, allowedRoots) {
+  if (!exactOptionKeys(options, ['expectedFileIdentity', 'expectedParentIdentity', 'expectedAllowedRootIdentities', 'expectedAncestorIdentities', 'mode']) ||
+      !['delete', 'reconcile-absent'].includes(options.mode) || !safeAbsolute(filePath)) throw failed();
+  const sourcePath = path.resolve(filePath);
+  const roots = strictArrayValues(allowedRoots, MAX_ALLOWED_ROOTS);
+  const containing = roots.filter(root => isWithin(root, sourcePath)).sort((a, b) => a.length - b.length)[0];
+  if (!containing || roots.some(root => root.toLocaleLowerCase('en-US') === sourcePath.toLocaleLowerCase('en-US')) || containsReparsePoint(path.dirname(sourcePath))) throw failed();
+  const normalize = (value, fileType) => {
+    const fields = ['fileType', 'dev', 'ino', 'size', 'birthtime', 'mtime', 'ctime', ...(fileType === 'file' ? ['sha256'] : [])];
+    if (!exactOptionKeys(value, fields) || value.fileType !== fileType) throw failed();
+    for (const key of ['dev', 'ino', 'size']) if (typeof value[key] !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value[key]) || BigInt(value[key]) > 18446744073709551615n) throw failed();
+    if (value.ino === '0') throw failed();
+    for (const key of ['birthtime', 'mtime', 'ctime']) if (typeof value[key] !== 'string' || !/^-?(0|[1-9][0-9]*)$/.test(value[key]) || BigInt(value[key]) < -9223372036854775808n || BigInt(value[key]) > 9223372036854775807n) throw failed();
+    if (fileType === 'file' && (typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256))) throw failed();
+    return { ...value };
+  };
+  const sourceIdentity = normalize(options.expectedFileIdentity, 'file');
+  const sourceParentIdentity = normalize(options.expectedParentIdentity, 'directory');
+  const checkDirectory = (candidate, expected) => {
+    if (!safeAbsolute(candidate) || containsReparsePoint(candidate) || !sameIdentity(expected, captureIdentity(candidate, 'directory'))) throw failed();
+  };
+  checkDirectory(path.dirname(sourcePath), sourceParentIdentity);
+  const entries = (values, names, maximum) => {
+    const supplied = strictArrayValues(values, maximum, 0);
+    if (supplied.length !== names.length) throw failed();
+    return supplied.map((entry, index) => {
+      if (!exactOptionKeys(entry, ['path', 'identity']) || !safeAbsolute(entry.path) || path.resolve(entry.path).toLocaleLowerCase('en-US') !== names[index].toLocaleLowerCase('en-US')) throw failed();
+      const identity = normalize(entry.identity, 'directory'); checkDirectory(names[index], identity);
+      return { path: names[index], identity };
+    });
+  };
+  const allowedRootIdentities = entries(options.expectedAllowedRootIdentities, roots, MAX_ALLOWED_ROOTS);
+  const ancestors = []; let current = path.dirname(sourcePath);
+  while (current.toLocaleLowerCase('en-US') !== containing.toLocaleLowerCase('en-US')) {
+    current = path.dirname(current);
+    if (current.toLocaleLowerCase('en-US') !== containing.toLocaleLowerCase('en-US')) ancestors.unshift(current);
+  }
+  const ancestorIdentities = entries(options.expectedAncestorIdentities, ancestors, 32);
+  if (options.mode === 'reconcile-absent') assertAbsent(sourcePath);
+  else {
+    if (containsReparsePoint(sourcePath) || fs.lstatSync(sourcePath, { bigint: true }).nlink !== 1n || !sameIdentity(sourceIdentity, captureIdentity(sourcePath, 'file'))) throw failed();
+  }
+  return { operation: 'delete-file-exact', sourcePath, sourceIdentity, sourceParentIdentity,
+    allowedRoots: [...roots], allowedRootIdentities, ancestorIdentities, mode: options.mode };
 }
 
 class WindowsDurableFsClient {
@@ -312,6 +374,14 @@ class WindowsDurableFsClient {
       configurable: false,
       writable: false
     });
+  }
+
+  async deleteFileExactAsync(filePath, options) {
+    let request;
+    try { this.#revalidateRoots(); request = prepareExactDeleteRequest(filePath, options, this.allowedRoots); }
+    catch (error) { throw durableFailure('integrity-failure', 'preflight-revalidation', 'none'); }
+    await this.#invokeAsync(request, { requireConfirmedClose: true });
+    return Object.freeze({ deleted: true, durable: true });
   }
 
   moveWriteThrough(sourcePath, destinationPath, expectations) {
@@ -623,14 +693,16 @@ class WindowsDurableFsClient {
   }
 
   async #invokeAsync(request, { requireConfirmedClose = false } = {}) {
+    const exactDelete = request.operation === 'delete-file-exact';
     if (typeof requireConfirmedClose !== 'boolean') throw failed();
     const mustConfirmClose = this.requireConfirmedClose || requireConfirmedClose;
     let framedRequest;
-    try { framedRequest = encodeFrame(request); } catch (error) { throw failed(error); }
+    try { framedRequest = encodeFrame(request); }
+    catch (error) { throw exactDelete ? durableFailure('integrity-failure', 'request', 'none') : failed(error); }
     try {
       await this.verifyWorkerAsync({ workerPath: this.workerPath, workerManifestPath: this.workerManifestPath });
     } catch (error) {
-      throw failed(error);
+      throw exactDelete ? durableFailure('worker-failure', 'request', 'none') : failed(error);
     }
 
     return new Promise((resolve, reject) => {
@@ -645,9 +717,10 @@ class WindowsDurableFsClient {
       let stderrBytes = 0;
       const stdout = [];
 
-      const publicError = error => error instanceof ModpackError && error.code === 'COMMIT_FAILED'
-        ? error
-        : failed(error);
+      const publicError = error => {
+        if (exactDelete && error?.durableEffectState === undefined) return durableFailure('worker-failure', 'request', requestMayHaveBeenSent ? 'uncertain' : 'none');
+        return error instanceof ModpackError && error.code === 'COMMIT_FAILED' ? error : failed(error);
+      };
       const settle = error => {
         if (settled) return;
         settled = true;
@@ -679,7 +752,7 @@ class WindowsDurableFsClient {
         if (terminalError) { settle(terminalError); return; }
         if (code !== 0 || signal !== null || stderrBytes !== 0) { settle(failed()); return; }
         try {
-          decodeResponse(Buffer.concat(stdout, stdoutBytes));
+          decodeResponse(Buffer.concat(stdout, stdoutBytes), exactDelete);
           settle(null);
         } catch (error) {
           settle(error);
@@ -738,4 +811,4 @@ class WindowsDurableFsClient {
   }
 }
 
-module.exports = { MAX_FLUSH_DIRECTORIES, WindowsDurableFsClient };
+module.exports = { MAX_FLUSH_DIRECTORIES, WindowsDurableFsClient, prepareExactDeleteRequest };

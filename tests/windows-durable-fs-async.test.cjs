@@ -94,6 +94,106 @@ function completeFlushChild(child, response = { ok: true }) {
   child.emit('close', 0, null);
 }
 
+function exactDeleteOptions(root, leaf) {
+  return { expectedFileIdentity: { fileType: 'file', ...identityExpectation(leaf, 'file') },
+    expectedParentIdentity: { fileType: 'directory', ...identityExpectation(path.dirname(leaf), 'directory') },
+    expectedAllowedRootIdentities: [{ path: root, identity: { fileType: 'directory', ...identityExpectation(root, 'directory') } }],
+    expectedAncestorIdentities: [], mode: 'delete' };
+}
+
+test('exact delete requires original identities and strict capability', async t => {
+  const root = rootFixture(t, `exact-delete-${crypto.randomUUID()}-`);
+  const leaf = path.join(root, 'authorized'); fs.writeFileSync(leaf, 'original');
+  const boundary = flushFrameBoundary(); const client = fixtureWorkerClient(root, { spawn: boundary.spawn });
+  const options = exactDeleteOptions(root, leaf);
+  assert.equal(client.capabilities.deleteFileExactFlushesParent, true);
+  for (const key of Object.keys(options)) {
+    const invalid = { ...options }; delete invalid[key];
+    await assert.rejects(client.deleteFileExactAsync(leaf, invalid), { code: 'COMMIT_FAILED' });
+  }
+  const noHash = structuredClone(options); delete noHash.expectedFileIdentity.sha256;
+  await assert.rejects(client.deleteFileExactAsync(leaf, noHash), { code: 'COMMIT_FAILED' });
+  assert.equal(boundary.requests.length, 0); assert.equal(fs.readFileSync(leaf, 'utf8'), 'original');
+});
+
+test('delete response waits for confirmed worker close', async t => {
+  for (const timeout of [false, true]) {
+    const root = rootFixture(t, `exact-delete-${crypto.randomUUID()}-`);
+    const leaf = path.join(root, 'authorized'); fs.writeFileSync(leaf, 'original');
+    const boundary = flushFrameBoundary((_request, child) => {
+      if (!timeout) child.stdout.write(encodeFrame({ ok: true, deletion: 'durable' }));
+    });
+    const client = fixtureWorkerClient(root, { spawn: boundary.spawn, timeoutMs: timeout ? 10 : 1000, terminationGraceMs: 10 });
+    let mutationStarted = false;
+    const pending = client.deleteFileExactAsync(leaf, exactDeleteOptions(root, leaf))
+      .catch(error => error).finally(() => { mutationStarted = true; });
+    await boundary.waitForRequests(1); await new Promise(resolve => setTimeout(resolve, 45));
+    assert.equal(mutationStarted, false);
+    boundary.children[0].emit('close', timeout ? null : 0, timeout ? 'SIGKILL' : null);
+    const result = await pending;
+    if (timeout) assert.equal(result.durableEffectState, 'uncertain');
+    else assert.deepEqual(result, { deleted: true, durable: true });
+    assert.deepEqual(Object.keys(boundary.requests[0]).sort(), ['operation', 'sourcePath', 'sourceIdentity', 'sourceParentIdentity', 'allowedRoots', 'allowedRootIdentities', 'ancestorIdentities', 'mode'].sort());
+  }
+});
+
+test('post-effect delete failures never retry', async t => {
+  const root = rootFixture(t, `exact-delete-${crypto.randomUUID()}-`);
+  const leaf = path.join(root, 'authorized'); fs.writeFileSync(leaf, 'original');
+  for (const stage of ['handle-disposition', 'delete-close', 'delete-parent-flush']) {
+    const boundary = flushFrameBoundary((_request, child) => completeFlushChild(child,
+      { ok: false, failureKind: 'sharing-violation', failureStage: stage, effectState: 'uncertain' }));
+    await assert.rejects(fixtureWorkerClient(root, { spawn: boundary.spawn }).deleteFileExactAsync(leaf, exactDeleteOptions(root, leaf)),
+      { durableFailureStage: stage, durableEffectState: 'uncertain' });
+    assert.equal(boundary.requests.length, 1);
+  }
+  for (const response of [{ ok: true }, { ok: true, deletion: 'durable', extra: true },
+    { ok: false, failureKind: 'io-failure', failureStage: 'delete-close' },
+    { ok: false, failureKind: 'io-failure', failureStage: 'delete-close', effectState: 'none' }]) {
+    const boundary = flushFrameBoundary((_request, child) => completeFlushChild(child, response));
+    await assert.rejects(fixtureWorkerClient(root, { spawn: boundary.spawn }).deleteFileExactAsync(leaf, exactDeleteOptions(root, leaf)), { code: 'COMMIT_FAILED' });
+  }
+  const boundary = flushFrameBoundary();
+  await assert.rejects(fixtureWorkerClient(root, { spawn: boundary.spawn }).deleteFileExactAsync(leaf,
+    { ...exactDeleteOptions(root, leaf), mode: 'reconcile-absent' }), { code: 'COMMIT_FAILED' });
+  assert.equal(boundary.requests.length, 0); assert.equal(fs.readFileSync(leaf, 'utf8'), 'original');
+});
+
+test('exact delete authenticates every ancestor across nested configured roots and snapshots authority', async t => {
+  const root = rootFixture(t, `exact-delete-${crypto.randomUUID()}-`);
+  const first = path.join(root, 'first'); const nested = path.join(first, 'nested'); const parent = path.join(nested, 'parent');
+  fs.mkdirSync(parent, { recursive: true }); const leaf = path.join(parent, 'leaf'); fs.writeFileSync(leaf, 'original');
+  const boundary = flushFrameBoundary((_request, child) => completeFlushChild(child, { ok: true, deletion: 'durable' }));
+  const options = exactDeleteOptions(root, leaf);
+  const entry = candidate => ({ path: candidate, identity: { fileType: 'directory', ...identityExpectation(candidate, 'directory') } });
+  options.expectedAllowedRootIdentities.push(entry(nested));
+  options.expectedAncestorIdentities = [entry(first), entry(nested)];
+  const client = fixtureWorkerClient(root, { allowedRoots: [root, nested], spawn: boundary.spawn });
+  for (const ancestors of [[], [entry(first)], [entry(nested)], [entry(nested), entry(first)], [...options.expectedAncestorIdentities, entry(first)]]) {
+    await assert.rejects(client.deleteFileExactAsync(leaf, { ...options, expectedAncestorIdentities: ancestors }), { code: 'COMMIT_FAILED' });
+  }
+  assert.equal(boundary.requests.length, 0);
+  assert.deepEqual(await client.deleteFileExactAsync(leaf, options), { deleted: true, durable: true });
+  assert.deepEqual(boundary.requests[0].ancestorIdentities, options.expectedAncestorIdentities);
+  let resume;
+  const pendingVerification = new Promise(resolve => { resume = resolve; });
+  const delayed = fixtureWorkerClient(root, { allowedRoots: [root, nested], spawn: boundary.spawn, verifyWorkerAsync: () => pendingVerification });
+  const pending = delayed.deleteFileExactAsync(leaf, options);
+  options.expectedFileIdentity.sha256 = '0'.repeat(64); options.expectedAncestorIdentities[0].identity.ino = '1';
+  resume(); await pending;
+  assert.notEqual(boundary.requests[1].sourceIdentity.sha256, options.expectedFileIdentity.sha256);
+  assert.notEqual(boundary.requests[1].ancestorIdentities[0].identity.ino, options.expectedAncestorIdentities[0].identity.ino);
+});
+
+test('exact delete verification failure proves no effect before dispatch', async t => {
+  const root = rootFixture(t, `exact-delete-${crypto.randomUUID()}-`);
+  const leaf = path.join(root, 'leaf'); fs.writeFileSync(leaf, 'original');
+  const boundary = flushFrameBoundary();
+  const client = fixtureWorkerClient(root, { spawn: boundary.spawn, verifyWorkerAsync: async () => { throw Error('verification refused'); } });
+  await assert.rejects(client.deleteFileExactAsync(leaf, exactDeleteOptions(root, leaf)), { code: 'COMMIT_FAILED', durableEffectState: 'none' });
+  assert.equal(boundary.requests.length, 0); assert.equal(fs.readFileSync(leaf, 'utf8'), 'original');
+});
+
 function longFlushFixture(t) {
   const root = rootFixture(t, 'minecraft-core-flush-frames-');
   let parent = root;

@@ -52,15 +52,17 @@ internal static partial class Program
     private static async Task<int> RunDurabilityAsync(bool observeRetries = false)
     {
         Stream output = Console.OpenStandardOutput();
+        bool exactDelete = false;
         try
         {
             DurableRequest request = await FrameReader.ReadExactlyOneAsync(Console.OpenStandardInput(), WorkerJsonContext.Default.DurableRequest, CancellationToken.None).ConfigureAwait(false);
+            exactDelete = request.Operation == "delete-file-exact";
             // Every attempt reopens and revalidates the identities from this one
             // authenticated request. No changed filesystem object is adopted.
             await DurabilityRetryExecutor.ExecuteAsync(
                 () => DurableFilesystem.Execute(request),
-                ClassifyDurabilityFailure,
-                ClassifyDurabilityFailureStage,
+                DurableFailureProtocol.ClassifyFailure,
+                DurableFailureProtocol.ClassifyFailureStage,
                 delayMilliseconds => Task.Delay(delayMilliseconds, CancellationToken.None),
                 observeRetries
                     ? (attempt, delayMilliseconds) =>
@@ -69,19 +71,15 @@ internal static partial class Program
                         Console.Error.Flush();
                     }
                     : null).ConfigureAwait(false);
-            await FrameWriter.WriteAsync(output, new DurableResponse { Ok = true }, WorkerJsonContext.Default.DurableResponse).ConfigureAwait(false);
+            await FrameWriter.WriteAsync(output, new DurableResponse { Ok = true, Deletion = exactDelete ? "durable" : null }, WorkerJsonContext.Default.DurableResponse).ConfigureAwait(false);
             return 0;
         }
         catch (Exception exception)
         {
             try
             {
-                await FrameWriter.WriteAsync(output, new DurableResponse
-                {
-                    Ok = false,
-                    FailureKind = ClassifyDurabilityFailure(exception),
-                    FailureStage = ClassifyDurabilityFailureStage(exception)
-                }, WorkerJsonContext.Default.DurableResponse).ConfigureAwait(false);
+                await FrameWriter.WriteAsync(output, DurableFailureProtocol.FailureResponse(exception, exactDelete),
+                    WorkerJsonContext.Default.DurableResponse).ConfigureAwait(false);
                 return 0;
             }
             catch
@@ -91,46 +89,6 @@ internal static partial class Program
         }
     }
 
-    private static string ClassifyDurabilityFailure(Exception exception)
-    {
-        for (Exception? current = exception; current is not null; current = current.InnerException)
-        {
-            if (current is Win32Exception { NativeErrorCode: 32 or 33 }) return "sharing-violation";
-            if (current is Win32Exception { NativeErrorCode: 5 }) return "access-denied";
-        }
-        if (DurabilityExceptionChainContains<UnauthorizedAccessException>(exception)) return "access-denied";
-        if (DurabilityExceptionChainContains<TimeoutException>(exception)) return "timeout";
-        if (DurabilityExceptionChainContains<InvalidDataException>(exception)) return "integrity-failure";
-        if (DurabilityExceptionChainContains<IOException>(exception)) return "io-failure";
-        return "worker-failure";
-    }
-
-    private static string ClassifyDurabilityFailureStage(Exception exception)
-    {
-        for (Exception? current = exception; current is not null; current = current.InnerException)
-        {
-            if (current is DurabilityFailureException staged)
-            {
-                return staged.FailureStage switch
-                {
-                    "root-open" or "source-open" or "destination-parent-open" or "source-parent-open" or
-                    "ancestor-open" or "preflight-revalidation" or "handle-rename" or "completion-flush" or
-                    "published-identity" or "final-revalidation" or "request" => staged.FailureStage,
-                    _ => "request"
-                };
-            }
-        }
-        return "request";
-    }
-
-    private static bool DurabilityExceptionChainContains<T>(Exception exception) where T : Exception
-    {
-        for (Exception? current = exception; current is not null; current = current.InnerException)
-        {
-            if (current is T) return true;
-        }
-        return false;
-    }
 
     private static async Task<int> RunFramedWorkerAsync()
     {

@@ -7,6 +7,12 @@ using MinecraftCore.ArchiveWorker.Durability;
 using MinecraftCore.ArchiveWorker.Sandbox;
 using MinecraftCore.ArchiveWorker.Security;
 
+if (args.SequenceEqual(new[] { "--exact-delete-only" }))
+{
+    ExactDeleteTests.Run();
+    return;
+}
+
 static void Require(bool condition)
 {
     if (!condition) throw new InvalidOperationException("ACL recovery policy assertion failed");

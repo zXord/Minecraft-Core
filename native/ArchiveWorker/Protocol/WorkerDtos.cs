@@ -87,18 +87,35 @@ internal sealed class WorkerMetrics
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 internal sealed class DurableRequest
 {
-    public string? Operation { get; init; }
-    public string? SourcePath { get; init; }
-    public string? DestinationPath { get; init; }
-    public string? DirectoryPath { get; init; }
-    public DurableDirectoryRequest[]? Directories { get; init; }
-    public string[]? AllowedRoots { get; init; }
-    public DurableObjectIdentity? SourceIdentity { get; init; }
-    public DurableObjectIdentity? SourceParentIdentity { get; init; }
-    public DurableObjectIdentity? DestinationParentIdentity { get; init; }
-    public DurableObjectIdentity? DestinationIdentity { get; init; }
-    public DurableObjectIdentity? DirectoryIdentity { get; init; }
-    public DurableRootIdentity[]? AllowedRootIdentities { get; init; }
+    internal HashSet<string> SuppliedFields { get; } = new(StringComparer.Ordinal);
+    private string? operation;
+    public string? Operation { get => operation; init { operation = value; SuppliedFields.Add("operation"); } }
+    private string? sourcePath;
+    public string? SourcePath { get => sourcePath; init { sourcePath = value; SuppliedFields.Add("sourcePath"); } }
+    private string? destinationPath;
+    public string? DestinationPath { get => destinationPath; init { destinationPath = value; SuppliedFields.Add("destinationPath"); } }
+    private string? directoryPath;
+    public string? DirectoryPath { get => directoryPath; init { directoryPath = value; SuppliedFields.Add("directoryPath"); } }
+    private DurableDirectoryRequest[]? directories;
+    public DurableDirectoryRequest[]? Directories { get => directories; init { directories = value; SuppliedFields.Add("directories"); } }
+    private string[]? allowedRoots;
+    public string[]? AllowedRoots { get => allowedRoots; init { allowedRoots = value; SuppliedFields.Add("allowedRoots"); } }
+    private DurableObjectIdentity? sourceIdentity;
+    public DurableObjectIdentity? SourceIdentity { get => sourceIdentity; init { sourceIdentity = value; SuppliedFields.Add("sourceIdentity"); } }
+    private DurableObjectIdentity? sourceParentIdentity;
+    public DurableObjectIdentity? SourceParentIdentity { get => sourceParentIdentity; init { sourceParentIdentity = value; SuppliedFields.Add("sourceParentIdentity"); } }
+    private DurableObjectIdentity? destinationParentIdentity;
+    public DurableObjectIdentity? DestinationParentIdentity { get => destinationParentIdentity; init { destinationParentIdentity = value; SuppliedFields.Add("destinationParentIdentity"); } }
+    private DurableObjectIdentity? destinationIdentity;
+    public DurableObjectIdentity? DestinationIdentity { get => destinationIdentity; init { destinationIdentity = value; SuppliedFields.Add("destinationIdentity"); } }
+    private DurableObjectIdentity? directoryIdentity;
+    public DurableObjectIdentity? DirectoryIdentity { get => directoryIdentity; init { directoryIdentity = value; SuppliedFields.Add("directoryIdentity"); } }
+    private DurableRootIdentity[]? allowedRootIdentities;
+    public DurableRootIdentity[]? AllowedRootIdentities { get => allowedRootIdentities; init { allowedRootIdentities = value; SuppliedFields.Add("allowedRootIdentities"); } }
+    private DurableRootIdentity[]? ancestorIdentities;
+    public DurableRootIdentity[]? AncestorIdentities { get => ancestorIdentities; init { ancestorIdentities = value; SuppliedFields.Add("ancestorIdentities"); } }
+    private string? mode;
+    public string? Mode { get => mode; init { mode = value; SuppliedFields.Add("mode"); } }
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -134,6 +151,8 @@ internal sealed class DurableResponse
     public bool Ok { get; init; }
     public string? FailureKind { get; init; }
     public string? FailureStage { get; init; }
+    public string? Deletion { get; init; }
+    public string? EffectState { get; init; }
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
