@@ -50,6 +50,30 @@ async function createPngBuffers(sourcePath) {
   return buffers;
 }
 
+function compressLargeIconFrames(bitmapIcon, pngBuffers) {
+  // The bundled rcedit writes the low 16 bits of each resource's byte length.
+  // Retain small BMP frames, but use the already-rendered PNG for larger ones.
+  // Windows supports PNG-compressed ICO frames without changing their pixels.
+  const count = bitmapIcon.readUInt16LE(4);
+  const directory = Buffer.from(bitmapIcon.subarray(0, 6 + count * 16));
+  const frames = [];
+  let offset = directory.length;
+  for (let index = 0; index < count; index++) {
+    const entry = 6 + index * 16;
+    const size = bitmapIcon.readUInt32LE(entry + 8);
+    const oldOffset = bitmapIcon.readUInt32LE(entry + 12);
+    const image = size > 65535 ? pngBuffers[index] : bitmapIcon.subarray(oldOffset, oldOffset + size);
+    if (!image || image.length > 65535) {
+      throw new Error('Icon image is too large for the Windows resource editor');
+    }
+    directory.writeUInt32LE(image.length, entry + 8);
+    directory.writeUInt32LE(offset, entry + 12);
+    frames.push(image);
+    offset += image.length;
+  }
+  return Buffer.concat([directory, ...frames]);
+}
+
 async function ensureIcon() {
   const sourcePath = path.resolve('icon.png');
   const targetDir = path.resolve('build-resources');
@@ -68,7 +92,7 @@ async function ensureIcon() {
   try {
     const pngBuffers = await createPngBuffers(sourcePath);
     const pngToIcoFn = await getPngToIco();
-    const icoBuffer = await pngToIcoFn(pngBuffers);
+    const icoBuffer = compressLargeIconFrames(await pngToIcoFn(pngBuffers), pngBuffers);
     await fs.writeFile(targetPath, icoBuffer);
     const fileStats = await fs.stat(targetPath);
     const kib = (fileStats.size / 1024).toFixed(1);
