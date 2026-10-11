@@ -9,6 +9,7 @@ const {
 } = require('../../utils/backup-util.cjs');
 const { MAX_FLUSH_DIRECTORIES, strictJsonClone } = require('../../utils/durable-fs.cjs');
 const { withBackupMutationLock } = require('../backup-mutation-lock.cjs');
+const { normalizeRetirementCandidate, normalizeRetirementReceipt } = require('./failed-restorepoint-retirement-evidence.cjs');
 const { ModpackError } = require('../modpacks/errors.cjs');
 const {
   RESTORE_CREATION_KIND,
@@ -35,6 +36,62 @@ const REFERENCE_KEYS = new Set([
 function backupFailure(cause) {
   if (cause instanceof ModpackError && ['BACKUP_FAILED', 'TARGET_EXISTS', 'CANCELLED'].includes(cause.code)) return cause;
   return new ModpackError('BACKUP_FAILED', 'The lifecycle restore point operation failed', { cause });
+}
+
+function retirementFailure(reason, cause) {
+  return Object.assign(new ModpackError('BACKUP_FAILED', 'The exact restore point is retained', { cause }), { retirementReason: reason });
+}
+
+function retirementIdentity(stat, fileType, sha256) {
+  return { fileType, dev: String(stat.dev), ino: String(stat.ino), size: String(stat.size),
+    birthtime: String(stat.birthtimeNs), mtime: String(stat.mtimeNs), ctime: String(stat.ctimeNs),
+    ...(fileType === 'file' ? { sha256 } : {}) };
+}
+
+function sameRetirementIdentity(a, b) {
+  return ['fileType', 'dev', 'ino', 'birthtime', ...(a.fileType === 'file' ? ['size', 'mtime', 'sha256'] : [])]
+    .every(key => a[key] === b[key]);
+}
+
+// JSON.parse alone silently discards duplicate pin/name keys. Authority requires
+// unique keys at every nesting level before the existing metadata validator runs.
+function parseExactMetadata(bytes) {
+  const source = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  let offset = 0; let nodes = 0;
+  const whitespace = () => { while (/[\t\n\r ]/.test(source[offset] || '\0')) offset++; };
+  const string = () => {
+    const start = offset++;
+    while (offset < source.length) {
+      const next = source[offset++];
+      if (next === '\\') offset++;
+      else if (next === '"') return JSON.parse(source.slice(start, offset));
+    }
+    throw retirementFailure('invalid-evidence');
+  };
+  const value = depth => {
+    if (depth > 32 || ++nodes > 1_000_000) throw retirementFailure('invalid-evidence');
+    whitespace(); const next = source[offset];
+    if (next === '"') { string(); return; }
+    if (next === '{' || next === '[') {
+      offset++; whitespace(); const end = next === '{' ? '}' : ']'; const keys = new Set();
+      if (source[offset] === end) { offset++; return; }
+      while (true) {
+        whitespace();
+        if (next === '{') {
+          if (source[offset] !== '"') throw retirementFailure('invalid-evidence');
+          const key = string(); if (keys.has(key)) throw retirementFailure('invalid-evidence'); keys.add(key);
+          whitespace(); if (source[offset++] !== ':') throw retirementFailure('invalid-evidence');
+        }
+        value(depth + 1); whitespace(); const delimiter = source[offset++];
+        if (delimiter === end) return;
+        if (delimiter !== ',') throw retirementFailure('invalid-evidence');
+      }
+    }
+    const primitive = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(source.slice(offset));
+    if (!primitive) throw retirementFailure('invalid-evidence'); offset += primitive[0].length;
+  };
+  value(0); whitespace(); if (offset !== source.length) throw retirementFailure('invalid-evidence');
+  return normalizeMetadata(JSON.parse(source));
 }
 
 function cancelled() {
@@ -262,18 +319,21 @@ class RestorePointService {
     createVerifiedZipFn = createVerifiedZip,
     extractVerifiedArchiveFn,
     zipStreamVerifier = verifyZipScopeStreaming,
-    faultInjector = () => {}
+    faultInjector = () => {},
+    retirementDurableFsFor = null
   } = {}) {
     if (!fsApi || typeof fsApi !== 'object' || !durableFs ||
         typeof durableFs.readFileBounded !== 'function' || typeof durableFs.writeJsonAtomicAsync !== 'function' ||
         typeof durableFs.renameDurableAsync !== 'function' || typeof durableFs.flushDirectoryAsync !== 'function' ||
         typeof durableFs.sha256File !== 'function' || typeof clock !== 'function' || typeof randomUUID !== 'function' ||
         typeof createVerifiedZipFn !== 'function' || typeof extractVerifiedArchiveFn !== 'function' ||
-        typeof zipStreamVerifier !== 'function' || typeof faultInjector !== 'function') {
+        typeof zipStreamVerifier !== 'function' || typeof faultInjector !== 'function' ||
+        (retirementDurableFsFor !== null && typeof retirementDurableFsFor !== 'function')) {
       throw backupFailure();
     }
     this.fs = fsApi;
     this.durableFs = durableFs;
+    this.retirementDurableFsFor = retirementDurableFsFor;
     this.clock = clock;
     this.randomUUID = randomUUID;
     this.createVerifiedZip = createVerifiedZipFn;
@@ -853,6 +913,138 @@ class RestorePointService {
   async pinRestorePoint(reference) {
     const normalized = this.#normalizeReference(reference);
     return withBackupMutationLock(normalized.serverPath, () => this.#updatePinsLocked(normalized, true));
+  }
+
+  async withExactRetirementPoint(candidateValue, options, work) {
+    assertPlainDataObject(options, new Set(['authority', 'receipt', 'recheckReferences']));
+    if (Object.keys(options).length !== 3) throw retirementFailure('invalid-evidence');
+    const { authority, receipt: receiptValue, recheckReferences } = options;
+    const candidate = normalizeRetirementCandidate(candidateValue);
+    assertPlainDataObject(authority, new Set(['lease', 'operationId', 'selector', 'coordinator']));
+    if (Object.keys(authority).length !== 4 || typeof work !== 'function' || typeof recheckReferences !== 'function' ||
+        typeof authority.coordinator?.assertMutationLease !== 'function') throw retirementFailure('invalid-evidence');
+    const assertLease = () => authority.coordinator.assertMutationLease(authority.lease, authority.selector, authority.operationId);
+    assertLease();
+    const serverPath = this.#assertServer(authority.selector.serverPath);
+    // The allowed root is derived from trusted composition's authenticated target,
+    // never from candidate fields or an alternative path in a receipt.
+    const parentPath = path.dirname(serverPath);
+    if (!this.retirementDurableFsFor) throw retirementFailure('unsupported-native');
+    const native = await this.retirementDurableFsFor(parentPath);
+    if (typeof native?.deleteFileExactAsync !== 'function') throw retirementFailure('unsupported-native');
+    const backupDir = path.join(serverPath, 'backups');
+    const paths = { archive: path.join(backupDir, candidate.name), sidecar: path.join(backupDir, candidate.metadataName) };
+    const receipt = receiptValue === null ? null : normalizeRetirementReceipt(receiptValue);
+    if (receipt && (!sameLocalPath(receipt.target.path, serverPath) || JSON.stringify(receipt.candidate) !== JSON.stringify(candidate))) {
+      throw retirementFailure('invalid-evidence');
+    }
+    return withBackupMutationLock(serverPath, async () => {
+      let active = true;
+      let anchor = receipt;
+      let observedIntent = receipt;
+      const assertActive = () => { if (!active) throw retirementFailure('invalid-evidence'); assertLease(); };
+      const capture = async (filePath, fileType) => {
+        try {
+          const before = this.fs.lstatSync(filePath, { bigint: true });
+          if (before.isSymbolicLink() || (fileType === 'file' ? !before.isFile() || before.nlink !== 1n : !before.isDirectory()) ||
+              !sameLocalPath(this.fs.realpathSync.native(filePath), filePath)) throw retirementFailure('identity-mismatch');
+          if (fileType === 'directory') return retirementIdentity(before, fileType);
+          const handle = await (this.fs.promises || fs.promises).open(filePath, 'r');
+          try {
+            const opened = await handle.stat({ bigint: true });
+            if (!opened.isFile() || opened.nlink !== 1n || !sameIdentity(identityFromStat(before), identityFromStat(opened))) throw retirementFailure('identity-mismatch');
+            const hash = crypto.createHash('sha256'); const buffer = Buffer.alloc(256 * 1024); let position = 0;
+            while (true) { const { bytesRead } = await handle.read(buffer, 0, buffer.length, position); if (!bytesRead) break;
+              hash.update(buffer.subarray(0, bytesRead)); position += bytesRead; }
+            const identity = retirementIdentity(opened, 'file', hash.digest('hex'));
+            const after = await handle.stat({ bigint: true }); const linked = this.fs.lstatSync(filePath, { bigint: true });
+            if (!after.isFile() || after.nlink !== 1n || !linked.isFile() || linked.nlink !== 1n || linked.isSymbolicLink() ||
+                !sameRetirementIdentity(identity, retirementIdentity(after, 'file', identity.sha256)) ||
+                !sameRetirementIdentity(identity, retirementIdentity(linked, 'file', identity.sha256))) throw retirementFailure('identity-mismatch');
+            return identity;
+          } finally { await handle.close(); }
+        } catch (error) { throw error.retirementReason ? error : retirementFailure('identity-mismatch', error); }
+      };
+      const lineage = async () => ({ parent: await capture(parentPath, 'directory'), target: await capture(serverPath, 'directory'), backups: await capture(backupDir, 'directory') });
+      const validate = async expected => {
+        assertActive();
+        for (const alternative of [`${paths.archive}.part`, paths.archive.replace(/\.zip$/, '.pending.json')]) {
+          if (this.#exists(alternative)) throw retirementFailure('invalid-evidence');
+        }
+        const currentLineage = await lineage();
+        if (expected && ['parent', 'target', 'backups'].some(key => !sameRetirementIdentity(currentLineage[key], expected.lineage[key]))) throw retirementFailure('identity-mismatch');
+        const sidecarPresent = this.#exists(paths.sidecar);
+        if (sidecarPresent) {
+          let metadata;
+          try { metadata = parseExactMetadata(this.durableFs.readFileBounded(paths.sidecar, { allowMissing: false, maxBytes: 8 * 1024 * 1024 })); }
+          catch (error) { throw retirementFailure('invalid-evidence', error); }
+          if (metadata.pins.length !== 1 || metadata.pins[0] !== candidate.operationId) throw retirementFailure('independent-owner');
+          const reference = { ...candidate, serverPath }; delete reference.schemaVersion; delete reference.metadataName;
+          try { this.#assertReferenceMatches(reference, metadata); } catch (error) { throw retirementFailure('invalid-evidence', error); }
+        } else if (!expected || !['intent', 'durable'].includes(expected.durability.sidecar)) throw retirementFailure('identity-mismatch');
+        const files = {};
+        for (const key of ['archive', 'sidecar']) {
+          if (this.#exists(paths[key])) {
+            files[key] = await capture(paths[key], 'file');
+            if (expected && !sameRetirementIdentity(files[key], expected.files[key])) throw retirementFailure('identity-mismatch');
+          } else if (!expected || !['intent', 'durable'].includes(expected.durability[key])) throw retirementFailure('identity-mismatch');
+        }
+        if (files.archive && (files.archive.sha256 !== candidate.sha256 || files.archive.size !== String(candidate.size))) throw retirementFailure('identity-mismatch');
+        await recheckReferences(); assertActive();
+        // Reference queries may yield. Re-read protective pin bytes after that
+        // yield and before dispatch, still inside this exact backup lock.
+        if (this.#exists(paths.sidecar)) {
+          const bytes = this.durableFs.readFileBounded(paths.sidecar, { allowMissing: false, maxBytes: 8 * 1024 * 1024 });
+          const metadata = parseExactMetadata(bytes);
+          if (metadata.pins.length !== 1 || metadata.pins[0] !== candidate.operationId) throw retirementFailure('independent-owner');
+          const stat = this.fs.lstatSync(paths.sidecar, { bigint: true });
+          const identity = retirementIdentity(stat, 'file', crypto.createHash('sha256').update(bytes).digest('hex'));
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n ||
+              !sameRetirementIdentity(identity, expected?.files.sidecar || files.sidecar)) throw retirementFailure('identity-mismatch');
+        } else if (!expected || !['intent', 'durable'].includes(expected.durability.sidecar)) throw retirementFailure('identity-mismatch');
+        return { lineage: currentLineage, files, pinOwner: candidate.operationId };
+      };
+      const effect = async (file, supplied, mode) => {
+        assertActive(); const current = normalizeRetirementReceipt(supplied);
+        if (current.jobId !== candidate.operationId || JSON.stringify(current.candidate) !== JSON.stringify(candidate) ||
+            current.durability[file] !== 'intent' || (file === 'sidecar' && current.progress !== 'archive-deleted')) throw retirementFailure('invalid-evidence');
+        if (!anchor || ['parent', 'target', 'backups'].some(key => !sameRetirementIdentity(anchor.lineage[key], current.lineage[key])) ||
+            ['archive', 'sidecar'].some(key => !sameRetirementIdentity(anchor.files[key], current.files[key]))) throw retirementFailure('invalid-evidence');
+        observedIntent = current;
+        await validate(current);
+        if (mode === 'reconcile-absent' && this.#exists(paths[file])) return false;
+        if (mode === 'delete' && !this.#exists(paths[file])) throw retirementFailure('identity-mismatch');
+        assertActive();
+        const outcome = await native.deleteFileExactAsync(paths[file], { expectedFileIdentity: current.files[file], expectedParentIdentity: current.lineage.backups,
+          expectedAllowedRootIdentities: [{ path: parentPath, identity: current.lineage.parent }],
+          expectedAncestorIdentities: [{ path: serverPath, identity: current.lineage.target }], mode });
+        if (!outcome || Object.getPrototypeOf(outcome) !== Object.prototype || Object.keys(outcome).length !== 2 ||
+            outcome.deleted !== true || outcome.durable !== true) throw retirementFailure('io-failure');
+        assertActive(); return true;
+      };
+      try {
+        const captured = await validate(receipt);
+        if (!anchor) anchor = strictJsonClone(captured);
+        const session = Object.freeze({
+          captureAuthorization: async () => {
+            // Also serves as the pre-intent guard for the helper: an absent leaf
+            // is permitted only by an intent already observed in this session
+            // (or loaded on entry), never by a new intent minted after absence.
+            const captured = await validate(observedIntent);
+            if (['parent', 'target', 'backups'].some(key => !sameRetirementIdentity(anchor.lineage[key], captured.lineage[key])) ||
+                ['archive', 'sidecar'].some(key => captured.files[key] && !sameRetirementIdentity(anchor.files[key], captured.files[key]))) throw retirementFailure('identity-mismatch');
+            return { ...captured, files: { ...anchor.files, ...captured.files } };
+          },
+          deleteArchive: current => effect('archive', current, 'delete'),
+          deleteSidecar: current => effect('sidecar', current, 'delete'),
+          reconcileAbsent: (file, current) => {
+            if (!['archive', 'sidecar'].includes(file)) return Promise.reject(retirementFailure('invalid-evidence'));
+            return effect(file, current, 'reconcile-absent');
+          }
+        });
+        return await work(session);
+      } finally { active = false; }
+    });
   }
 
   async unpinRestorePoint(reference) {

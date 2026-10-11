@@ -129,6 +129,38 @@ function topLevelServerItems(serverPath) {
     .map(name => path.join(serverPath, name));
 }
 
+test('exact retirement requires trusted ambient authority and a dedicated parent-scoped native facade', async t => {
+  const e = fixture(t);
+  const reference = await e.service.createVerifiedRestorePoint({ ...request(e.serverPath), sourceRuntime: null });
+  const candidate = { schemaVersion: 1, ...Object.fromEntries(['id', 'name', 'sha256', 'size', 'totalBytes', 'scopeSha256',
+    'sourceRevision', 'sourceRuntime', 'operationId', 'createdAt'].map(key => [key, reference[key]])),
+    metadataName: path.basename(reference.metadataPath) };
+  const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
+  const coordinator = new ServerMutationCoordinator({ readContentRevision: () => 7, bumpContentRevision: () => 8 });
+  coordinator.completeStartupRecovery([]);
+  const selector = { instanceId: 'server-one', serverPath: e.serverPath };
+  await coordinator.runMutation(selector, { operation: 'repair', operationId: reference.operationId, revisionMode: 'none' }, async lease => {
+    await assert.rejects(e.service.withExactRetirementPoint(candidate, {
+      authority: { lease, operationId: reference.operationId, selector, coordinator }, receipt: null,
+      recheckReferences: async () => {}
+    }, () => assert.fail('unsupported native admitted')), error => error.retirementReason === 'unsupported-native');
+  });
+  assert.equal(fs.existsSync(reference.archivePath), true);
+  assert.throws(() => new RestorePointService({ durableFs: e.durableFs,
+    extractVerifiedArchiveFn: testOnlySecureExtractor, retirementDurableFsFor: true }));
+});
+
+test('exact retirement rejects option accessors before invoking them', async t => {
+  const e = fixture(t); let calls = 0;
+  const reference = await e.service.createVerifiedRestorePoint({ ...request(e.serverPath), sourceRuntime: null });
+  const candidate = { schemaVersion: 1, ...Object.fromEntries(['id', 'name', 'sha256', 'size', 'totalBytes', 'scopeSha256',
+    'sourceRevision', 'sourceRuntime', 'operationId', 'createdAt'].map(key => [key, reference[key]])), metadataName: path.basename(reference.metadataPath) };
+  const options = { receipt: null, recheckReferences: async () => {} };
+  Object.defineProperty(options, 'authority', { enumerable: true, get() { calls++; return {}; } });
+  await assert.rejects(e.service.withExactRetirementPoint(candidate, options, () => assert.fail('accessor authority admitted')));
+  assert.equal(calls, 0);
+});
+
 test('creation awaits preparation and publication starts before the corresponding reads and moves', async t => {
   // Catches fire-and-forget boundaries that allow scope reads/publication before the label settles.
   const environment = fixture(t);
@@ -1191,6 +1223,19 @@ test('pin owners are idempotent and retention cannot delete or rename a pinned r
     assert.equal(service.isRestorePointPinned(reference), false);
     assert.equal((await backupService.deleteBackup({ serverPath, name: reference.name })).success, true);
   });
+});
+
+test('ordinary backup cleanup retains a pinned surviving sidecar after its exact archive is gone', async t => {
+  const { serverPath, service } = fixture(t);
+  const reference = await service.createVerifiedRestorePoint(request(serverPath));
+  const bytes = fs.readFileSync(reference.metadataPath);
+  fs.unlinkSync(reference.archivePath); // newly generated synthetic partial pair only
+  await withBackupService(async backupService => {
+    assert.equal((await backupService.deleteBackup({ serverPath, name: reference.name })).success, false);
+    await assert.rejects(backupService.renameBackup({ serverPath, oldName: reference.name, newName: 'other.zip' }));
+  });
+  assert.deepEqual(fs.readFileSync(reference.metadataPath), bytes);
+  assert.equal(service.isRestorePointPinned(reference), true);
 });
 
 test('a concurrent pin commits before delete can decide whether the restore point is removable', async (t) => {
