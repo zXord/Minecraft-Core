@@ -174,6 +174,20 @@ function graphFixture(overrides = {}, createGraph = createModpackServiceGraph) {
   };
 }
 
+test('startup arms captured-window retirement without awaiting navigation readiness; missing adapter skips', async () => {
+  let resolveReady; const ready = new Promise(resolve => { resolveReady = resolve; });
+  const window = { id: 'captured' }; const armed = [];
+  const { graph } = graphFixture({ startup: { async initializeRecovery() {},
+    waitForWindowNavigationReady(value) { assert.equal(value, window); return ready; } },
+    modpackFactory: async () => fakeModpackComposition({ armStartupRetirement(value) { armed.push(value); } }) });
+  await graph.startup.initializeRecovery(graph);
+  await graph.startup.afterWindowCreated(window, graph);
+  assert.deepEqual(armed, [ready]); resolveReady(true);
+  const absent = graphFixture({ startup: { async initializeRecovery() {} },
+    modpackFactory: async () => fakeModpackComposition({ armStartupRetirement() { assert.fail('no readiness adapter'); } }) }).graph;
+  await absent.startup.initializeRecovery(absent); await absent.startup.afterWindowCreated(window, absent);
+});
+
 test('startup inspects an imported server config without publishing defaults or reserving a mutation', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-startup-config-readonly-'));
   const serverPath = path.join(root, 'imported-server');
@@ -1017,6 +1031,7 @@ test('default production recovery services compose for a fresh isolated profile'
   assert.equal(typeof services.registry.clearRestoreCreationAfterCleanup, 'function');
   assert.equal(typeof services.restorePointService.cleanupInterruptedRestorePointCreation, 'function');
   assert.equal(typeof services.restorePointService.listAvailableRestorePoints, 'function');
+  assert.equal(typeof services.restorePointService.withExactRetirementPoint, 'function');
 });
 
 test('service graph rejects a relative userData path before constructing services', () => {

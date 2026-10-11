@@ -386,6 +386,7 @@ function createRestoreInfrastructure({ clock, durableFor, fsSync, randomUUID, re
         durableFs,
         clock,
         randomUUID,
+        retirementDurableFsFor: parentPath => durableFor([parentPath]),
         extractVerifiedArchiveFn: createVerifiedRestoreExtractor({
           fsApi: fsSync,
           durableFs,
@@ -396,6 +397,9 @@ function createRestoreInfrastructure({ clock, durableFor, fsSync, randomUUID, re
     return serviceByRoot.get(key);
   }
   const facade = Object.freeze({
+    withExactRetirementPoint(candidate, options, work) {
+      return serviceFor(options.authority.selector.serverPath).withExactRetirementPoint(candidate, options, work);
+    },
     cleanupInterruptedRestorePointCreation(request) {
       return serviceFor(request.serverPath).cleanupInterruptedRestorePointCreation(request);
     },
@@ -874,6 +878,13 @@ function createModpackServiceGraph(deps = {}) {
     if (typeof startupInput.afterWindowCreated === 'function') await startupInput.afterWindowCreated(window, graph);
     modpackServices?.nativeNotificationBridge?.start?.();
     if (automaticReleaseChecksEnabled) await modpackServices?.releaseMonitor?.start?.();
+    if (typeof startupInput.waitForWindowNavigationReady === 'function' &&
+        typeof modpackServices?.armStartupRetirement === 'function') {
+      let ready;
+      try { ready = startupInput.waitForWindowNavigationReady(window); }
+      catch { ready = Promise.resolve(false); }
+      modpackServices.armStartupRetirement(Promise.resolve(ready));
+    }
   };
   const dispose = async graph => {
     modpackServices?.releaseMonitor?.stop?.();

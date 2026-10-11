@@ -45,6 +45,16 @@ test.afterEach(() => {
   delete global.window;
 });
 
+test('unread unresolved retention warnings appear globally without inventing an action', () => {
+  const derive = notificationModule.deriveModpackNotificationPresentation;
+  const pending = { notificationId: 'retirement-1', type: 'retention-warning', serverId: 'server-b', read: false,
+    title: 'Backup cleanup pending', message: 'Retained.', action: null };
+  assert.equal(derive({ items: [pending] }).showGlobalBell, true);
+  assert.equal(derive({ items: [pending], excludeServerId: 'server-b' }).showGlobalBell, false);
+  assert.equal(derive({ items: [{ ...pending, read: true }] }).showGlobalBell, false);
+  assert.equal(derive({ items: [{ ...pending, title: 'Backup cleanup complete' }] }).showGlobalBell, false);
+});
+
 test('global notification affordance appears only for unread actionable notifications', () => {
   assert.equal(typeof notificationModule.deriveModpackNotificationPresentation, 'function');
 

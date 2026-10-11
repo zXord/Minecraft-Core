@@ -68,6 +68,7 @@ markStartupTrace('main:import:dev-config:complete');
 markStartupTrace('main:imports:complete');
 const startupStartedAt = Date.now();
 const mainWindowReadyTrackers = new WeakMap();
+const mainWindowNavigationPromises = new WeakMap();
 
 // Initialize logger service early
 let logger = null;
@@ -1227,21 +1228,22 @@ function createWindow() {
   
   const distPath = path.join(__dirname, '..', 'dist', 'index.html');
   markStartupTiming('main-window:navigation:start', { isDevelopment: isDev });
-  void loadRendererContent({
+  const rendererWindow = win;
+  const navigation = loadRendererContent({
     isDevelopment: isDev,
-    window: win,
+    window: rendererWindow,
     distPath,
     ...(!app.isPackaged && process.env.MINECRAFT_CORE_DEV_SERVER_URL
       ? { devServerUrl: process.env.MINECRAFT_CORE_DEV_SERVER_URL }
       : {}),
-    onRendererReady: () => initializeLastServer(win)
+    onRendererReady: () => initializeLastServer(rendererWindow)
   }).then(outcome => {
     markStartupTiming('main-window:navigation:complete', { status: outcome.status, mode: outcome.mode });
-    if (!logger) return;
-    logger.info('Renderer load completed', {
+    if (logger) logger.info('Renderer load completed', {
       category: 'core',
       data: outcome
     });
+    return outcome;
   }).catch(error => {
     markStartupTiming('main-window:navigation:failed', { errorType: describeStartupError(error).errorType });
     const details = describeStartupError(error);
@@ -1254,7 +1256,9 @@ function createWindow() {
         }
       });
     }
+    return { status: 'failed' };
   });
+  mainWindowNavigationPromises.set(rendererWindow, navigation);
   
   // Save window size when resized (only if window is resizable)
   win.on('resize', () => {
@@ -1300,6 +1304,30 @@ function waitForMainWindowReady(mainWindow) {
   } catch (error) {
     return Promise.reject(error);
   }
+}
+
+function waitForWindowNavigationReady(mainWindow) {
+  const tracker = mainWindowReadyTrackers.get(mainWindow);
+  const navigation = mainWindowNavigationPromises.get(mainWindow);
+  if (!tracker || !navigation || mainWindow.isDestroyed?.()) return Promise.resolve(false);
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      mainWindow.removeListener?.('closed', closed);
+      resolve(value);
+    };
+    const closed = () => finish(false);
+    mainWindow.once('closed', closed);
+    Promise.resolve(navigation).then(outcome => {
+      if (outcome?.status !== 'loaded') finish(false);
+    }).catch(() => finish(false));
+    Promise.all([tracker.wait(), navigation]).then(([, outcome]) => {
+      finish(outcome?.status === 'loaded' && !mainWindow.isDestroyed?.());
+    }).catch(() => finish(false));
+    if (mainWindow.isDestroyed?.()) finish(false);
+  });
 }
 
 function closeEarlyStartupWindow(startupWindow) {
@@ -1481,6 +1509,7 @@ serviceGraph = createModpackServiceGraph({
   watchdog: watchdogController,
   managementServer: managementServerController,
   startup: {
+    waitForWindowNavigationReady,
     automaticReleaseChecksEnabled: runtimeFlags.automaticReleaseChecksEnabled,
     installSecurity: installApplicationHandlers,
     cleanupRuntime: cleanupRuntimeFiles,

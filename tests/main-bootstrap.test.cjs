@@ -8,6 +8,27 @@ const { EventEmitter } = require('node:events');
 const { createMainBootstrap } = require('../electron/bootstrap/create-main-bootstrap.cjs');
 const { PACKAGED_SMOKE_ARGUMENT, createRuntimeFlags } = require('../electron/bootstrap/runtime-flags.cjs');
 
+test('main retirement readiness requires captured ready-to-show plus loaded navigation and returns false on close/diagnostic', async () => {
+  const fs = require('node:fs'); const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(__dirname, '../electron/main.cjs'), 'utf8');
+  const match = source.match(/function waitForWindowNavigationReady\(mainWindow\) \{[\s\S]*?\n\}\r?\n/);
+  assert.ok(match, 'main must expose navigation readiness');
+  const trackers = new WeakMap(); const navigation = new WeakMap();
+  const wait = vm.runInNewContext(`(${match[0]})`, { mainWindowReadyTrackers: trackers, mainWindowNavigationPromises: navigation });
+  const make = () => { const window = new EventEmitter(); window.isDestroyed = () => false;
+    let ready, load; trackers.set(window, { wait: () => new Promise(r => { ready = r; }) });
+    navigation.set(window, new Promise(r => { load = r; })); return { window, ready: () => ready(), load }; };
+  const a = make(); let settled = false; const result = wait(a.window).then(v => { settled = true; return v; });
+  a.ready(); await Promise.resolve(); assert.equal(settled, false); a.load({ status: 'loaded' }); assert.equal(await result, true);
+  const b = make(); let diagnosticSettled = false;
+  const diagnostic = wait(b.window).then(value => { diagnosticSettled = true; return value; });
+  b.load({ status: 'diagnostic' }); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(diagnosticSettled, true, 'diagnostic navigation cannot wait forever for ready-to-show');
+  assert.equal(await diagnostic, false);
+  const c = make(); const closing = wait(c.window); c.window.emit('closed'); assert.equal(await closing, false);
+  assert.equal(await wait(new EventEmitter()), false);
+});
+
 function recorder(order, name, result) {
   return async (...args) => {
     order.push(name);
@@ -61,6 +82,14 @@ function bootstrapFixture({ testMode, packagedSmokeMode = false }) {
   const bootstrap = createMainBootstrap({ electronApi: { app }, serviceGraph, runtimeFlags });
   return { appCalls, bootstrap, order, runtimeFlags, serviceGraph, userDataPath, window };
 }
+
+test('bootstrap onReady finishes while owned post-window retirement remains held', async () => {
+  const fixture = bootstrapFixture({ testMode: true });
+  let release; const held = new Promise(resolve => { release = resolve; }); let finished = false;
+  held.then(() => { finished = true; });
+  fixture.serviceGraph.startup.afterWindowCreated = async () => { void held; };
+  await fixture.bootstrap.onReady(); assert.equal(finished, false); release(); await held;
+});
 
 test('test mode is honored only under NODE_ENV=test and carries an isolated userData path', () => {
   const isolated = path.join(os.tmpdir(), 'minecraft-core-runtime-flags');

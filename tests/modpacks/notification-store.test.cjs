@@ -138,3 +138,92 @@ test('new durable notifications emit one frozen main-owned event and dedupe emit
   assert.deepEqual(events[0], created);
   assert.equal(Object.isFrozen(events[0]), true);
 });
+
+test('retirement notices preserve dismissal until material state or reason changes across restart', async t => {
+  const { NotificationStore } = require('../../electron/services/modpacks/notifications/notification-store.cjs');
+  const { dependencies, userDataPath } = fixture(t);
+  const events = [];
+  dependencies.eventSink = event => events.push(event);
+  let store = new NotificationStore(dependencies);
+  await store.initialize();
+  const request = { jobId: 'failed-job-1', serverId: 'server-1', state: 'retained', reason: 'target-busy' };
+  assert.equal(typeof store.upsertRetirementNotice, 'function');
+  const first = await store.upsertRetirementNotice(request);
+  assert.equal(first.type, 'retention-warning');
+  assert.equal(first.action, null);
+  assert.equal(first.release, null);
+  assert.equal(first.dedupeKey, 'retirement:failed-job-1');
+  assert.deepEqual(first.source, { provider: 'local', sourceId: 'failed-backup-retirement' });
+  assert.equal(Object.keys(first).length, 11);
+  const read = await store.acknowledge(first.notificationId);
+  store = new NotificationStore(dependencies);
+  await store.initialize();
+  assert.deepEqual(await store.upsertRetirementNotice(request), read);
+  const changed = await store.upsertRetirementNotice({ ...request, reason: 'target-running' });
+  assert.equal(changed.notificationId, first.notificationId);
+  assert.equal(changed.message, first.message); // Same copy does not erase distinct durable reasons.
+  assert.equal(changed.read, false);
+  assert.notEqual(changed.timestamp, first.timestamp);
+  const partial = await store.upsertRetirementNotice({ ...request, state: 'partial', reason: 'io-failure' });
+  assert.equal(partial.title, 'Backup cleanup incomplete');
+  const reclaimed = await store.upsertRetirementNotice({ ...request, state: 'reclaimed', reason: null });
+  assert.equal(reclaimed.title, 'Backup cleanup complete');
+  assert.equal(reclaimed.read, true);
+  assert.equal((await store.list()).length, 1);
+  for (const item of [...events, ...await store.list(), reclaimed]) assert.equal(Object.hasOwn(item, 'retirement'), false);
+  const persisted = JSON.parse(fs.readFileSync(path.join(userDataPath, 'modpack-lifecycle', 'notifications.json'), 'utf8'));
+  assert.deepEqual(persisted.notifications[0].retirement, { state: 'reclaimed', reason: null });
+});
+
+test('retirement private evidence is strict and checksum protected; general create cannot mint it', async t => {
+  const { NotificationStore } = require('../../electron/services/modpacks/notifications/notification-store.cjs');
+  const { dependencies, userDataPath } = fixture(t);
+  const store = new NotificationStore(dependencies);
+  await store.initialize();
+  assert.equal(typeof store.upsertRetirementNotice, 'function');
+  await assert.rejects(store.create(updateNotification({ type: 'retention-warning' })), e => e.code === 'INVALID_REQUEST');
+  const request = { jobId: 'failed-job-1', serverId: 'server-1', state: 'retained', reason: 'target-busy' };
+  for (const invalid of [{ ...request, state: '__proto__' }, { ...request, reason: 'unknown' },
+    { ...request, privatePath: 'forbidden' }, { ...request, jobId: '../escape' }]) {
+    await assert.rejects(store.upsertRetirementNotice(invalid), e => e.code === 'INVALID_REQUEST');
+  }
+  await store.upsertRetirementNotice(request);
+  const file = path.join(userDataPath, 'modpack-lifecycle', 'notifications.json');
+  const persisted = JSON.parse(fs.readFileSync(file, 'utf8'));
+  persisted.notifications[0].retirement.reason = 'target-running';
+  fs.writeFileSync(file, `${JSON.stringify(persisted, null, 2)}\n`);
+  await assert.rejects(new NotificationStore(dependencies).initialize(), e => e.code === 'RECOVERY_REQUIRED');
+});
+
+test('retirement warning maps strict results without turning them into operation actions', async t => {
+  const { NotificationStore } = require('../../electron/services/modpacks/notifications/notification-store.cjs');
+  const { dependencies } = fixture(t);
+  const store = new NotificationStore(dependencies);
+  await store.initialize();
+  const { createRetirementWarningPublisher } = require('../../electron/services/modpack-lifecycle/failed-restorepoint-retirement-warning.cjs');
+  const publish = createRetirementWarningPublisher({ notificationStore: store });
+  const base = { jobId: 'failed-job-1', status: 'deferred', reason: 'missing-final-policy-proof', progress: null, archiveBytesReclaimed: '0' };
+  await publish({ jobId: base.jobId, serverId: 'server-1', result: base });
+  assert.equal((await store.list())[0].title, 'Backup retained for safety');
+  await publish({ jobId: base.jobId, serverId: 'server-1', result: { ...base, progress: 'archive-deleted', reason: 'io-failure' } });
+  assert.equal((await store.list())[0].title, 'Backup cleanup incomplete');
+  await publish({ jobId: base.jobId, serverId: 'server-1', result: { ...base, status: 'reclaimed', reason: null, progress: 'deleted', archiveBytesReclaimed: '42' } });
+  assert.equal((await store.list())[0].read, true);
+  await publish({ jobId: base.jobId, serverId: 'server-1', result: { ...base, status: 'not-eligible', reason: null } });
+  assert.equal((await store.list()).length, 1);
+  await assert.rejects(publish({ jobId: base.jobId, serverId: 'server-1', result: { ...base, rawPath: 'forbidden' } }), e => e.code === 'INVALID_REQUEST');
+  await assert.rejects(publish({ jobId: base.jobId, serverId: 'server-1', result: { ...base, reason: null } }), e => e.code === 'INVALID_REQUEST');
+  await assert.rejects(publish({ jobId: base.jobId, serverId: 'server-1', result: { ...base, status: 'reclaimed', reason: null } }), e => e.code === 'INVALID_REQUEST');
+});
+
+test('retirement notice CAS failure preserves previous durable and public state', async t => {
+  const { NotificationStore } = require('../../electron/services/modpacks/notifications/notification-store.cjs');
+  const { dependencies } = fixture(t);
+  const first = new NotificationStore(dependencies); const stale = new NotificationStore(dependencies);
+  await first.initialize(); await stale.initialize();
+  const request = { jobId: 'failed-one', serverId: 'server-1', state: 'retained', reason: 'target-busy' };
+  const saved = await first.upsertRetirementNotice(request);
+  await assert.rejects(stale.upsertRetirementNotice({ ...request, reason: 'io-failure' }), error => error.code === 'COMMIT_FAILED');
+  assert.deepEqual(await stale.list(), []);
+  const fresh = new NotificationStore(dependencies); await fresh.initialize(); assert.deepEqual(await fresh.list(), [saved]);
+});

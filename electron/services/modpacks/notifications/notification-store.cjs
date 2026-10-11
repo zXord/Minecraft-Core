@@ -4,6 +4,7 @@ const path = require('node:path');
 
 const { strictJsonClone } = require('../../../utils/durable-fs.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
+const { normalizeRetirementNotice, retirementNoticeCopy } = require('../../modpack-lifecycle/failed-restorepoint-retirement-warning.cjs');
 
 const STORE_TYPE = 'minecraft-core-modpack-notifications';
 const SCHEMA_VERSION = 1;
@@ -13,7 +14,7 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const TYPES = new Set([
   'update-available', 'prerelease-available', 'github-asset-selection-required', 'source-changed',
-  'integrity-warning', 'rate-limit', 'operation-outcome', 'recovery-required'
+  'integrity-warning', 'rate-limit', 'operation-outcome', 'recovery-required', 'retention-warning'
 ]);
 const ACTIONS = new Set([
   'retry', 'change-selection', 'open-details', 'open-retained-download-folder', 'remove-retained-download',
@@ -99,9 +100,10 @@ function normalizeAction(value) {
 }
 
 function normalizeRecord(value) {
-  strictObject(value, RECORD_KEYS);
+  const retirement = Object.getOwnPropertyDescriptor(value || {}, 'type')?.value === 'retention-warning';
+  strictObject(value, retirement ? [...RECORD_KEYS, 'retirement'] : RECORD_KEYS);
   if (!TYPES.has(value.type) || typeof value.read !== 'boolean') throw invalid();
-  return {
+  const record = {
     notificationId: identifier(value.notificationId),
     type: value.type,
     serverId: identifier(value.serverId),
@@ -114,6 +116,15 @@ function normalizeRecord(value) {
     action: normalizeAction(value.action),
     dedupeKey: identifier(value.dedupeKey)
   };
+  if (retirement) {
+    record.retirement = normalizeRetirementNotice(value.retirement);
+    const copy = retirementNoticeCopy(record.retirement);
+    if (record.source.provider !== 'local' || record.source.sourceId !== 'failed-backup-retirement' ||
+        record.release !== null || record.action !== null || !record.dedupeKey.startsWith('retirement:') ||
+        record.title !== copy.title || record.message !== copy.message ||
+        (record.retirement.state === 'reclaimed' && !record.read)) throw invalid();
+  }
+  return record;
 }
 
 function checksumPayload(value) {
@@ -151,7 +162,7 @@ function emptyEnvelope() {
 }
 
 function dto(value) {
-  return deepFreeze(strictJsonClone(value));
+  return deepFreeze(strictJsonClone(Object.fromEntries(RECORD_KEYS.map(key => [key, value[key]]))));
 }
 
 function samePath(left, right) {
@@ -202,6 +213,7 @@ class NotificationStore {
   async create(request) {
     this.#assertInitialized();
     strictObject(request, CREATE_KEYS);
+    if (request.type === 'retention-warning') throw invalid();
     const normalized = normalizeRecord({
       notificationId: identifier(String(this.randomUUID())),
       type: request.type,
@@ -222,6 +234,34 @@ class NotificationStore {
     const created = dto(normalized);
     try { this.eventSink(created); } catch { /* durable notification remains authoritative */ }
     return created;
+  }
+
+  async upsertRetirementNotice(request) {
+    this.#assertInitialized();
+    strictObject(request, ['jobId', 'serverId', 'state', 'reason']);
+    const jobId = identifier(request.jobId);
+    if (jobId.length > 128) throw invalid();
+    const serverId = identifier(request.serverId);
+    const retirement = normalizeRetirementNotice({ state: request.state, reason: request.reason });
+    const dedupeKey = `retirement:${jobId}`;
+    const index = this.state.notifications.findIndex(item => item.dedupeKey === dedupeKey);
+    const existing = index < 0 ? null : this.state.notifications[index];
+    if (existing && (existing.type !== 'retention-warning' || existing.serverId !== serverId)) throw invalid();
+    if (existing && existing.retirement.state === retirement.state && existing.retirement.reason === retirement.reason) return dto(existing);
+    if (!existing && this.state.notifications.length >= MAX_NOTIFICATIONS) throw commitFailure();
+    const normalized = normalizeRecord({
+      notificationId: existing?.notificationId || identifier(String(this.randomUUID())),
+      type: 'retention-warning', serverId,
+      source: { provider: 'local', sourceId: 'failed-backup-retirement' },
+      release: null, timestamp: this.#now(), read: retirement.state === 'reclaimed',
+      ...retirementNoticeCopy(retirement), action: null, dedupeKey, retirement
+    });
+    const notifications = this.state.notifications.slice();
+    if (index < 0) notifications.push(normalized); else notifications[index] = normalized;
+    await this.#publish(notifications);
+    const published = dto(normalized);
+    try { this.eventSink(published); } catch { /* durable obligation remains authoritative */ }
+    return published;
   }
 
   async acknowledge(notificationId) {

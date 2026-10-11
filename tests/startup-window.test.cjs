@@ -10,6 +10,20 @@ const {
   waitForStartupWindowDocument
 } = require('../electron/utils/startup-window.cjs');
 
+test('held background retirement cannot delay main readiness or startup-window closure', async () => {
+  let completeRetirement; const retirement = new Promise(resolve => { completeRetirement = resolve; });
+  let closed = false; let retirementSettled = false;
+  retirement.then(() => { retirementSettled = true; });
+  const mainWindow = {};
+  const result = await startApplicationAfterReady({
+    createStartupWindow: () => ({ close() { closed = true; } }),
+    async runMainStartup() { void retirement; return mainWindow; },
+    async waitForMainWindowReady(window) { assert.equal(window, mainWindow); }
+  });
+  assert.equal(result, mainWindow); assert.equal(closed, true); assert.equal(retirementSettled, false);
+  completeRetirement(); await retirement;
+});
+
 test('Windows taskbar details bind the branded icon to the explicit application identity', () => {
   const calls = [];
   const window = {

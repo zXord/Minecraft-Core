@@ -772,6 +772,10 @@ function requireAsyncDurability(durableFs) {
 }
 
 class ProductionMutationRuntime {
+  #retirementSettlements = new WeakMap();
+  #restoredPolicyBindings = new WeakMap();
+  #retirement = null;
+  #publishRetirementWarning = null;
   constructor({
     availableBytes = null,
     buildExistingCandidateFn = buildExistingCandidate,
@@ -787,6 +791,7 @@ class ProductionMutationRuntime {
     durabilityHandoff = defaultDurabilityHandoff,
     durableFsFactory,
     fsApi = fs,
+    failedRestorePointRetirementFactory = null,
     healthTimeoutMs = DEFAULT_SERVER_HEALTH_TIMEOUT_MS,
     healthValidator = null,
     instanceContext: suppliedInstanceContext = instanceContext,
@@ -799,6 +804,7 @@ class ProductionMutationRuntime {
     prepareNewLiveValidationFn = prepareNewLiveValidation,
     prepareRuntime = prepareManagedServerRuntime,
     publishNewCandidateFn = publishNewCandidate,
+    publishRetirementWarning = null,
     randomUUID = () => require('node:crypto').randomUUID(),
     recoveryServices,
     registerPublishedInstanceFn = registerPublishedInstance,
@@ -817,7 +823,8 @@ class ProductionMutationRuntime {
     const registry = recoveryServices?.registry;
     const recoveryService = recoveryServices?.recoveryService;
     const runtimePolicy = recoveryServices?.runtimePolicy;
-    if (typeof clock !== 'function' ||
+    if ((failedRestorePointRetirementFactory !== null && typeof failedRestorePointRetirementFactory !== 'function') ||
+        (publishRetirementWarning !== null && typeof publishRetirementWarning !== 'function') || typeof clock !== 'function' ||
         (!healthValidator && !recoveryServices?.healthValidator && !coordinator) || !destinationReservations ||
         typeof destinationReservations.resolve !== 'function' || typeof destinationReservations.consume !== 'function' ||
          typeof destinationReservations.release !== 'function' || typeof planOwnershipFn !== 'function' ||
@@ -900,6 +907,16 @@ class ProductionMutationRuntime {
     this.restartTokens = new Map();
     this.restoredRestartTokens = new WeakMap();
     this.restoreServices = new Map();
+    this.#publishRetirementWarning = publishRetirementWarning;
+    if (failedRestorePointRetirementFactory) {
+      this.#retirement = failedRestorePointRetirementFactory((proof, { jobId, selector, lease }) => {
+        this.coordinator.assertMutationLease(lease, selector, jobId);
+        const settled = this.#retirementSettlements.get(lease)?.get(jobId);
+        return Boolean(settled && settled.proof === proof && settled.ready && settled.consuming &&
+          settled.selector.instanceId === selector.instanceId && samePath(settled.selector.serverPath, selector.serverPath));
+      });
+      if (!this.#retirement || typeof this.#retirement.retireLive !== 'function') throw invalid();
+    }
   }
 
   async resolveInstance({ jobId, plan } = {}) {
@@ -1899,6 +1916,18 @@ class ProductionMutationRuntime {
       await boundedRuntimeSettlement(waitForRuntimeWorkerQuiescence(error), 5000, error);
       const recovered = await this.recoveryService.recoverWithLease(record, lease);
       await this.#resolvedRecovery(recovered, request, close, false);
+      // This provenance exists only for actual successful narrow abandonment in
+      // this live invocation. Historical replay alone never creates it.
+      const token = this.restartTokens.get(jobId);
+      if (record.target.kind === 'existing' && record.swapStep === 'none' &&
+          recovered.action === 'pre-swap-restored' && token && !token.newServer &&
+          token.operationId === jobId && samePath(token.serverPath, resolved.serverPath) &&
+          !(plan.operation.kind === 'uninstall' && plan.ownership?.confirmation?.possibleNonRunnable === true)) {
+        let settlements = this.#retirementSettlements.get(lease);
+        if (!settlements) { settlements = new Map(); this.#retirementSettlements.set(lease, settlements); }
+        settlements.set(jobId, { plan, token, selector: { instanceId: resolved.instanceId, serverPath: resolved.serverPath },
+          proof: Object.freeze({}), ready: false, consuming: false });
+      }
       if (plan.operation.serverKind === 'new') this.#releaseReservation(resolved);
       this.contexts.delete(jobId);
       return recovered;
@@ -2040,23 +2069,56 @@ class ProductionMutationRuntime {
     }
   }
 
-  async restorePriorState({ jobId, plan, resolved, restartToken } = {}) {
+  async restorePriorState({ jobId, plan, resolved, restartToken, lease } = {}) {
+    if (lease !== undefined) this.#recoveryBinding({ jobId, plan, resolved, lease });
     const token = restartToken || this.restartTokens.get(jobId);
     if (!token || token.newServer) {
       this.restartTokens.delete(jobId);
       return deepFreeze({ restored: true, newServer: true });
     }
-    if (this.restoredRestartTokens.has(token)) return this.restoredRestartTokens.get(token);
+    const settlement = lease ? this.#retirementSettlements.get(lease)?.get(jobId) : null;
+    if (settlement && (settlement.plan !== plan || settlement.token !== token || token.operationId !== jobId ||
+        !samePath(token.serverPath, resolved.serverPath))) throw invalid();
     const keepDisabled = plan?.operation?.kind === 'uninstall' &&
       plan.ownership?.confirmation?.possibleNonRunnable === true;
-    const restored = await this.runtimePolicy.restoreAutoRestart({
-      enabled: keepDisabled ? false : token.enabled,
-      operationId: token.operationId,
-      serverPath: resolved.serverPath
-    });
+    const enabled = keepDisabled ? false : token.enabled;
+    const cachedBinding = this.#restoredPolicyBindings.get(token);
+    const matchingCache = cachedBinding && cachedBinding.operationId === token.operationId &&
+      samePath(cachedBinding.serverPath, resolved.serverPath) && cachedBinding.enabled === enabled;
+    let restored;
+    try {
+      restored = matchingCache && this.restoredRestartTokens.has(token) ? this.restoredRestartTokens.get(token) :
+        await this.runtimePolicy.restoreAutoRestart({ enabled,
+          operationId: token.operationId, serverPath: resolved.serverPath });
+    } catch (error) {
+      if (settlement) this.#retirementSettlements.get(lease).delete(jobId);
+      throw error;
+    }
     this.restoredRestartTokens.set(token, restored);
+    this.#restoredPolicyBindings.set(token, { operationId: token.operationId, serverPath: resolved.serverPath, enabled });
     this.restartTokens.delete(jobId);
+    if (settlement) settlement.ready = restored?.restored === true && !keepDisabled;
     return restored;
+  }
+
+  async retireFailedRestorePoint({ jobId, plan, resolved, lease } = {}) {
+    const binding = this.#recoveryBinding({ jobId, plan, resolved, lease });
+    const settlements = this.#retirementSettlements.get(lease);
+    const settlement = settlements?.get(jobId);
+    if (!this.#retirement || !settlement?.ready || settlement.consuming || settlement.plan !== plan ||
+        settlement.selector.instanceId !== resolved.instanceId || !samePath(settlement.selector.serverPath, resolved.serverPath)) {
+      return deepFreeze({ status: 'deferred', jobId, reason: 'missing-final-policy-proof', progress: null, archiveBytesReclaimed: '0' });
+    }
+    settlement.consuming = true;
+    try {
+      const result = await this.#retirement.retireLive({ jobId, binding, selector: settlement.selector, lease,
+        finalPolicyProof: settlement.proof });
+      if (this.#publishRetirementWarning) {
+        try { await this.#publishRetirementWarning({ jobId, serverId: resolved.instanceId, result }); }
+        catch { /* notification I/O never changes source settlement or receipt authority */ }
+      }
+      return result;
+    } finally { settlements.delete(jobId); }
   }
 
   #assertManagementPlanStillValid(plan, snapshot, { skipAvailableCapacity = false } = {}) {

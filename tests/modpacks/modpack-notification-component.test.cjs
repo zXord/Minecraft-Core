@@ -6,6 +6,28 @@ const test = require('node:test');
 
 const ROOT = path.resolve(__dirname, '../..');
 
+test('global generic center shows unread unmanaged retention copy without an action and hides after resolution', async () => {
+  const listeners = new Map();
+  global.window = { electron: { async invoke() { return { ok: true, value: [] }; },
+    on(channel, handler) { listeners.set(channel, handler); }, removeListener(channel) { listeners.delete(channel); } } };
+  const { modpackNotificationStore } = await import('../../src/stores/modpackNotificationStore.js');
+  modpackNotificationStore.connect();
+  const notice = { notificationId: 'retention-component', serverId: 'unmanaged', type: 'retention-warning', read: false,
+    title: 'Backup cleanup pending', message: 'This warning alone does not block Repair.', timestamp: '2026-10-11T00:00:00.000Z',
+    source: { provider: 'local', sourceId: 'failed-backup-retirement' }, release: null, action: null, dedupeKey: 'retirement:job' };
+  try {
+    const { render } = await import('svelte/server'); const Component = await loadServerComponent('src/components/modpacks/ModpackNotificationCenter.svelte');
+    listeners.get('modpacks:notification')(notice);
+    const html = render(Component, { props: { variant: 'global', connectStore: false, open: true } }).body;
+    assert.equal(html.includes('aria-label="Modpack notifications'), true);
+    assert.equal(html.includes('Backup cleanup pending'), true);
+    assert.equal(html.includes('review-restore-point'), false);
+    listeners.get('modpacks:notification')({ ...notice, title: 'Backup cleanup complete', read: true });
+    const resolved = render(Component, { props: { variant: 'global', connectStore: false } }).body;
+    assert.equal(resolved.includes('aria-label="Modpack notifications'), false);
+  } finally { modpackNotificationStore.destroy(); delete global.window; }
+});
+
 function moduleUrl(specifier) {
   return pathToFileURL(require.resolve(specifier)).href;
 }

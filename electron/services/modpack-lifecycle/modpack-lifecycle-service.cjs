@@ -1923,6 +1923,8 @@ class ModpackLifecycleService {
         }
       } catch { /* optional progress must not replace the original failure or cleanup */ }
       let cleanupError = null;
+      let abandonmentSucceeded = false;
+      let policySucceeded = false;
       if ((state.recoveryRecordPrepared || state.candidateBuilt || state.restorePointAttempted ||
            state.restorePoint !== null) && resolved) {
         if (error?.preserveWorkspace === true && typeof this.operationStore.appendEvent === 'function') {
@@ -1935,9 +1937,10 @@ class ModpackLifecycleService {
           } catch { /* progress reporting must not bypass the shutdown barrier */ }
         }
         try {
-          await this.mutationRuntime.abandonCandidate({
+          const abandoned = await this.mutationRuntime.abandonCandidate({
             jobId: claimed.jobId, operationKind, plan, choices, resolved, lease, error
           });
+          abandonmentSucceeded = abandoned?.resolved === true && abandoned.action === 'pre-swap-restored';
         } catch (candidateError) {
           cleanupError = candidateError;
         }
@@ -1946,11 +1949,24 @@ class ModpackLifecycleService {
       if (runtimeUnproven) this.mutationCoordinator.quarantineMutation(lease);
       if (!runtimeUnproven && restartToken !== null && resolved) {
         try {
-          await this.mutationRuntime.restorePriorState({
+          const policy = await this.mutationRuntime.restorePriorState({
             jobId: claimed.jobId, plan, resolved, restartToken, running: resolved.priorRunning, lease
           });
+          policySucceeded = policy?.restored === true;
         } catch (policyError) {
           cleanupError ||= policyError;
+        }
+      }
+      if (!runtimeUnproven && cleanupError === null && abandonmentSucceeded && policySucceeded &&
+          typeof this.mutationRuntime.retireFailedRestorePoint === 'function') {
+        try { await this.mutationRuntime.retireFailedRestorePoint({ jobId: claimed.jobId, plan, resolved, lease }); }
+        catch (retirementError) {
+          // Ordinary backup retention is separate from source cleanup and never
+          // changes the failed/cancelled outcome or admission of a safe Repair.
+          if (retirementError?.runtimeWritersUnproven === true) {
+            this.mutationCoordinator.quarantineMutation(lease);
+            throw retirementError;
+          }
         }
       }
       if (!runtimeUnproven) {

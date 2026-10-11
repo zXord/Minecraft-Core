@@ -9,6 +9,8 @@ const { reconcileOperationStoreWithRecovery } = require('../services/modpack-lif
 const { OperationStore } = require('../services/modpack-lifecycle/operation-store.cjs');
 const { OutcomeActionService } = require('../services/modpack-lifecycle/outcome-action-service.cjs');
 const { PlanRegistry } = require('../services/modpack-lifecycle/plan-registry.cjs');
+const { FailedRestorePointRetirement } = require('../services/modpack-lifecycle/failed-restorepoint-retirement.cjs');
+const { createRetirementWarningPublisher } = require('../services/modpack-lifecycle/failed-restorepoint-retirement-warning.cjs');
 const { ArtifactWorkspaceRegistry } = require('../services/modpacks/artifacts/artifact-workspace-registry.cjs');
 const { VerifiedArtifactAcquisition } = require('../services/modpacks/artifacts/verified-artifact-acquisition.cjs');
 const { ArchiveExtractor } = require('../services/modpacks/archive/archive-extractor.cjs');
@@ -413,6 +415,67 @@ async function createProductionModpackComposition(input = {}) {
     });
 
     const { services: recoveryServices, registry: recoveryRegistry, recoveryService: rawRecoveryService } = requireRecoveryServices(input);
+    const publishRetirementWarning = createRetirementWarningPublisher({ notificationStore });
+    let retirement = null;
+    let retirementClosing = false;
+    let retirementPass = null;
+    let startupRetirementArmed = false;
+    let retirementDispatch = null;
+    const retirementSetImmediate = input.retirementSetImmediateFn || setImmediate;
+    const retirementClearImmediate = input.retirementClearImmediateFn || clearImmediate;
+    function createRetirement(verifyLiveProof) {
+      // Older injected library fixtures have no retirement metadata API. Their
+      // absence is not authority; production's registry supplies all methods.
+      if (['loadPublishedTerminalEvidence', 'loadRestorePointRetirement', 'writeRestorePointRetirement',
+        'listRestorePointRetirementItems', 'hasOtherActiveRestorePointReference'].some(key => typeof recoveryRegistry[key] !== 'function')) return null;
+      retirement = new FailedRestorePointRetirement({ registry: recoveryRegistry, coordinator, planRegistry, stateRepository,
+        clock: nowDate, randomUUID, verifyLiveProof,
+        restorePointServiceFor(selector) {
+          const service = recoveryServices.restorePointService;
+          if (typeof service?.withExactRetirementPoint !== 'function') throw Object.assign(new Error('Exact retirement is unavailable'), { retirementReason: 'unsupported-native' });
+          return { withExactRetirementPoint(candidate, options, work) {
+            if (options.authority.selector.instanceId !== selector.instanceId ||
+                options.authority.selector.serverPath !== selector.serverPath) throw invalid();
+            return service.withExactRetirementPoint(candidate, options, work);
+          } };
+        },
+        async assertTargetAvailable(selector, lease) {
+          coordinator.assertMutationLease(lease, selector, lease.operationId);
+          const current = await instanceResolver.resolveInstance(selector.instanceId);
+          if (current?.instanceId !== selector.instanceId || typeof current.serverPath !== 'string' ||
+              path.resolve(current.serverPath).toLowerCase() !== path.resolve(selector.serverPath).toLowerCase()) throw invalid();
+          if (current.priorRunning !== false) throw new ModpackError('SERVER_RUNNING', 'The server is running');
+          coordinator.assertMutationLease(lease, selector, lease.operationId);
+        } });
+      return retirement;
+    }
+    function startRetirementPass(request) {
+      if (retirementClosing || retirementPass || !retirement) return false;
+      retirementPass = Promise.resolve().then(async () => {
+        if (retirementClosing) return;
+        const targets = new Map(recoveryRegistry.listRestorePointRetirementItems({ selector: null }).map(item => [item.jobId, item.selector.instanceId]));
+        const pass = await retirement.retryPass(request);
+        for (const result of pass.results) {
+          const serverId = targets.get(result.jobId);
+          if (!serverId) continue;
+          try { await publishRetirementWarning({ jobId: result.jobId, serverId, result }); }
+          catch { console.warn('Backup cleanup notice could not be updated'); }
+        }
+      }).catch(() => { console.warn('Backup cleanup pass was deferred'); }).finally(() => { retirementPass = null; });
+      return true;
+    }
+    function armStartupRetirement(ready) {
+      if (retirementClosing || startupRetirementArmed || !retirement || !ready || typeof ready.then !== 'function') return false;
+      startupRetirementArmed = true;
+      void Promise.resolve(ready).then(value => {
+        if (value !== true || retirementClosing) return;
+        retirementDispatch = retirementSetImmediate(() => {
+          retirementDispatch = null;
+          if (!retirementClosing) startRetirementPass({ trigger: 'startup', selector: null });
+        });
+      }).catch(() => {});
+      return true;
+    }
     const lifecycleOutcomeActionIssuer = retainingOutcomeActionIssuer({
       issuer: new LifecycleOutcomeActionIssuer(),
       artifactCache
@@ -443,7 +506,12 @@ async function createProductionModpackComposition(input = {}) {
           });
           if (!result.reconciled.includes(jobId)) return false;
         }
+        // Once teardown owns all references, a late source-recovery completion
+        // must not touch a disposed plan registry or admit housekeeping.
+        if (retirementClosing) return true;
         if (!await planRegistry.releaseClaim(jobId)) await workspaceRegistry.releaseOwner(jobId);
+        if (record.target.kind === 'existing') startRetirementPass({ trigger: 'recovery-completed',
+          selector: { instanceId: record.target.stableServerId, serverPath: record.target.path } });
         return true;
       }
     });
@@ -465,8 +533,11 @@ async function createProductionModpackComposition(input = {}) {
       userDataPath,
       workspaceRegistry,
       clock: nowDate,
-      randomUUID
+      randomUUID,
+      failedRestorePointRetirementFactory: verify => createRetirement(verify) || { retireLive: async () => { throw invalid(); } },
+      publishRetirementWarning
     });
+    if (input.mutationRuntime) createRetirement(() => false);
 
     lifecycleService = new ModpackLifecycleService({
       sourceResolver,
@@ -530,6 +601,10 @@ async function createProductionModpackComposition(input = {}) {
 
     function dispose() {
       if (disposePromise) return disposePromise;
+      retirementClosing = true;
+      if (retirementDispatch !== null) { retirementClearImmediate(retirementDispatch); retirementDispatch = null; }
+      const retirementDrain = retirement?.close();
+      const activeRetirement = retirementPass;
 
       let resolveDisposal;
       let rejectDisposal;
@@ -542,7 +617,6 @@ async function createProductionModpackComposition(input = {}) {
       // while Electron is entering its orderly-quit barrier.
       const cleanupResults = [
         beginCleanup(() => lifecycleService.dispose()),
-        beginCleanup(() => planRegistry.dispose()),
         beginCleanup(() => releaseMonitor.stop()),
         beginCleanup(() => nativeNotificationBridge.stop())
       ];
@@ -550,6 +624,12 @@ async function createProductionModpackComposition(input = {}) {
 
       void (async () => {
         const failures = [];
+        // No reference or native/workspace dependency may close while a sent
+        // deletion still has unconfirmed ownership. Deliberately no deadline.
+        await retirementDrain;
+        await activeRetirement;
+        const planResult = await beginCleanup(() => planRegistry.dispose());
+        if (!planResult.ok) failures.push(planResult.error);
         for (const cleanupResult of cleanupResults) {
           const result = await cleanupResult;
           if (!result.ok) failures.push(result.error);
@@ -632,6 +712,7 @@ async function createProductionModpackComposition(input = {}) {
         return composition;
       },
       scheduleArtifactCachePrune,
+      armStartupRetirement,
       dispose
     };
     return Object.freeze(composition);
