@@ -35,6 +35,123 @@ const {
 const SHA256 = 'a'.repeat(64);
 const SHA512 = 'b'.repeat(128);
 
+async function seedPriorLaunch(f, { historical = false, pending = false } = {}) {
+  const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
+  const { createServerMutationContext } = require('../../electron/services/server-mutation-context.cjs');
+  f.input.coordinator = new ServerMutationCoordinator({ context: createServerMutationContext(), readContentRevision: () => 0,
+    bumpContentRevision() { assert.fail('metadata-only startup must not mutate target'); } });
+  f.input.coordinator.completeStartupRecovery([]);
+  const { RecoveryRegistry } = require('../../electron/services/modpack-lifecycle/recovery-registry.cjs');
+  let failEnvelope = pending;
+  const durable = f.input.durableFsFactory();
+  const registry = new RecoveryRegistry({ userDataPath: f.input.userDataPath, durableFs: { ...durable,
+    async renameDurableAsync(from, to, options) {
+      if (failEnvelope && from.endsWith('.target.json')) throw new Error('pending terminal envelope');
+      return durable.renameDurableAsync(from, to, options);
+    }
+  } });
+  await registry.initialize();
+  Object.assign(f.input.rawRecoveryServices, { registry });
+  const owner = { epoch: Symbol('prior'), assertCurrent(epoch) { assert.equal(epoch, this.epoch); } };
+  const prior = new OperationStore({ userDataPath: f.input.userDataPath, durableFs: f.input.durableFsFactory(),
+    allowNewServerLaunchBindings: true, launchOwner: owner });
+  await prior.initialize();
+  const jobId = 'launch-prior-job'; const serverId = 'launch-prior-server';
+  const targetPath = path.join(f.input.userDataPath, 'inert-launch-target');
+  const binding = { planId: 'plan-launch-v1-00000000-0000-4000-8000-000000000099', planFingerprint: SHA256,
+    instanceId: serverId, targetPath, displayName: 'Inert launch target', capturedReservation: { kind: 'absent' }, destinationDisposition: 'held' };
+  let job = await prior.create({ jobId, serverId, operationKind: 'install-new', planFingerprint: SHA256, launchBinding: binding }, owner.epoch);
+  if (historical) {
+    job = await prior.transition(jobId, { expectedPhase: 'queued', nextPhase: 'preflight', patch: {} });
+    await registry.create({ schemaVersion: 2, sequence: 0, jobId, operationKind: 'install',
+      target: { kind: 'new', stableServerId: serverId, path: targetPath }, candidatePath: null, rollbackPath: null,
+      failedPath: null, restorePoint: null, restoreCreation: null, journalPath: null,
+      priorRuntime: { running: false, autoRestart: false }, phase: 'queued', swapStep: 'none',
+      directoryIdentities: { target: null, candidate: null, rollback: null, failed: null },
+      createdAt: '2026-10-11T00:00:00.000Z', updatedAt: '2026-10-11T00:00:00.000Z', outcome: null });
+    const finishing = registry.finish(jobId, { terminalPhase: 'failed', outcome: { recovery: { action: 'revalidation-aborted' } } });
+    if (pending) await assert.rejects(finishing, { code: 'COMMIT_FAILED' }); else await finishing;
+  }
+  return { registry, prior, owner, jobId, serverId, targetPath, permitEnvelope() { failEnvelope = false; } };
+}
+
+for (const historical of [false, true]) test(`launch historical composition startup repairs ${historical ? 'archived closure' : 'prior queued'} before readiness`, async t => {
+  const f = fixture(t); const seeded = await seedPriorLaunch(f, { historical });
+  const c = await createProductionModpackComposition(f.input); t.after(() => c.dispose());
+  await c.initialize();
+  const record = await seeded.prior.getNewServerLaunch(seeded.jobId, seeded.owner.epoch);
+  assert.equal(record.binding.destinationDisposition, 'released');
+  assert.equal(record.job.phase, 'failed');
+  assert.equal(c.destinationReservationService.isDestinationHeld(seeded.serverId), false);
+  assert.equal(c.lifecycleService.launchSettlements.get(seeded.jobId).settlementStatus, 'settled');
+});
+
+test('launch historical incomplete injected history authority still reconstructs denial-only hold', async t => {
+  const f = fixture(t); const seeded = await seedPriorLaunch(f);
+  seeded.registry.loadHistory = undefined;
+  const c = await createProductionModpackComposition(f.input); t.after(() => c.dispose());
+  await c.initialize();
+  assert.equal(c.destinationReservationService.isDestinationHeld(seeded.serverId), true);
+  assert.equal(c.lifecycleService.launchSettlements.get(seeded.jobId).settlementStatus, 'support-required');
+  assert.equal((await seeded.prior.getNewServerLaunch(seeded.jobId, seeded.owner.epoch)).binding.destinationDisposition, 'held');
+});
+
+test('launch historical real archive succeeds before onResolved CAS failure and fresh startup repairs it', async t => {
+  const f = fixture(t); const seeded = await seedPriorLaunch(f, { historical: true, pending: true });
+  const selector = { instanceId: seeded.serverId, serverPath: seeded.targetPath };
+  f.input.coordinator.beginStartupRecovery();
+  f.input.coordinator.installRecoveryBlocks([{ operationId: seeded.jobId, selector }]);
+  f.input.coordinator.completeStartupRecovery([{ selector, resolved: false }]);
+  const { ModpackRecoveryService } = require('../../electron/services/modpack-lifecycle/modpack-recovery-service.cjs');
+  const unexpected = () => assert.fail('archived launch repair cannot enter context/runtime/source work');
+  const raw = new ModpackRecoveryService({ coordinator: f.input.coordinator, recoveryRegistry: seeded.registry,
+    contextFactory: unexpected, runtimeWriterAuthority: { assertRecoveryAllowed: unexpected }, runtimePolicy: {
+      suspend: unexpected, ensureStopped: unexpected, adoptValidatedHandoff: unexpected, restoreAutoRestart: unexpected } });
+  f.input.rawRecoveryServices.recoveryService = raw;
+  const first = await createProductionModpackComposition(f.input); t.after(() => first.dispose());
+  await first.initialize();
+  const listed = (await first.recoveryService.listRecovery()).items[0];
+  assert.equal(listed.actions[0].actionId, 'retry-history-publication');
+  first.lifecycleService.operationStore.operationStore.settleNewServerDestination = async () => { throw new Error('disposition CAS unavailable'); };
+  seeded.permitEnvelope();
+  const result = await first.recoveryService.recover({ recoveryId: listed.recoveryId, actionId: listed.actions[0].actionId });
+  assert.equal(result.resolved, true); assert.equal(result.operationStateReconciled, false);
+  assert.deepEqual(await first.recoveryService.listRecovery(), { items: [] });
+  assert.equal((await seeded.prior.getNewServerLaunch(seeded.jobId, seeded.owner.epoch)).binding.destinationDisposition, 'held');
+  await first.dispose();
+  const second = await createProductionModpackComposition(f.input); t.after(() => second.dispose());
+  await second.initialize();
+  assert.equal((await seeded.prior.getNewServerLaunch(seeded.jobId, seeded.owner.epoch)).binding.destinationDisposition, 'released');
+  assert.equal(second.destinationReservationService.isDestinationHeld(seeded.serverId), false);
+  assert.deepEqual(await second.recoveryService.listRecovery(), { items: [] });
+});
+
+for (const globalBlock of [false, true]) test(`launch historical startup closes only its own pending native block global=${globalBlock}`, async t => {
+  const f = fixture(t); const seeded = await seedPriorLaunch(f, { historical: true, pending: true });
+  const { ModpackRecoveryService } = require('../../electron/services/modpack-lifecycle/modpack-recovery-service.cjs');
+  const coordinator = f.input.coordinator;
+  const own = { instanceId: seeded.serverId, serverPath: seeded.targetPath };
+  const older = { instanceId: 'older-server', serverPath: path.join(f.input.userDataPath, 'older-restricted-target') };
+  coordinator.beginStartupRecovery();
+  coordinator.installRecoveryBlocks([{ operationId: seeded.jobId, selector: own }, { operationId: 'older-recovery', selector: older }]);
+  coordinator.completeStartupRecovery([{ selector: own, resolved: false }, { selector: older, resolved: false }], { globalBlock });
+  const unexpected = () => assert.fail('terminal bookkeeping must not enter context/runtime/source work');
+  const raw = new ModpackRecoveryService({ coordinator, recoveryRegistry: seeded.registry, contextFactory: unexpected,
+    runtimeWriterAuthority: { assertRecoveryAllowed: unexpected }, runtimePolicy: {
+      suspend: unexpected, ensureStopped: unexpected, adoptValidatedHandoff: unexpected, restoreAutoRestart: unexpected } });
+  f.input.rawRecoveryServices.recoveryService = raw;
+  seeded.permitEnvelope();
+  const c = await createProductionModpackComposition(f.input); t.after(() => c.dispose());
+  await c.initialize();
+  assert.equal((await seeded.prior.getNewServerLaunch(seeded.jobId, seeded.owner.epoch)).binding.destinationDisposition, 'released');
+  assert.equal((await seeded.registry.initialize()).pendingTerminalPublications.length, 0);
+  if (!globalBlock) assert.equal(await coordinator.runMutation(own, { operation: 'probe', operationId: 'probe-own', revisionMode: 'none' }, async () => true), true);
+  else await assert.rejects(coordinator.runMutation(own, { operation: 'probe', operationId: 'probe-own', revisionMode: 'none' }, unexpected), { code: 'RECOVERY_REQUIRED' });
+  await assert.rejects(coordinator.runMutation(older, { operation: 'probe', operationId: 'probe-older', revisionMode: 'none' }, unexpected), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(coordinator.globalRecoveryBlock, globalBlock);
+  assert.equal([...coordinator.records].find(record => record.instanceId === own.instanceId).recoveryBlock, null);
+});
+
 test('launch owner rejects mismatched workspace and operations roots', async t => {
   for (const key of ['workspaces', 'operations']) {
     const f = fixture(t);
@@ -1177,10 +1294,11 @@ test('production composition startup completes durable recovery history with iss
     jobId,
     operationKind: 'install',
     phase: 'completed',
+    swapStep: 'candidate-published',
     target: { kind: 'new', stableServerId: 'server-one', path: 'C:\\private\\server-one' },
     outcome: {
       revisionEvent: { eventId: 'revision:job-startup-reconcile', published: true },
-      releaseTracking: { status: 'applied' }
+      publication: { state: 'published' }, registration: { instanceId: 'server-one', complete: true }
     }
   } : null;
 
@@ -1223,6 +1341,9 @@ test('production composition startup closes a crash-recovered committing update 
     jobId,
     operationKind: 'upgrade',
     phase: 'failed',
+    swapStep: 'live-moved',
+    directoryIdentities: { target: { volumeSerial: '1', fileId: 'aa' }, candidate: null,
+      rollback: { volumeSerial: '1', fileId: 'aa' }, failed: null },
     target: { kind: 'existing', stableServerId: 'server-one', path: 'C:\\private\\server-one' },
     outcome: {
       recovery: { action: 'between-renames-restored', operationId: jobId }
@@ -1281,6 +1402,8 @@ test('reviewed recovery reconciles the durable operation before returning to the
     historical = {
       ...activeRecord,
       phase: 'failed',
+      directoryIdentities: { target: { volumeSerial: '1', fileId: 'aa' }, candidate: null,
+        rollback: { volumeSerial: '1', fileId: 'aa' }, failed: null },
       outcome: { recovery: { action: 'pre-swap-restored', operationId: activeRecord.jobId } }
     };
     return { jobId: value.jobId, resolved: true, action: 'pre-swap-restored' };
@@ -1412,7 +1535,9 @@ test('resolved same-session new-server publication consumes its destination rese
     async showOpenDialog() { return { canceled: false, filePaths: [targetPath] }; }
   };
   let active = null;
+  let historical = null;
   const registry = context.input.rawRecoveryServices.registry;
+  registry.retryTerminalPublication = async () => ({ status: 'already-published', record: historical });
   registry.listActive = async () => active ? [active] : [];
   context.input.rawRecoveryServices.recoveryService.recover = async record => {
     assert.equal(record, active);
@@ -1422,6 +1547,8 @@ test('resolved same-session new-server publication consumes its destination rese
       type: 'server',
       path: record.target.path
     }]);
+    historical = { ...record, phase: 'completed', swapStep: 'candidate-published', outcome: {
+      publication: { state: 'published' }, registration: { complete: true, instanceId: record.target.stableServerId } } };
     active = null;
     return { jobId: record.jobId, resolved: true, action: 'new-publication-completed' };
   };
@@ -1463,10 +1590,16 @@ for (const recoveryAction of ['pre-publication-cleanup', 'new-health-failed']) {
       async showOpenDialog() { return { canceled: false, filePaths: [targetPath] }; }
     };
     let active = null;
+    let historical = null;
     const registry = context.input.rawRecoveryServices.registry;
+    registry.retryTerminalPublication = async () => ({ status: 'already-published', record: historical });
     registry.listActive = async () => active ? [active] : [];
     context.input.rawRecoveryServices.recoveryService.recover = async record => {
       assert.equal(record, active);
+      historical = { ...record, phase: 'failed', swapStep: recoveryAction === 'new-health-failed' ? 'failed-canonical-moved' : 'new-prepared',
+        directoryIdentities: { target: null, candidate: null, rollback: null,
+          failed: recoveryAction === 'new-health-failed' ? { volumeSerial: '1', fileId: 'bb' } : null },
+        outcome: { recovery: { action: recoveryAction, operationId: record.jobId } } };
       active = null;
       return { jobId: record.jobId, resolved: true, action: recoveryAction };
     };
@@ -1550,7 +1683,10 @@ for (const registrationState of ['registered', 'absent']) test(`authenticated me
     directoryIdentities: { target: null, candidate: null, rollback: null, failed: null },
     createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z', outcome: null });
   if (registrationState === 'registered') context.input.store.set('instances', [{ id: reserved.instanceId, type: 'server', name: 'Metadata Server', path: targetPath }]);
-  const outcome = registrationState === 'registered' ? { revisionEvent: { eventId: `revision:${jobId}`, published: true } }
+  if (registrationState === 'registered') await registry.transition(jobId, { expectedPhase: 'queued', nextPhase: 'preflight',
+    patch: { swapStep: 'candidate-published' } });
+  const outcome = registrationState === 'registered' ? { revisionEvent: { eventId: `revision:${jobId}`, published: true },
+    publication: { state: 'published' }, registration: { complete: true, instanceId: reserved.instanceId } }
     : { recovery: { action: 'pre-publication-cleanup', operationId: jobId }, failure: { stage: 'durable-move', category: 'sharing-violation' } };
   await assert.rejects(registry.finish(jobId, { terminalPhase: registrationState === 'registered' ? 'completed' : 'failed', outcome }), { code: 'COMMIT_FAILED' });
   const historicalPath = path.join(registry.historyPath, `${jobId}.json`);

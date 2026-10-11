@@ -1,5 +1,7 @@
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { normalizeFailureDiagnostic } = require('./publication-failure-diagnostic.cjs');
+const { isDeepStrictEqual } = require('node:util');
+const { classifyRecoveryTerminalClosure, classifyLaunchDestination, hasExactLaunchRecoveryBinding, coversLaunch, isDestinationRecoveryClosure } = require('./new-server-launch-closure.cjs');
 
 const RECONCILABLE_PHASES = new Set([
   'publishing', 'published', 'registering', 'starting', 'validating-live',
@@ -16,7 +18,7 @@ const RECOVERY_COMMITTED_PHASES = new Set(['committed-healthy', 'cleanup', 'clea
 const NEW_PUBLICATION_PHASES = new Set(['publishing', 'published', 'registering']);
 const NEW_SERVER_OPERATION_KINDS = new Set(['install-new', 'import-files-only-new']);
 const FAILED_RECOVERY_ACTIONS = new Set([
-  'pre-publication-cleanup', 'new-health-failed', 'pre-swap-restored', 'between-renames-restored'
+  'pre-publication-cleanup', 'new-health-failed', 'pre-swap-restored', 'between-renames-restored', 'revalidation-aborted'
 ]);
 const ACTION_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 
@@ -52,6 +54,7 @@ function isDurablyCommitted(job, recoveryRecord) {
       (recoveryRecord?.target?.kind !== 'new' || !NEW_SERVER_OPERATION_KINDS.has(job?.operationKind))) return false;
   return Boolean(
     hasExactRecoveryBinding(job, recoveryRecord) && RECOVERY_COMMITTED_PHASES.has(recoveryRecord.phase) &&
+    (recoveryRecord.phase !== 'completed' || classifyRecoveryTerminalClosure(recoveryRecord) === 'completed') &&
     recoveryRecord.outcome?.revisionEvent?.published === true &&
     (!recoveryRecord.outcome?.releaseTracking || recoveryRecord.outcome.releaseTracking.status === 'applied')
   );
@@ -59,9 +62,11 @@ function isDurablyCommitted(job, recoveryRecord) {
 
 function recoveredTerminalPhase(job, recoveryRecord, historical) {
   if (!historical || !hasExactRecoveryBinding(job, recoveryRecord)) return null;
+  const closure = classifyRecoveryTerminalClosure(recoveryRecord);
+  if (closure !== 'abandoned' && closure !== 'rolled-back') return null;
   const action = recoveryRecord.outcome?.recovery?.action;
   const operationId = recoveryRecord.outcome?.recovery?.operationId;
-  if (operationId !== job.jobId) return null;
+  if (operationId !== job.jobId && !(action === 'revalidation-aborted' && operationId === undefined)) return null;
   if (recoveryRecord.phase === 'failed' && FAILED_RECOVERY_ACTIONS.has(action)) {
     if (job.phase === 'recovery-required') {
       return recoveryRecord.target.kind === 'new' ? 'failed' : 'rolled-back';
@@ -254,7 +259,7 @@ async function advanceToRecoveredTerminal(operationStore, job, recoveryRecord, t
 }
 
 async function reconcileOperationStoreWithRecovery({
-  operationStore, recoveryRegistry, jobs, outcomeActionIssuer = null
+  operationStore, recoveryRegistry, jobs, outcomeActionIssuer = null, launchClassifications = null
 } = {}) {
   if (!operationStore || typeof operationStore.transition !== 'function' || !recoveryRegistry ||
       typeof recoveryRegistry.load !== 'function' || typeof recoveryRegistry.loadHistory !== 'function' ||
@@ -265,7 +270,12 @@ async function reconcileOperationStoreWithRecovery({
     if (!job || typeof job.jobId !== 'string' || typeof job.serverId !== 'string' ||
         typeof job.phase !== 'string' || (!RECONCILABLE_PHASES.has(job.phase) &&
           !PRE_COMMIT_RECOVERY_PHASES.has(job.phase) && !INTERRUPTED_COMMIT_PHASES.has(job.phase))) continue;
-    const authority = await loadRecoveryRecord(recoveryRegistry, job.jobId);
+    const launchClassification = launchClassifications?.get(job.jobId);
+    if (launchClassification && (launchClassification.jobReconciliationAllowed === false ||
+        (!launchClassification.terminalPublished && !launchClassification.active))) continue;
+    const authority = launchClassification
+      ? { record: launchClassification.record, historical: launchClassification.terminalPublished }
+      : await loadRecoveryRecord(recoveryRegistry, job.jobId);
     const recoveryRecord = authority.record;
     const terminalPhase = recoveredTerminalPhase(job, recoveryRecord, authority.historical);
     if (terminalPhase !== null) {
@@ -305,7 +315,186 @@ async function reconcileOperationStoreWithRecovery({
   return deepFreeze({ reconciled: reconciled.sort((left, right) => left.localeCompare(right, 'en-US')) });
 }
 
+function completeRecoveryScan(scan) {
+  return Boolean(scan && ['records', 'corrupt', 'blocks', 'pendingTerminalPublications'].every(key => Array.isArray(scan[key])) &&
+    typeof scan.globalBlock === 'boolean');
+}
+
+async function readLaunchRecoveryEvidence({ recoveryRegistry, launch, assertCurrent = () => {}, retryTerminalPublication = null,
+  terminalPublicationAvailable = Boolean(retryTerminalPublication), allowTerminalPublication = true }) {
+  const scan = await recoveryRegistry.initialize(); assertCurrent();
+  if (!completeRecoveryScan(scan) || typeof recoveryRegistry.load !== 'function' ||
+      typeof recoveryRegistry.loadHistory !== 'function') return { corrupt: true, cleanEvidence: false };
+  const active = await recoveryRegistry.load(launch.job.jobId); assertCurrent();
+  const history = await recoveryRegistry.loadHistory(launch.job.jobId); assertCurrent();
+  const corrupt = scan.corrupt.some(item => coversLaunch(item, launch));
+  const pending = scan.pendingTerminalPublications.some(item => coversLaunch(item, launch));
+  const olderConflict = [...scan.records, ...scan.blocks, ...scan.pendingTerminalPublications]
+    .some(item => item.jobId !== launch.job.jobId && coversLaunch(item, launch));
+  let record = active || history;
+  const evidence = { record, active: Boolean(active), corrupt, conflict: olderConflict,
+    pendingTerminalPublication: pending, terminalPublished: false,
+    recoveryAvailable: Boolean(!pending && active && hasExactLaunchRecoveryBinding(launch.job, launch.binding, active)) ||
+      Boolean(terminalPublicationAvailable && scan.pendingTerminalPublications.some(item =>
+        hasExactLaunchRecoveryBinding(launch.job, launch.binding, item))),
+    cleanEvidence: !scan.globalBlock && !corrupt && !olderConflict && !pending && !record &&
+      !scan.blocks.some(item => coversLaunch(item, launch)),
+    olderRestriction: olderConflict || scan.globalBlock };
+  if (allowTerminalPublication && !corrupt && record && hasExactLaunchRecoveryBinding(launch.job, launch.binding, record) &&
+      ['completed', 'failed', 'rolled-back'].includes(record.phase) &&
+      (retryTerminalPublication || (!active && !pending && typeof recoveryRegistry.retryTerminalPublication === 'function'))) {
+    try {
+      if ((active || pending) && retryTerminalPublication) {
+        // Startup calls this outside the destination gate. The existing raw
+        // metadata-only authority closes its own native restriction; a registry
+        // move alone would hide the last facade action while retaining that block.
+        await retryTerminalPublication(record); assertCurrent();
+      }
+      const published = await recoveryRegistry.retryTerminalPublication(launch.job.jobId, {
+        expectedTarget: { kind: 'new', stableServerId: launch.job.serverId, path: launch.binding.targetPath },
+        expectedOperationKind: recoveryOperationKind(launch.job.operationKind)
+      });
+      assertCurrent();
+      record = published.record;
+      evidence.record = record; evidence.terminalPublished = true; evidence.active = false;
+      evidence.pendingTerminalPublication = false; evidence.recoveryAvailable = false;
+    } catch (error) { assertCurrent(); evidence.pendingTerminalPublication = true; }
+  }
+  return evidence;
+}
+
+async function reconcileNewServerLaunches({ operationStore, recoveryRegistry, lifecycleService, launchOwner, jobs, launches,
+  registrationState, retryTerminalPublication = null } = {}) {
+  const epoch = launchOwner.epoch;
+  const assertCurrent = () => launchOwner.assertCurrent(epoch, { startupOnly: true });
+  assertCurrent();
+  const initial = new Set(jobs.map(job => job.jobId));
+  const classifications = new Map(); const settlements = {};
+  for (const launch of launches) {
+    assertCurrent();
+    lifecycleService.rememberNewServerLaunch(launch);
+    if (launch.binding.destinationDisposition === 'held') lifecycleService.destinationReservations.restoreJobHold({
+      jobId: launch.job.jobId, binding: launch.binding });
+  }
+  for (const initialLaunch of launches) {
+    let launch = initialLaunch;
+    let classification;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assertCurrent();
+      launch = await operationStore.getNewServerLaunch(initialLaunch.job.jobId, epoch); assertCurrent();
+      if (!launch || launch.job.operationKind !== initialLaunch.job.operationKind || !isDeepStrictEqual({ ...launch.binding, destinationDisposition: 'held' },
+          { ...initialLaunch.binding, destinationDisposition: 'held' })) throw invalid();
+      const evidence = await readLaunchRecoveryEvidence({ recoveryRegistry, launch, assertCurrent, retryTerminalPublication });
+      classifications.set(launch.job.jobId, evidence);
+      const registration = await registrationState(launch); assertCurrent();
+      const classificationEvidence = isDestinationRecoveryClosure(launch.job, evidence, registration)
+        ? { destinationRecovery: true } : evidence;
+      const noCurrentOwner = !lifecycleService.hasActiveJob(launch.job.jobId) &&
+        lifecycleService.pendingNewServerAdmissions.size === 0 && lifecycleService.admittedTasks.size === 0;
+      const proof = { startupOnly: true, initialMember: initial.has(launch.job.jobId), orphanInitialized: true,
+        noCurrentOwner, supportedProtocol: true, cleanEvidence: evidence.cleanEvidence, revisionCurrent: true };
+      classification = classifyLaunchDestination({ ...launch, recoveryEvidence: classificationEvidence, registrationState: registration, queuedProof: proof });
+      evidence.jobReconciliationAllowed = classification.disposition !== null ||
+        (evidence.active && !evidence.corrupt && !evidence.conflict && registration === 'registered');
+      if (classification.disposition && launch.binding.destinationDisposition === 'held') {
+        if (launch.job.phase === 'queued' && evidence.cleanEvidence && noCurrentOwner) {
+          let queuedClosed = false;
+          let queuedRegistration = registration;
+          try {
+            await lifecycleService.destinationReservations.withDestinationGate(launch.binding.targetPath, async () => {
+              assertCurrent();
+              const gated = await operationStore.getNewServerLaunch(initialLaunch.job.jobId, epoch); assertCurrent();
+              if (!gated || gated.job.operationKind !== initialLaunch.job.operationKind ||
+                  !isDeepStrictEqual({ ...gated.binding, destinationDisposition: 'held' },
+                    { ...initialLaunch.binding, destinationDisposition: 'held' })) throw invalid();
+              // The gate may have waited behind another owner. Reprove every
+              // absence input here, but never run raw recovery/publication or
+              // a terminal getJob wait while holding the destination gate.
+              const gatedEvidence = await readLaunchRecoveryEvidence({ recoveryRegistry, launch: gated, assertCurrent,
+                terminalPublicationAvailable: Boolean(retryTerminalPublication), allowTerminalPublication: false });
+              queuedRegistration = await registrationState(gated); assertCurrent();
+              launch = await operationStore.getNewServerLaunch(initialLaunch.job.jobId, epoch); assertCurrent();
+              if (!launch || launch.job.operationKind !== gated.job.operationKind ||
+                  !isDeepStrictEqual({ ...launch.binding, destinationDisposition: 'held' },
+                    { ...gated.binding, destinationDisposition: 'held' })) throw invalid();
+              const revisionCurrent = isDeepStrictEqual(launch.recordRevision, gated.recordRevision);
+              const currentOwner = lifecycleService.hasActiveJob(launch.job.jobId);
+              const noGatedOwner = !currentOwner && lifecycleService.pendingNewServerAdmissions.size === 0 &&
+                lifecycleService.admittedTasks.size === 0;
+              const queuedIntact = launch.job.phase === 'queued' && !launch.job.cancellationRequested &&
+                launch.binding.destinationDisposition === 'held';
+              classification = classifyLaunchDestination({ ...launch, registrationState: queuedRegistration,
+                recoveryEvidence: { ...gatedEvidence, owned: currentOwner },
+                queuedProof: { ...proof, noCurrentOwner: noGatedOwner, cleanEvidence: gatedEvidence.cleanEvidence, revisionCurrent } });
+              if (!revisionCurrent || !queuedIntact) classification = { disposition: null, settlementStatus: 'support-required',
+                reason: 'conflicting-evidence', recoveryAvailable: false };
+              gatedEvidence.jobReconciliationAllowed = false;
+              classifications.set(launch.job.jobId, gatedEvidence);
+              if (!revisionCurrent || !queuedIntact || !noGatedOwner || !gatedEvidence.cleanEvidence ||
+                  queuedRegistration !== 'absent' || classification.disposition !== 'released') return;
+              assertCurrent();
+              await operationStore.closeInterruptedQueued(launch.job.jobId, { expectedInstanceId: launch.binding.instanceId,
+                expectedRecordRevision: launch.recordRevision }, epoch);
+              assertCurrent();
+              queuedClosed = true;
+            });
+            if (!queuedClosed) break;
+          } catch (error) {
+            assertCurrent();
+            const reread = await operationStore.getNewServerLaunch(launch.job.jobId, epoch); assertCurrent();
+            if (!reread || !isDeepStrictEqual({ ...reread.binding, destinationDisposition: 'held' },
+                { ...initialLaunch.binding, destinationDisposition: 'held' })) throw error;
+            if (reread.job.phase === 'failed' && reread.binding.destinationDisposition === 'released') {
+              try {
+                // Idempotent storage validation checks the complete prescribed
+                // progress/outcome pair, not just a phase or message string.
+                await lifecycleService.destinationReservations.withDestinationGate(reread.binding.targetPath, async () => {
+                  assertCurrent();
+                  await operationStore.closeInterruptedQueued(reread.job.jobId, { expectedInstanceId: reread.binding.instanceId,
+                    expectedRecordRevision: reread.recordRevision }, epoch);
+                  assertCurrent();
+                });
+                launch = reread;
+              } catch {
+                assertCurrent();
+                classification = { disposition: null, settlementStatus: 'support-required', reason: 'conflicting-evidence', recoveryAvailable: false }; break;
+              }
+            }
+            else if (attempt === 0 && reread.job.phase === 'queued' && reread.binding.destinationDisposition === 'held') continue;
+            else { classification = { disposition: null, settlementStatus: 'support-required', reason: 'conflicting-evidence', recoveryAvailable: false }; break; }
+          }
+          launch = await operationStore.getNewServerLaunch(launch.job.jobId, epoch); assertCurrent();
+          lifecycleService.destinationReservations.removeConfirmedJobHold({ jobId: launch.job.jobId,
+            instanceId: launch.binding.instanceId, disposition: 'released' });
+          classification = classifyLaunchDestination({ ...launch, registrationState: queuedRegistration });
+        } else {
+          try { await lifecycleService.settleJobDestination({ jobId: launch.job.jobId, disposition: classification.disposition }); }
+          catch { assertCurrent(); }
+          launch = await operationStore.getNewServerLaunch(launch.job.jobId, epoch); assertCurrent();
+          classification = classifyLaunchDestination({ ...launch, recoveryEvidence: classificationEvidence, registrationState: registration });
+        }
+      }
+      break;
+    }
+    settlements[launch.job.jobId] = classification;
+    lifecycleService.launchSettlements.set(launch.job.jobId, classification);
+  }
+  for (const job of jobs) {
+    if (!NEW_SERVER_OPERATION_KINDS.has(job.operationKind) || launches.some(launch => launch.job.jobId === job.jobId)) continue;
+    // Unknown v1 origin never inherits the new protocol from its JSON or from
+    // today's injected runtime. Missing legacy path alone creates no global block.
+    settlements[job.jobId] = { disposition: null, settlementStatus: 'support-required',
+      reason: job.phase === 'queued' ? 'legacy-origin-unproven' : 'missing-recovery-evidence', recoveryAvailable: false };
+    lifecycleService.launchSettlements.set(job.jobId, settlements[job.jobId]);
+  }
+  assertCurrent();
+  return { settlements, classifications, globalBlock: false };
+}
+
 module.exports = {
   isDurablyCommitted,
-  reconcileOperationStoreWithRecovery
+  reconcileOperationStoreWithRecovery,
+  reconcileNewServerLaunches,
+  readLaunchRecoveryEvidence,
+  completeRecoveryScan
 };

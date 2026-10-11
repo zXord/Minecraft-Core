@@ -680,6 +680,30 @@ test('rejected recovery create with proven clean absence releases its exact targ
   });
 });
 
+test('launch settlement unrecorded revalidation retains hold when older same-target recovery contradicts absence', async t => {
+  const creationError = new ModpackError('COMMIT_FAILED', 'injected pre-publication create failure');
+  await fixture(t, { recoveryCreateErrorBeforeRecord: creationError }).withLease(async context => {
+    context.recoveryRegistry.initialize = async () => ({ records: [], corrupt: [], globalBlock: false,
+      pendingTerminalPublications: [], blocks: [{ jobId: 'older-recovery', stableServerId: 'server-reserved' }] });
+    await assert.rejects(context.prepare(), { code: 'RECOVERY_REQUIRED' });
+    assert.equal(context.reservationReleaseCount, 0); assert.equal(fs.existsSync(context.targetPath), true);
+  });
+});
+
+test('launch settlement unrecorded runtime hands off only after original lease target handling without releasing metadata', async t => {
+  const creationError = new ModpackError('COMMIT_FAILED', 'injected pre-publication create failure');
+  await fixture(t, { recoveryCreateErrorBeforeRecord: creationError }).withLease(async context => {
+    let proofs = 0;
+    context.runtime.recordUnrecordedLaunchClosure = async ({ jobId, instanceId, targetPath }) => {
+      context.authority.coordinator.assertMutationLease(context.authority.lease, { instanceId, serverPath: targetPath }, jobId);
+      assert.equal(fs.existsSync(context.targetPath), false); proofs++; return true;
+    };
+    await assert.rejects(context.prepare(), error => error === creationError);
+    assert.equal(proofs, 1); assert.equal(context.reservationReleaseCount, 0);
+    assert.equal(context.recoveryRegistry.finishCalls, 0);
+  });
+});
+
 test('rejected recovery create without an integrity scan remains recovery required', async t => {
   await fixture(t, {
     recoveryCreateErrorBeforeRecord: new ModpackError('COMMIT_FAILED', 'injected pre-publication create failure'),
@@ -1485,6 +1509,49 @@ test('cleanup yields around tracking, transaction, and terminal recovery durabil
   ]);
   assert.equal(await context.recoveryRegistry.load('job-one'), null);
   assert.equal((await context.recoveryRegistry.loadHistory('job-one')).phase, 'completed');
+  });
+});
+
+for (const method of ['rollback', 'abandonCandidate']) test(`launch historical ${method} repeats only authenticated disposition bookkeeping`, async t => {
+  await fixture(t).withLease(async context => {
+    const { plan, resolved, lease } = await context.prepare();
+    let settlements = 0;
+    context.runtime.settleJobDestination = async request => {
+      assert.deepEqual(request, { jobId: 'job-one', disposition: 'released' });
+      assert.equal(await context.recoveryRegistry.load('job-one'), null);
+      assert.equal((await context.recoveryRegistry.loadHistory('job-one')).phase, 'failed');
+      settlements++;
+      if (settlements === 1) throw new Error('injected disposition failure after source closure');
+      return { binding: { destinationDisposition: 'released' } };
+    };
+    await assert.rejects(context.runtime[method]({ jobId: 'job-one', plan, resolved, lease, error: new Error('failed') }), /disposition failure/);
+    context.runtime.recoveryService.recoverWithLease = async () => assert.fail('historical replay must not recover source again');
+    context.runtime.recoveryService.failNewWithLease = async () => assert.fail('historical replay must not quarantine source again');
+    const replay = await context.runtime[method]({ jobId: 'job-one', plan, resolved, lease });
+    assert.equal(replay.resolved, true); assert.equal(settlements, 2);
+  });
+});
+
+test('launch historical cleanup retries disposition after archived success without registration or cleanup replay', async t => {
+  await fixture(t, { useRealNewTransaction: true }).withLease(async context => {
+    const { plan, resolved, lease } = await context.prepare();
+    await context.runtime.buildCandidate({ jobId: 'job-one', operationKind: 'install-new', plan,
+      choices: { acceptEula: true, startAfterInstall: false, restorePointId: null }, restorePoint: null, resolved, lease });
+    await context.runtime.publishCandidate({ jobId: 'job-one', plan, resolved, lease });
+    await context.runtime.registerPublishedInstance({ jobId: 'job-one', plan, resolved, lease });
+    await context.runtime.validateLive({ jobId: 'job-one', operationKind: 'install-new', plan, resolved, running: false, lease });
+    await context.runtime.persistOutcome({ jobId: 'job-one', operationKind: 'install-new', plan, resolved, restorePoint: null });
+    let settlements = 0;
+    context.runtime.settleJobDestination = async request => {
+      assert.equal(request.disposition, 'consumed'); assert.equal(await context.recoveryRegistry.load('job-one'), null);
+      settlements++; if (settlements === 1) throw new Error('injected disposition failure');
+      return { binding: { destinationDisposition: 'consumed' } };
+    };
+    await assert.rejects(context.runtime.cleanup({ jobId: 'job-one', operationKind: 'install-new', plan, resolved, lease }), /disposition failure/);
+    context.runtime.releaseTrackingReconciler.reconcile = async () => assert.fail('historical replay must not redo tracking');
+    context.runtime.cleanupCommittedTransactionFn = async () => assert.fail('historical replay must not cleanup source');
+    const replay = await context.runtime.cleanup({ jobId: 'job-one', operationKind: 'install-new', plan, resolved, lease });
+    assert.equal(replay.alreadyCleaned, true); assert.equal(settlements, 2);
   });
 });
 

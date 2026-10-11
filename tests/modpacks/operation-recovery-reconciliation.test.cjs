@@ -6,6 +6,24 @@ const {
   reconcileOperationStoreWithRecovery
 } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
 
+test('launch queued gated evidence reproof reads pending history without invoking either publication authority', async () => {
+  const { readLaunchRecoveryEvidence } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+  const record = recovered('gated-history');
+  const launch = { job: job(record.jobId, 'queued'), binding: {
+    instanceId: 'server-one', targetPath: 'c:\\private\\server-one', destinationDisposition: 'held' } };
+  let rawCalls = 0; let registryCalls = 0;
+  const options = { launch, retryTerminalPublication: async () => { rawCalls++; }, recoveryRegistry: {
+    async initialize() { return { records: [], corrupt: [], blocks: [], globalBlock: false, pendingTerminalPublications: [record] }; },
+    async load() { return null; }, async loadHistory() { return record; },
+    async retryTerminalPublication() { registryCalls++; return { record }; }
+  } };
+  const readOnly = await readLaunchRecoveryEvidence({ ...options, allowTerminalPublication: false });
+  assert.equal(readOnly.cleanEvidence, false); assert.equal(readOnly.terminalPublished, false);
+  assert.equal(readOnly.pendingTerminalPublication, true); assert.equal(rawCalls, 0); assert.equal(registryCalls, 0);
+  const authenticated = await readLaunchRecoveryEvidence(options);
+  assert.equal(authenticated.terminalPublished, true); assert.equal(rawCalls, 1); assert.equal(registryCalls, 1);
+});
+
 class MemoryOperationStore {
   constructor(records) {
     this.records = new Map(records.map(record => [record.jobId, structuredClone(record)]));
@@ -43,10 +61,12 @@ function recovered(jobId, overrides = {}) {
     jobId,
     operationKind: 'install',
     phase: 'completed',
+    swapStep: 'candidate-published',
+    directoryIdentities: { target: null, candidate: null, rollback: null, failed: null },
     target: { kind: 'new', stableServerId: 'server-one', path: 'C:\\private\\server-one' },
     outcome: {
       revisionEvent: { eventId: `revision:${jobId}`, published: true },
-      releaseTracking: { status: 'applied' }
+      publication: { state: 'published' }, registration: { instanceId: 'server-one', complete: true }
     },
     ...structuredClone(overrides)
   };
@@ -57,6 +77,9 @@ function recoveredFailure(jobId, overrides = {}) {
     jobId,
     operationKind: 'upgrade',
     phase: 'failed',
+    swapStep: 'live-moved',
+    directoryIdentities: { target: { volumeSerial: '1', fileId: 'aa' }, candidate: null,
+      rollback: { volumeSerial: '1', fileId: 'aa' }, failed: null },
     target: { kind: 'existing', stableServerId: 'server-one', path: 'C:\\private\\server-one' },
     outcome: {
       recovery: { action: 'between-renames-restored', operationId: jobId }
@@ -64,6 +87,21 @@ function recoveredFailure(jobId, overrides = {}) {
     ...structuredClone(overrides)
   };
 }
+
+test('launch matrix reconciliation accepts only full restrictive revalidation-aborted topology', async () => {
+  for (const valid of [true, false]) {
+    const current = job('revalidation-job', 'preflight'); const store = new MemoryOperationStore([current]);
+    const historical = { jobId: current.jobId, operationKind: 'install', phase: 'failed', swapStep: 'none',
+      target: { kind: 'new', stableServerId: current.serverId, path: 'C:\\private\\server-one' },
+      restoreCreation: valid ? null : {}, restorePoint: null,
+      directoryIdentities: { target: null, candidate: null, rollback: null, failed: null },
+      outcome: { recovery: { action: 'revalidation-aborted' } } };
+    await reconcileOperationStoreWithRecovery({ operationStore: store, jobs: [current], recoveryRegistry: {
+      async load() { return null; }, async loadHistory() { return historical; }
+    } });
+    assert.equal(store.records.get(current.jobId).phase, valid ? 'failed' : 'preflight');
+  }
+});
 
 test('startup completes publishing through cleanup-pending jobs from authoritative completed recovery history', async () => {
   const phases = ['publishing', 'published', 'registering', 'starting', 'validating-live',
@@ -279,6 +317,7 @@ test('startup marks a pre-commit operation failed after automatic candidate clea
     async load() { return null; },
     async loadHistory() {
       return recoveredFailure('job-crashed-staging', {
+        swapStep: 'none',
         outcome: { recovery: { action: 'pre-swap-restored', operationId: 'job-crashed-staging' } }
       });
     }
@@ -306,6 +345,7 @@ test('reviewed new-server recovery replaces a stale terminal recovery-required j
       return recovered('job-reviewed-new', {
         operationKind: 'install',
         phase: 'failed',
+        swapStep: 'new-prepared',
         outcome: { recovery: { action: 'pre-publication-cleanup', operationId: 'job-reviewed-new' } }
       });
     }
@@ -333,6 +373,7 @@ test('startup reconciliation carries a closed publication failure diagnostic fro
       return recovered('job-reviewed-diagnostic', {
         operationKind: 'install',
         phase: 'failed',
+        swapStep: 'new-prepared',
         outcome: {
           recovery: { action: 'pre-publication-cleanup', operationId: 'job-reviewed-diagnostic' },
           failure: { stage: 'durable-move', category: 'access-denied' }
@@ -358,6 +399,7 @@ test('startup reconciliation carries a closed candidate boot diagnostic from dur
       return recovered('job-reviewed-candidate-boot', {
         operationKind: 'install',
         phase: 'failed',
+        swapStep: 'new-prepared',
         outcome: {
           recovery: { action: 'pre-publication-cleanup', operationId: 'job-reviewed-candidate-boot' },
           failure: {
@@ -386,6 +428,7 @@ test('startup reconciliation drops malformed recovery diagnostics without exposi
       return recovered('job-reviewed-malformed', {
         operationKind: 'install',
         phase: 'failed',
+        swapStep: 'new-prepared',
         outcome: {
           recovery: { action: 'pre-publication-cleanup', operationId: 'job-reviewed-malformed' },
           failure: {
@@ -414,6 +457,8 @@ test('reviewed new-server health recovery reports that the failed published serv
       return recovered('job-reviewed-new-health', {
         operationKind: 'install',
         phase: 'failed',
+        swapStep: 'failed-canonical-moved',
+        directoryIdentities: { target: null, candidate: null, rollback: null, failed: { volumeSerial: '1', fileId: 'bb' } },
         outcome: { recovery: { action: 'new-health-failed', operationId: 'job-reviewed-new-health' } }
       });
     }
@@ -489,6 +534,9 @@ test('automatic rollback remains terminal when recovery outcome action issuance 
     async loadHistory() {
       return recoveredFailure('job-recovered-actions', {
         phase: 'rolled-back',
+        swapStep: 'rollback-restored',
+        directoryIdentities: { target: { volumeSerial: '1', fileId: 'aa' }, candidate: null,
+          rollback: { volumeSerial: '1', fileId: 'aa' }, failed: { volumeSerial: '1', fileId: 'bb' } },
         outcome: { recovery: { action: 'rollback-restored', operationId: 'job-recovered-actions' } }
       });
     }

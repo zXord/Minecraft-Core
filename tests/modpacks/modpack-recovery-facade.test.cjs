@@ -269,6 +269,22 @@ test('reports a durable recovery as resolved when operation-state reconciliation
   assert.equal(result.operationStateReconciled, false);
 });
 
+test('launch historical archived recovery callback failure is honest and never repeats raw recovery', async () => {
+  let context;
+  context = fixture([record()], { onResolved: async () => {
+    // Raw recovery has archived its final record before disposition CAS fails.
+    context.setActive([]);
+    throw new Error('launch metadata publication unavailable');
+  } });
+  const recoveryId = (await context.facade.listRecovery()).items[0].recoveryId;
+  const result = await context.facade.recover({ recoveryId, actionId: 'retry-cleanup' });
+  assert.equal(result.resolved, true); assert.equal(result.operationStateReconciled, false);
+  assert.deepEqual(await context.facade.listRecovery(), { items: [] });
+  await assert.rejects(context.facade.recover({ recoveryId, actionId: 'retry-cleanup' }), { code: 'PLAN_STALE' });
+  assert.equal(context.calls.length, 1);
+  assert.doesNotMatch(JSON.stringify(result), /path|launch metadata|job-internal|Private Pack/i);
+});
+
 test('rejects stale IDs unknown actions and actions that became invalid without invoking recovery', async () => {
   const value = record();
   const context = fixture([value]);

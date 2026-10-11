@@ -5,7 +5,8 @@ const { markStartupTrace } = require('../utils/startup-trace.cjs');
 const { ModpackLifecycleService } = require('../services/modpack-lifecycle/modpack-lifecycle-service.cjs');
 const { ModpackRecoveryFacade } = require('../services/modpack-lifecycle/modpack-recovery-facade.cjs');
 const { OperationEventStore } = require('../services/modpack-lifecycle/operation-event-store.cjs');
-const { reconcileOperationStoreWithRecovery } = require('../services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+const { reconcileOperationStoreWithRecovery, reconcileNewServerLaunches } = require('../services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+const { classifyRecoveryTerminalClosure, newServerRegistrationState: registrationStateForInstances } = require('../services/modpack-lifecycle/new-server-launch-closure.cjs');
 const { OperationStore } = require('../services/modpack-lifecycle/operation-store.cjs');
 const { OutcomeActionService } = require('../services/modpack-lifecycle/outcome-action-service.cjs');
 const { PlanRegistry } = require('../services/modpack-lifecycle/plan-registry.cjs');
@@ -109,47 +110,37 @@ function canExposePendingNewServer(store, record) {
 
 function newServerRegistrationState(store, record) {
   try {
-    const instances = store.get('instances');
-    const stableServerId = record?.target?.stableServerId;
-    const targetPath = record?.target?.path;
-    if (!Array.isArray(instances) || typeof stableServerId !== 'string' ||
-        typeof targetPath !== 'string' || !path.isAbsolute(targetPath)) return 'conflict';
-    const targetPathKey = path.resolve(targetPath).normalize('NFC').toLocaleLowerCase('en-US');
-    const idMatches = [];
-    const pathMatches = [];
-    for (const instance of instances) {
-      if (!instance || typeof instance !== 'object' || Array.isArray(instance)) continue;
-      if (instance.id === stableServerId) idMatches.push(instance);
-      if (typeof instance.path === 'string' && path.isAbsolute(instance.path) &&
-          path.resolve(instance.path).normalize('NFC').toLocaleLowerCase('en-US') === targetPathKey) {
-        pathMatches.push(instance);
-      }
-    }
-    if (idMatches.length === 0 && pathMatches.length === 0) return 'absent';
-    if (idMatches.length === 1 && pathMatches.length === 1 && idMatches[0] === pathMatches[0] &&
-        idMatches[0].type === 'server') return 'registered';
-    return 'conflict';
+    return registrationStateForInstances(store.get('instances'), record?.target);
   } catch {
     return 'conflict';
   }
 }
 
-function finalizeResolvedNewServerReservation({ destinationReservations, store, record, result }) {
+async function finalizeResolvedNewServerReservation({ destinationReservations, store, recoveryRegistry, lifecycleService, record }) {
   if (record?.target?.kind !== 'new') return true;
+  if (lifecycleService.newServerLaunchIds.has(record.jobId)) {
+    const published = await recoveryRegistry.retryTerminalPublication(record.jobId, {
+      expectedTarget: record.target, expectedOperationKind: record.operationKind });
+    const closure = classifyRecoveryTerminalClosure(published.record);
+    if (!closure) throw invalid();
+    await lifecycleService.settleJobDestination({ jobId: record.jobId, disposition: closure === 'completed' ? 'consumed' : 'released' });
+    return true;
+  }
   const instanceId = record.target.stableServerId;
   const targetPath = record.target.path;
   const reservation = destinationReservations.resolve(instanceId);
   if (!reservation) return true;
   const registrationState = newServerRegistrationState(store, record);
-  if (result?.action === 'new-publication-completed' ||
-      (result?.action === 'already-finished' && registrationState === 'registered')) {
+  const published = await recoveryRegistry.retryTerminalPublication(record.jobId, {
+    expectedTarget: record.target, expectedOperationKind: record.operationKind });
+  const closure = classifyRecoveryTerminalClosure(published.record);
+  if (closure === 'completed') {
     if (registrationState !== 'registered' || destinationReservations.consume(instanceId, targetPath) !== true) {
       throw invalid();
     }
     return true;
   }
-  if (['pre-publication-cleanup', 'new-health-failed'].includes(result?.action) ||
-      (result?.action === 'already-finished' && registrationState === 'absent')) {
+  if (closure === 'abandoned') {
     if (registrationState !== 'absent' || destinationReservations.release(instanceId) !== true) throw invalid();
     return true;
   }
@@ -520,9 +511,11 @@ async function createProductionModpackComposition(input = {}) {
         return lifecycleService.hasActiveJob(jobId);
       },
       async onResolved(jobId, record, result) {
-        finalizeResolvedNewServerReservation({
+        await finalizeResolvedNewServerReservation({
           destinationReservations: destinationReservationService,
           store,
+          recoveryRegistry,
+          lifecycleService,
           record,
           result
         });
@@ -556,6 +549,8 @@ async function createProductionModpackComposition(input = {}) {
       candidatePreparer,
       coordinator,
       destinationReservations: destinationReservationService,
+      settleJobDestination: request => lifecycleService.settleJobDestination(request),
+      recordUnrecordedLaunchClosure: request => lifecycleService.recordUnrecordedLaunchClosure(request),
       durableFsFactory,
       fsApi: fsSync,
       instanceResolver: compositeInstanceResolver,
@@ -599,6 +594,10 @@ async function createProductionModpackComposition(input = {}) {
       assertAdmission,
       destinationReservations: destinationReservationService,
       launchOwner,
+      launchRecoveryRegistry: recoveryRegistry,
+      launchTerminalPublicationAvailable: typeof rawRecoveryService.retryTerminalPublication === 'function',
+      launchRegistrationState: launch => newServerRegistrationState(store, { target: {
+        stableServerId: launch.job.serverId, path: launch.binding.targetPath } }),
       clock: nowMs,
       workspaceRegistry
     });
@@ -737,8 +736,6 @@ async function createProductionModpackComposition(input = {}) {
         initializationPromise = (async () => {
         markStartupTrace('composition:operation-store-init:start');
         const jobs = await operationStore.initialize();
-        // All dispositions retain their incarnation; this is not hold reconstruction
-        // or startup closure (those remain the later launch-classification slice).
         const launches = await operationStore.listNewServerLaunchBindings(ownerEpoch);
         for (const launch of launches) destinationReservationService.retainInstanceId(launch.binding.instanceId);
         markStartupTrace('composition:operation-store-init:complete');
@@ -751,13 +748,18 @@ async function createProductionModpackComposition(input = {}) {
         markStartupTrace('composition:client-packs-init:start');
         await clientPacks.initialize();
         markStartupTrace('composition:client-packs-init:complete');
+        const launchStartup = await reconcileNewServerLaunches({ operationStore, recoveryRegistry, lifecycleService,
+          launchOwner, jobs, launches, registrationState: lifecycleService.launchRegistrationState,
+          retryTerminalPublication: typeof rawRecoveryService.retryTerminalPublication === 'function'
+            ? record => rawRecoveryService.retryTerminalPublication(record) : null });
         if (typeof recoveryRegistry.loadHistory === 'function') {
           markStartupTrace('composition:recovery-history-reconcile:start');
           await reconcileOperationStoreWithRecovery({
             operationStore,
             recoveryRegistry,
             jobs,
-            outcomeActionIssuer: lifecycleOutcomeActionIssuer
+            outcomeActionIssuer: lifecycleOutcomeActionIssuer,
+            launchClassifications: launchStartup.classifications
           });
           markStartupTrace('composition:recovery-history-reconcile:complete');
         }

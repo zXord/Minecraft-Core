@@ -12,6 +12,8 @@ const { runtimeDiagnosticFromError } = require('./server-runtime-writer-authorit
 const { validatePublicJob } = require('./operation-store.cjs');
 const { isDeepStrictEqual } = require('node:util');
 const { normalizeRecoveryTargetPath } = require('./recovery-target-envelope.cjs');
+const { classifyLaunchDestination, isDestinationRecoveryClosure } = require('./new-server-launch-closure.cjs');
+const { readLaunchRecoveryEvidence } = require('./operation-recovery-reconciler.cjs');
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SOURCE_AUTHORITY_KEY = /(?:path|directory|destination|command|argument|executable)/i;
@@ -770,6 +772,7 @@ function assertResolvedInstance(value, expectedInstanceId) {
 
 class ModpackLifecycleService {
   #planResults = new WeakMap();
+  #unrecordedLaunchClosures = new Map();
   constructor({
     sourceResolver,
     artifactDownloader,
@@ -788,6 +791,9 @@ class ModpackLifecycleService {
     assertAdmission = () => {},
     destinationReservations = null,
     launchOwner = null,
+    launchRecoveryRegistry = null,
+    launchRegistrationState = null,
+    launchTerminalPublicationAvailable = false,
     allowNewServerLaunchBindings = false,
     clock = () => Date.now(),
     workspaceRegistry = inspectionLoader?.workspaceRegistry ?? planRegistry?.workspaceRegistry ?? null,
@@ -838,10 +844,15 @@ class ModpackLifecycleService {
     this.admittedTasks = new Set();
     this.destinationReservations = destinationReservations;
     this.launchOwner = launchOwner;
+    this.launchRecoveryRegistry = launchRecoveryRegistry;
+    this.launchRegistrationState = launchRegistrationState;
+    this.launchTerminalPublicationAvailable = launchTerminalPublicationAvailable;
     this.allowNewServerLaunchBindings = allowNewServerLaunchBindings;
     this.launchClock = clock;
     this.localAdmissionGeneration = 0;
     this.pendingNewServerAdmissions = new Map();
+    this.newServerLaunchIds = new Set();
+    this.launchSettlements = new Map();
     if (destinationReservations) destinationReservations.beforeUnlaunchedRelease = instanceId => {
       this.localAdmissionGeneration++;
       return this.planRegistry.invalidateReservation(instanceId);
@@ -849,6 +860,93 @@ class ModpackLifecycleService {
   }
 
   get admissionGeneration() { return this.localAdmissionGeneration + (this.planRegistry.fenceGeneration ?? 0); }
+
+  // Validated startup inventory/live publication only; not a public catalogue or
+  // evidence cache. Every settlement rereads durable bytes and recovery authority.
+  rememberNewServerLaunch({ job, binding }) {
+    if (job.serverId !== binding.instanceId) throw invalid();
+    this.newServerLaunchIds.add(job.jobId);
+  }
+
+  async recordUnrecordedLaunchClosure({ jobId, instanceId, targetPath }) {
+    if (!this.newServerLaunchIds.has(jobId)) return false;
+    const epoch = this.launchOwner.epoch;
+    this.launchOwner.assertCurrent(epoch, { allowClosing: true });
+    const launch = await this.operationStore.getNewServerLaunch(jobId, epoch);
+    this.launchOwner.assertCurrent(epoch, { allowClosing: true });
+    if (!launch || launch.binding.instanceId !== instanceId ||
+        launch.binding.targetPath !== normalizeRecoveryTargetPath(targetPath)) throw recoveryRequired();
+    this.#unrecordedLaunchClosures.set(jobId, { epoch, binding: launch.binding });
+    return true;
+  }
+
+  settleJobDestination({ jobId, disposition, terminalUpdate } = {}) {
+    if (!this.newServerLaunchIds.has(jobId)) return Promise.resolve(null); // known v1 fallback only
+    const epoch = this.launchOwner.epoch;
+    this.launchOwner.assertCurrent(epoch, { allowClosing: true });
+    return this.#trackAdmittedTask(this.#settleJobDestination({ jobId, disposition, terminalUpdate, epoch }));
+  }
+
+  async #settleJobDestination({ jobId, disposition, terminalUpdate, epoch }) {
+    if (!['released', 'consumed'].includes(disposition) || !this.launchRecoveryRegistry ||
+        typeof this.launchRegistrationState !== 'function') throw recoveryRequired();
+    const assertCurrent = () => this.launchOwner.assertCurrent(epoch, { allowClosing: true });
+    let launch = await this.operationStore.getNewServerLaunch(jobId, epoch); assertCurrent();
+    if (!launch) throw recoveryRequired();
+    const initial = launch;
+    return this.destinationReservations.withDestinationGate(initial.binding.targetPath, async () => {
+      let lastError;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        assertCurrent();
+        launch = await this.operationStore.getNewServerLaunch(jobId, epoch); assertCurrent();
+        if (!launch || launch.job.operationKind !== initial.job.operationKind ||
+            !isDeepStrictEqual({ ...launch.binding, destinationDisposition: 'held' },
+              { ...initial.binding, destinationDisposition: 'held' })) throw recoveryRequired();
+        const evidence = await readLaunchRecoveryEvidence({ recoveryRegistry: this.launchRecoveryRegistry, launch, assertCurrent,
+          terminalPublicationAvailable: this.launchTerminalPublicationAvailable });
+        const registrationState = await this.launchRegistrationState(launch); assertCurrent();
+        const live = this.#unrecordedLaunchClosures.get(jobId);
+        const liveClosure = terminalUpdate && disposition === 'released' && live?.epoch === epoch &&
+          isDeepStrictEqual({ ...launch.binding, destinationDisposition: 'held' }, { ...live.binding, destinationDisposition: 'held' }) &&
+          evidence.cleanEvidence && registrationState === 'absent';
+        const destinationRecovery = isDestinationRecoveryClosure(launch.job, evidence, registrationState);
+        // The older recovery remains a restriction, not this attempt's closure.
+        const classification = classifyLaunchDestination({ ...launch, registrationState,
+          recoveryEvidence: destinationRecovery ? { destinationRecovery: true } : evidence });
+        if (liveClosure) Object.assign(classification, { disposition: 'released', settlementStatus: 'repair-pending',
+          reason: 'settlement-repair-required', recoveryAvailable: false });
+        this.launchSettlements.set(jobId, classification);
+        if (classification.disposition !== disposition || (terminalUpdate && !liveClosure &&
+            launch.binding.destinationDisposition === 'held')) throw recoveryRequired();
+        assertCurrent();
+        try {
+          await this.operationStore.settleNewServerDestination(jobId, { expectedInstanceId: launch.binding.instanceId,
+            expectedRecordRevision: launch.recordRevision, nextDisposition: disposition, ...(terminalUpdate ? { terminalUpdate } : {}) }, epoch);
+        } catch (error) {
+          lastError = error; assertCurrent();
+          const reread = await this.operationStore.getNewServerLaunch(jobId, epoch); assertCurrent();
+          if (!reread || !isDeepStrictEqual({ ...reread.binding, destinationDisposition: 'held' },
+              { ...initial.binding, destinationDisposition: 'held' })) throw recoveryRequired(error);
+          if (reread.binding.destinationDisposition === disposition) {
+            // Idempotent storage validation proves the exact terminal pair too.
+            await this.operationStore.settleNewServerDestination(jobId, { expectedInstanceId: reread.binding.instanceId,
+              expectedRecordRevision: reread.recordRevision, nextDisposition: disposition, ...(terminalUpdate ? { terminalUpdate } : {}) }, epoch);
+          } else if (attempt === 0 && reread.binding.destinationDisposition === 'held') continue;
+          else throw recoveryRequired(error);
+        }
+        const confirmed = await this.operationStore.getNewServerLaunch(jobId, epoch); assertCurrent();
+        if (!confirmed || confirmed.binding.destinationDisposition !== disposition ||
+            !isDeepStrictEqual({ ...confirmed.binding, destinationDisposition: 'held' },
+              { ...initial.binding, destinationDisposition: 'held' })) throw recoveryRequired(lastError);
+        this.destinationReservations.removeConfirmedJobHold({ jobId, instanceId: confirmed.binding.instanceId, disposition });
+        this.#unrecordedLaunchClosures.delete(jobId);
+        this.launchSettlements.set(jobId, classifyLaunchDestination({ ...confirmed, registrationState,
+          recoveryEvidence: { owned: this.hasActiveJob(jobId) } }));
+        return confirmed;
+      }
+      throw recoveryRequired(lastError);
+    });
+  }
 
   closeAdmission() { if (!this.admissionClosing) { this.admissionClosing = true; this.localAdmissionGeneration++; } }
 
@@ -1377,6 +1475,14 @@ class ModpackLifecycleService {
     return this.runAdmittedWork(async () => {
       const reservations = this.destinationReservations;
       if (!reservations) throw invalid();
+      const hold = [...reservations.jobHolds.values()].find(item => item.binding.instanceId === instanceId);
+      if (hold && this.newServerLaunchIds.has(hold.jobId)) {
+        // getJob waits for terminal settlement, which may need this same path
+        // gate. Hydrate first, never while holding the destination gate.
+        const job = await this.getJob(hold.jobId);
+        if (job?.phase !== 'failed' || job.outcome?.failureReason !== 'destination-recovery') return false;
+        return Boolean(await this.settleJobDestination({ jobId: hold.jobId, disposition: 'released' }));
+      }
       const record = reservations.peek(instanceId);
       if (!record || reservations.isDestinationHeld(instanceId)) return false;
       return reservations.withDestinationGate(record.targetPath, async () => {
@@ -1450,6 +1556,7 @@ class ModpackLifecycleService {
         }
         // Once any durable job is known, a later handoff/owner error cannot run no-job cleanup.
         retain = true;
+        this.rememberNewServerLaunch({ job: queued, binding });
         this.launchOwner.assertCurrent(epoch, { allowClosing: true });
         reservations.holdJobDestination({ jobId: claimed.jobId, binding });
         reservations.removeAdmissionHold(instanceId, planId);
@@ -1713,6 +1820,15 @@ class ModpackLifecycleService {
 
   async #tryPublishTerminal(resolution) {
     if (!resolution || resolution.kind !== TERMINAL_RESOLUTION_KIND) throw invalid();
+    if (this.#unrecordedLaunchClosures.has(resolution.jobId) && ['failed', 'cancelled'].includes(resolution.request.nextPhase)) {
+      // Settlement owns the single complete-reproof retry. Do not multiply it
+      // with the generic terminal publisher's retry loop or accept phase alone.
+      try {
+        const settled = await this.settleJobDestination({ jobId: resolution.jobId,
+          disposition: 'released', terminalUpdate: resolution.request });
+        return { job: settled.job, error: null };
+      } catch (error) { return { job: null, error }; }
+    }
     let lastError = null;
     let latest = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {

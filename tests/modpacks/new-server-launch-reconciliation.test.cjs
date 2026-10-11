@@ -13,6 +13,88 @@ const { ModpackError, deepFreeze } = require('../../electron/services/modpacks/e
 
 function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
 
+function closureRecord(overrides = {}) {
+  return { jobId: 'launch-job', operationKind: 'install', phase: 'failed', swapStep: 'none',
+    target: { kind: 'new', stableServerId: 'launch-server', path: 'C:\\LaunchFixture\\Pack' },
+    restoreCreation: null, restorePoint: null,
+    directoryIdentities: { target: null, candidate: null, rollback: null, failed: null },
+    outcome: { recovery: { action: 'revalidation-aborted' } }, ...overrides };
+}
+
+test('launch matrix authentic closure predicates reject incomplete revalidation and accept exact topology', () => {
+  const { classifyRecoveryTerminalClosure: classify } = require('../../electron/services/modpack-lifecycle/new-server-launch-closure.cjs');
+  assert.equal(classify(closureRecord()), 'abandoned');
+  for (const changed of [ { restoreCreation: {} }, { restorePoint: {} }, { swapStep: 'new-prepared' },
+    { directoryIdentities: {} }, { outcome: { recovery: { action: 'revalidation-aborted', operationId: 'other' } } },
+    { outcome: { recovery: { action: 'revalidation-aborted' }, liveMutationAuthorized: true } },
+    { outcome: { recovery: { action: 'revalidation-aborted' }, registration: {} } } ]) {
+    assert.equal(classify(closureRecord(changed)), null);
+  }
+  for (const record of [null, {}, { phase: 'failed' }]) assert.equal(classify(record), null);
+  assert.equal(classify(closureRecord({ swapStep: 'new-prepared', outcome: {
+    recovery: { action: 'pre-publication-cleanup', operationId: 'launch-job' } } })), 'abandoned');
+  assert.equal(classify(closureRecord({ phase: 'completed', swapStep: 'candidate-published', outcome: {
+    publication: { state: 'published' }, registration: { complete: true, instanceId: 'launch-server' } } })), 'completed');
+});
+
+test('launch matrix destination projection separates safe closure from confirmed disposition and actual actions', () => {
+  const { classifyLaunchDestination: classify } = require('../../electron/services/modpack-lifecycle/new-server-launch-closure.cjs');
+  const job = { jobId: 'launch-job', operationKind: 'install-new', serverId: 'launch-server', phase: 'failed' };
+  const binding = { instanceId: 'launch-server', targetPath: 'c:\\launchfixture\\pack', destinationDisposition: 'held' };
+  const closed = { record: closureRecord(), terminalPublished: true };
+  const cases = [
+    [{ recoveryEvidence: closed, registrationState: 'absent' }, 'released', 'repair-pending', 'settlement-repair-required', false],
+    [{ recoveryEvidence: closed, registrationState: 'registered' }, null, 'support-required', 'conflicting-evidence', false],
+    [{ recoveryEvidence: { record: closureRecord(), terminalPublished: false } }, null, 'support-required', 'pending-terminal-publication', false],
+    [{ recoveryEvidence: { pendingTerminalPublication: true, recoveryAvailable: true } }, null, 'recovery-required', 'pending-terminal-publication', true],
+    [{ recoveryEvidence: { active: true, recoveryAvailable: true } }, null, 'recovery-required', 'conflicting-evidence', true],
+    [{ recoveryEvidence: { corrupt: true } }, null, 'support-required', 'invalid-durable-evidence', false],
+    [{}, null, 'support-required', 'missing-recovery-evidence', false],
+    [{ recoveryEvidence: { owned: true } }, null, 'active', undefined, false],
+    [{ binding: { ...binding, destinationDisposition: 'released' } }, 'released', 'settled', undefined, false],
+    [{ binding: { ...binding, destinationDisposition: 'released' }, recoveryEvidence: { owned: true } }, 'released', 'active', undefined, false],
+    [{ binding: { ...binding, destinationDisposition: 'consumed' }, recoveryEvidence: { owned: true } }, 'consumed', 'active', undefined, false],
+    [{ binding: { ...binding, destinationDisposition: 'consumed' }, recoveryEvidence: closed, registrationState: 'absent' }, null, 'support-required', 'conflicting-evidence', false]
+  ];
+  for (const [change, disposition, settlementStatus, reason, recoveryAvailable] of cases) {
+    assert.deepEqual(classify({ job, binding, registrationState: 'absent', ...change }), {
+      disposition, settlementStatus, ...(reason ? { reason } : {}), recoveryAvailable });
+  }
+});
+
+test('launch matrix registration requires the same unique server object for ID and canonical path', () => {
+  const { newServerRegistrationState: classify } = require('../../electron/services/modpack-lifecycle/new-server-launch-closure.cjs');
+  const target = closureRecord().target;
+  const server = { id: target.stableServerId, type: 'server', path: target.path.toLowerCase() };
+  assert.equal(classify([server], target), 'registered');
+  assert.equal(classify([], target), 'absent');
+  for (const instances of [null, [server, { ...server }], [{ ...server, type: 'client' }],
+    [{ ...server, path: 'C:\\Other' }, { ...server, id: 'other' }]]) assert.equal(classify(instances, target), 'conflict');
+});
+
+test('launch matrix closure topology and identity predicates reject partial identities', () => {
+  const { classifyRecoveryTerminalClosure: classify } = require('../../electron/services/modpack-lifecycle/new-server-launch-closure.cjs');
+  const identity = { volumeSerial: 'aa', fileId: 'bb' };
+  const existing = closureRecord({ target: { kind: 'existing', stableServerId: 'launch-server', path: 'C:\\LaunchFixture\\Pack' },
+    swapStep: 'live-moved', directoryIdentities: { target: identity, candidate: null, rollback: identity, failed: null },
+    outcome: { recovery: { action: 'between-renames-restored', operationId: 'launch-job' } } });
+  assert.equal(classify(existing), 'abandoned');
+  assert.equal(classify({ ...existing, phase: 'rolled-back', swapStep: 'rollback-restored',
+    directoryIdentities: { ...existing.directoryIdentities, failed: identity },
+    outcome: { recovery: { action: 'rollback-restored', operationId: 'launch-job' } } }), 'rolled-back');
+  for (const changed of [{ target: {}, rollback: {} }, { rollback: { ...identity, fileId: 'cc' } }, { failed: identity }]) {
+    assert.equal(classify({ ...existing, directoryIdentities: { ...existing.directoryIdentities, ...changed } }), null);
+  }
+  const health = closureRecord({ swapStep: 'failed-canonical-moved',
+    directoryIdentities: { target: null, candidate: null, rollback: null, failed: identity },
+    outcome: { recovery: { action: 'new-health-failed', operationId: 'launch-job' } } });
+  assert.equal(classify(health), 'abandoned');
+  for (const failed of [null, {}, { fileId: 'bb' }]) assert.equal(classify({ ...health,
+    directoryIdentities: { ...health.directoryIdentities, failed } }), null);
+  assert.equal(classify({ ...health, swapStep: 'candidate-published' }), null);
+  assert.equal(classify({ ...health, outcome: { recovery: { action: 'new-health-failed', operationId: 'other' } } }), null);
+});
+
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'modpack-launch-task2-'));
   let id = 0;
@@ -66,6 +148,386 @@ async function fixture(t) {
   return { service, plans, reservations, store, durableFs, owner, plan, reviewedPlan, workspace, root, runtimeGate,
     get executions() { return executions; }, advance(ms) { now += ms; }, loseOwner() { current = false; } };
 }
+
+async function seedLaunch(f) {
+  const reserved = await f.reservations.reserveWithNativeDialog({});
+  const request = await f.plan(reserved.instanceId);
+  const privateReservation = f.reservations.resolve(reserved.instanceId);
+  const job = await f.store.create({ jobId: 'launch-startup-job', operationKind: 'install-new', serverId: reserved.instanceId,
+    planFingerprint: request.planFingerprint, launchBinding: { planId: request.planId, planFingerprint: request.planFingerprint,
+      instanceId: reserved.instanceId, targetPath: privateReservation.targetPath, capturedReservation: privateReservation.reservation,
+      displayName: privateReservation.displayName, destinationDisposition: 'held' } }, f.owner.epoch);
+  return { job, launch: await f.store.getNewServerLaunch(job.jobId, f.owner.epoch) };
+}
+
+function cleanRecoveryRegistry() {
+  return { async initialize() { return { records: [], corrupt: [], blocks: [], globalBlock: false, pendingTerminalPublications: [] }; },
+    async load() { return null; }, async loadHistory() { return null; } };
+}
+
+async function recordedAbandonment(f, launch) {
+  const { fixtureRegistry } = require('./runtime-authority-fixture.cjs');
+  const registry = fixtureRegistry(f.root); await registry.ready;
+  await registry.create({ schemaVersion: 2, sequence: 0, jobId: launch.job.jobId, operationKind: 'install',
+    target: { kind: 'new', stableServerId: launch.job.serverId, path: launch.binding.targetPath },
+    candidatePath: null, rollbackPath: null, failedPath: null, restorePoint: null, restoreCreation: null, journalPath: null,
+    priorRuntime: { running: false, autoRestart: false }, phase: 'queued', swapStep: 'none',
+    directoryIdentities: { target: null, candidate: null, rollback: null, failed: null },
+    createdAt: '2026-10-11T00:00:00.000Z', updatedAt: '2026-10-11T00:00:00.000Z', outcome: null });
+  await registry.finish(launch.job.jobId, { terminalPhase: 'failed', outcome: { recovery: { action: 'revalidation-aborted' } } });
+  f.service.launchRecoveryRegistry = registry;
+  f.service.launchRegistrationState = () => 'absent';
+  f.service.rememberNewServerLaunch(launch);
+  f.reservations.restoreJobHold({ jobId: launch.job.jobId, binding: launch.binding });
+  return registry;
+}
+
+test('launch settlement authenticated historical abandonment repairs held metadata exactly once', async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f); await recordedAbandonment(f, launch);
+  const first = await f.service.settleJobDestination({ jobId: job.jobId, disposition: 'released' });
+  const second = await f.service.settleJobDestination({ jobId: job.jobId, disposition: 'released' });
+  assert.equal(first.binding.destinationDisposition, 'released'); assert.equal(second.job.sequence, first.job.sequence);
+  assert.equal(f.reservations.isDestinationHeld(job.serverId), false); assert.equal(f.executions, 0);
+  await assert.rejects(f.service.settleJobDestination({ jobId: job.jobId, disposition: 'consumed' }), { code: 'RECOVERY_REQUIRED' });
+});
+
+for (const fault of ['before', 'after', 'always']) test(`launch disposition ${fault} publication fault only retries metadata`, async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f); const registry = await recordedAbandonment(f, launch);
+  const write = f.durableFs.writeJsonAtomicAsync; let writes = 0;
+  f.store.durableFs = { ...f.durableFs, async writeJsonAtomicAsync(...args) {
+    writes++;
+    if (fault === 'always' || (writes === 1 && fault === 'before')) throw new Error('before disposition publication');
+    const result = await write(...args);
+    if (writes === 1 && fault === 'after') throw new Error('after disposition publication');
+    return result;
+  } };
+  if (fault === 'always') {
+    await assert.rejects(f.service.settleJobDestination({ jobId: job.jobId, disposition: 'released' }));
+    assert.equal(f.reservations.isDestinationHeld(job.serverId), true);
+    assert.equal(f.service.launchSettlements.get(job.jobId).settlementStatus, 'repair-pending');
+  } else {
+    await f.service.settleJobDestination({ jobId: job.jobId, disposition: 'released' });
+    assert.equal(f.reservations.isDestinationHeld(job.serverId), false);
+    assert.equal((await f.store.get(job.jobId)).sequence, 1);
+  }
+  assert.equal(writes, fault === 'after' ? 1 : 2); assert.equal(registry.finishCalls, 1); assert.equal(f.executions, 0);
+});
+
+test('launch settlement owner change after recovery evidence keeps exact hold', async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f); const registry = await recordedAbandonment(f, launch);
+  const load = registry.loadHistory.bind(registry);
+  registry.loadHistory = async (...args) => { const value = await load(...args); f.owner.epoch = Symbol('changed'); return value; };
+  await assert.rejects(f.service.settleJobDestination({ jobId: job.jobId, disposition: 'released' }), { code: 'PLAN_STALE' });
+  assert.equal(f.reservations.isDestinationHeld(job.serverId), true);
+});
+
+test('launch settlement drain retains metadata CAS after source closure and admission close', async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f); await recordedAbandonment(f, launch);
+  const entered = deferred(); const gate = deferred(); const settle = f.store.settleNewServerDestination.bind(f.store);
+  f.store.settleNewServerDestination = async (...args) => { entered.resolve(); await gate.promise; return settle(...args); };
+  const settling = f.service.settleJobDestination({ jobId: job.jobId, disposition: 'released' });
+  await entered.promise;
+  f.service.closeAdmission(); let drained = false;
+  const draining = f.service.drain().then(() => { drained = true; });
+  await Promise.resolve(); assert.equal(drained, false); assert.equal(f.reservations.isDestinationHeld(job.serverId), true);
+  gate.resolve(); await settling; await draining;
+  assert.equal(drained, true); assert.equal(f.reservations.isDestinationHeld(job.serverId), false); assert.equal(f.executions, 0);
+});
+
+test('launch historical startup repairs archived failed callback without active recovery or target operations', async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f); const registry = await recordedAbandonment(f, launch);
+  assert.equal((await registry.initialize()).records.length, 0);
+  const { reconcileNewServerLaunches } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+  await reconcileNewServerLaunches({ operationStore: f.store, recoveryRegistry: registry, lifecycleService: f.service,
+    launchOwner: f.owner, jobs: [job], launches: [launch], registrationState: () => 'absent' });
+  assert.equal((await f.store.getNewServerLaunch(job.jobId, f.owner.epoch)).binding.destinationDisposition, 'released');
+  assert.equal(registry.finishCalls, 1); assert.equal(f.executions, 0);
+});
+
+for (const mode of ['failed', 'cancelled', 'fault']) test(`launch settlement live unrecorded terminal pair is atomic mode=${mode}`, async t => {
+  const cancellation = mode === 'cancelled';
+  const f = await fixture(t);
+  const { fixtureRegistry } = require('./runtime-authority-fixture.cjs');
+  const registry = fixtureRegistry(f.root); await registry.ready;
+  f.service.launchRecoveryRegistry = registry; f.service.launchRegistrationState = () => 'absent';
+  const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
+  const { createServerMutationContext } = require('../../electron/services/server-mutation-context.cjs');
+  const coordinator = new ServerMutationCoordinator({ context: createServerMutationContext(), readContentRevision: () => 0,
+    bumpContentRevision() { assert.fail('unrecorded fixture cannot change target revision'); } });
+  coordinator.completeStartupRecovery([]); f.service.mutationCoordinator = coordinator;
+  const reserved = await f.reservations.reserveWithNativeDialog({}); const request = await f.plan(reserved.instanceId);
+  const runtime = f.service.mutationRuntime;
+  runtime.resolveInstance = async () => ({ instanceId: reserved.instanceId, serverPath: f.reservations.resolve(reserved.instanceId).targetPath, priorRunning: false });
+  runtime.revalidate = async ({ jobId, resolved }) => {
+    // Production runtime's separate authority test below exercises the genuine
+    // clean scan/lease-authorized target consumption that produces this handoff.
+    await f.service.recordUnrecordedLaunchClosure({ jobId, instanceId: resolved.instanceId, targetPath: resolved.serverPath });
+    if (cancellation) await f.store.requestCancellation(jobId);
+    throw new ModpackError(cancellation ? 'CANCELLED' : 'PLAN_STALE', 'inert revalidation failure');
+  };
+  const publications = []; let terminalAttempts = 0; const write = f.durableFs.writeJsonAtomicAsync;
+  f.store.durableFs = { ...f.durableFs, async writeJsonAtomicAsync(file, value, options) {
+    if (value.launchBinding?.destinationDisposition === 'released') {
+      terminalAttempts++; if (mode === 'fault') throw new Error('terminal CAS fails before publication');
+    }
+    publications.push({ phase: value.phase, disposition: value.launchBinding?.destinationDisposition });
+    return write(file, value, options);
+  } };
+  const queued = await f.service.startOperation(request);
+  await f.service.drain();
+  const final = await f.service.getJob(queued.jobId);
+  if (mode === 'fault') {
+    assert.equal(terminalAttempts, 2, 'one complete reproved CAS retry only');
+    assert.equal(final.phase, 'recovery-required');
+    assert.equal((await f.store.getNewServerLaunch(queued.jobId, f.owner.epoch)).binding.destinationDisposition, 'held');
+    return;
+  }
+  assert.equal(final.phase, cancellation ? 'cancelled' : 'failed');
+  const terminalWrites = publications.filter(item => ['failed', 'cancelled'].includes(item.phase));
+  assert.deepEqual(terminalWrites, [{ phase: cancellation ? 'cancelled' : 'failed', disposition: 'released' }]);
+  assert.equal(f.reservations.isDestinationHeld(reserved.instanceId), false);
+  assert.equal((await f.store.getNewServerLaunch(queued.jobId, f.owner.epoch)).binding.destinationDisposition, 'released');
+});
+
+test('launch settlement rejects restart absence as live-unrecorded proof', async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f);
+  f.service.rememberNewServerLaunch(launch); f.reservations.restoreJobHold({ jobId: job.jobId, binding: launch.binding });
+  f.service.launchRecoveryRegistry = cleanRecoveryRegistry(); f.service.launchRegistrationState = () => 'absent';
+  await assert.rejects(f.service.settleJobDestination({ jobId: job.jobId, disposition: 'released', terminalUpdate: {
+    expectedPhase: 'queued', nextPhase: 'failed', patch: { outcome: { status: 'failed', message: 'not proved', operationKind: 'install-new', actions: [] } }
+  } }), { code: 'RECOVERY_REQUIRED' });
+  assert.equal((await f.store.get(job.jobId)).phase, 'queued'); assert.equal(f.reservations.isDestinationHeld(job.serverId), true);
+});
+
+test('launch historical pending publication advertises only an actual bound application action', async t => {
+  const f = await fixture(t); const { launch } = await seedLaunch(f);
+  const registry = cleanRecoveryRegistry(); const scan = await registry.initialize();
+  scan.pendingTerminalPublications.push(closureRecord({ jobId: launch.job.jobId,
+    target: { kind: 'new', stableServerId: launch.job.serverId, path: launch.binding.targetPath } }));
+  registry.initialize = async () => scan;
+  registry.retryTerminalPublication = async () => { assert.fail('no record to publish'); };
+  const { readLaunchRecoveryEvidence } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+  assert.equal((await readLaunchRecoveryEvidence({ recoveryRegistry: registry, launch })).recoveryAvailable, false);
+  assert.equal((await readLaunchRecoveryEvidence({ recoveryRegistry: registry, launch, terminalPublicationAvailable: true })).recoveryAvailable, true);
+});
+
+for (const startup of [false, true]) test(`launch destination recovery releases only exact setup hold and preserves older restriction startup=${startup}`, { timeout: 10000 }, async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f);
+  const { fixtureRegistry } = require('./runtime-authority-fixture.cjs');
+  const registry = fixtureRegistry(f.root); await registry.ready;
+  await registry.create({ schemaVersion: 2, sequence: 0, jobId: 'older-recovery', operationKind: 'install',
+    target: { kind: 'new', stableServerId: 'older-instance', path: launch.binding.targetPath },
+    candidatePath: null, rollbackPath: null, failedPath: null, restorePoint: null, restoreCreation: null, journalPath: null,
+    priorRuntime: { running: false, autoRestart: false }, phase: 'queued', swapStep: 'none',
+    directoryIdentities: { target: null, candidate: null, rollback: null, failed: null },
+    createdAt: '2026-10-11T00:00:00.000Z', updatedAt: '2026-10-11T00:00:00.000Z', outcome: null });
+  const failed = await f.store.transition(job.jobId, { expectedPhase: 'queued', nextPhase: 'failed', patch: { outcome: {
+    status: 'failed', message: 'Mutation acquisition refused', operationKind: 'install-new', errorCode: 'RECOVERY_REQUIRED',
+    failureReason: 'destination-recovery', actions: [] } } });
+  f.service.rememberNewServerLaunch(launch); f.reservations.restoreJobHold({ jobId: job.jobId, binding: launch.binding });
+  f.service.launchRecoveryRegistry = registry; f.service.launchRegistrationState = () => 'absent';
+  const before = await registry.initialize(); let hydratedOutsideGate = false;
+  const getJob = f.service.getJob.bind(f.service);
+  f.service.getJob = async id => {
+    await f.reservations.withDestinationGate(launch.binding.targetPath, () => { hydratedOutsideGate = true; });
+    return getJob(id);
+  };
+  if (startup) {
+    const { reconcileNewServerLaunches } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+    await reconcileNewServerLaunches({ operationStore: f.store, recoveryRegistry: registry, lifecycleService: f.service,
+      launchOwner: f.owner, jobs: [failed], launches: [await f.store.getNewServerLaunch(job.jobId, f.owner.epoch)], registrationState: () => 'absent' });
+  } else {
+    assert.equal(await f.service.releaseServerDestination(job.serverId), true);
+    assert.equal(hydratedOutsideGate, true);
+  }
+  assert.equal((await f.store.getNewServerLaunch(job.jobId, f.owner.epoch)).binding.destinationDisposition, 'released');
+  assert.equal(f.reservations.isDestinationHeld(job.serverId), false); assert.deepEqual(await registry.initialize(), before);
+  assert.equal(f.executions, 0);
+});
+
+test('launch queued startup closes intact prior-owner v2 atomically without target work', async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f);
+  const { reconcileNewServerLaunches } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+  const result = await reconcileNewServerLaunches({ operationStore: f.store, recoveryRegistry: cleanRecoveryRegistry(),
+    lifecycleService: f.service, launchOwner: f.owner, jobs: [job], launches: [launch], registrationState: () => 'absent' });
+  const current = await f.store.getNewServerLaunch(job.jobId, f.owner.epoch);
+  assert.equal(current.job.phase, 'failed'); assert.equal(current.binding.destinationDisposition, 'released');
+  assert.equal(current.job.sequence, 1); assert.equal(current.job.outcome.message, 'The operation was interrupted before execution');
+  assert.equal(f.reservations.isDestinationHeld(job.serverId), false); assert.equal(f.executions, 0);
+  assert.equal(result.settlements[job.jobId].settlementStatus, 'settled');
+});
+
+for (const changed of ['registration', 'active-recovery', 'history', 'active-owner', 'admission', 'settlement', 'epoch', 'job-phase']) {
+  test(`launch queued deferred gate reproof rejects changed ${changed}`, async t => {
+    const f = await fixture(t); const { job, launch } = await seedLaunch(f);
+    const { fixtureRegistry } = require('./runtime-authority-fixture.cjs');
+    const registry = fixtureRegistry(f.root); await registry.ready;
+    const entered = deferred(); const release = deferred(); const requested = deferred();
+    const gate = f.reservations.withDestinationGate.bind(f.reservations);
+    const blocker = gate(launch.binding.targetPath, async () => { entered.resolve(); await release.promise; });
+    await entered.promise;
+    f.reservations.withDestinationGate = (...args) => { requested.resolve(); return gate(...args); };
+    let registration = 'absent'; let closeCalls = 0; let rawCalls = 0; let publicationCalls = 0;
+    const close = f.store.closeInterruptedQueued.bind(f.store);
+    f.store.closeInterruptedQueued = (...args) => { closeCalls++; return close(...args); };
+    const { reconcileNewServerLaunches } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+    const work = reconcileNewServerLaunches({ operationStore: f.store, recoveryRegistry: registry, lifecycleService: f.service,
+      launchOwner: f.owner, jobs: [job], launches: [launch], registrationState: () => registration,
+      retryTerminalPublication() { rawCalls++; assert.fail('queued gate reproof must not execute raw recovery'); } });
+    await requested.promise;
+    if (changed === 'registration') registration = 'registered';
+    if (['active-recovery', 'history'].includes(changed)) {
+      await registry.create({ schemaVersion: 2, sequence: 0, jobId: job.jobId, operationKind: 'install',
+        target: { kind: 'new', stableServerId: job.serverId, path: launch.binding.targetPath },
+        candidatePath: null, rollbackPath: null, failedPath: null, restorePoint: null, restoreCreation: null, journalPath: null,
+        priorRuntime: { running: false, autoRestart: false }, phase: 'queued', swapStep: 'none',
+        directoryIdentities: { target: null, candidate: null, rollback: null, failed: null },
+        createdAt: '2026-10-11T00:00:00.000Z', updatedAt: '2026-10-11T00:00:00.000Z', outcome: null });
+      if (changed === 'history') await registry.finish(job.jobId, { terminalPhase: 'failed', outcome: { recovery: { action: 'revalidation-aborted' } } });
+    }
+    if (changed === 'active-owner') f.service.activeOperations.set(job.jobId, { settled: Promise.resolve() });
+    if (changed === 'admission') f.service.pendingNewServerAdmissions.set('new-admission', {});
+    const settling = Promise.resolve();
+    if (changed === 'settlement') f.service.admittedTasks.add(settling);
+    if (changed === 'epoch') f.owner.epoch = Symbol('replacement');
+    if (changed === 'job-phase') await f.store.transition(job.jobId, { expectedPhase: 'queued', nextPhase: 'preflight', patch: {} });
+    registry.retryTerminalPublication = async () => { publicationCalls++; assert.fail('queued gate reproof must not publish recovery metadata'); };
+    release.resolve(); await blocker;
+    try {
+      if (changed === 'epoch') await assert.rejects(work, { code: 'PLAN_STALE' });
+      else {
+        const result = await work;
+        assert.notEqual(result.settlements[job.jobId].settlementStatus, 'settled');
+      }
+    } finally {
+      f.service.activeOperations.delete(job.jobId); f.service.pendingNewServerAdmissions.delete('new-admission'); f.service.admittedTasks.delete(settling);
+    }
+    assert.equal(closeCalls, 0, 'changed proof must not reach queued close CAS');
+    assert.equal(rawCalls, 0); assert.equal(publicationCalls, 0);
+    assert.equal((await f.store.getNewServerLaunch(job.jobId, f.owner.epoch)).binding.destinationDisposition, 'held');
+    assert.equal(f.reservations.isDestinationHeld(job.serverId), true); assert.equal(f.executions, 0);
+  });
+}
+
+test('launch queued deferred gate reproof also rejects changed admission before its one ambiguous retry', async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f);
+  const entered = deferred(); const release = deferred(); let gateCalls = 0; let closeCalls = 0;
+  const gate = f.reservations.withDestinationGate.bind(f.reservations);
+  f.reservations.withDestinationGate = (...args) => {
+    if (++gateCalls !== 2) return gate(...args);
+    return gate(args[0], async () => { entered.resolve(); await release.promise; return args[1](); });
+  };
+  f.store.closeInterruptedQueued = async () => { closeCalls++; throw new Error('first CAS failed before publication'); };
+  const { reconcileNewServerLaunches } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+  const work = reconcileNewServerLaunches({ operationStore: f.store, recoveryRegistry: cleanRecoveryRegistry(), lifecycleService: f.service,
+    launchOwner: f.owner, jobs: [job], launches: [launch], registrationState: () => 'absent' });
+  await entered.promise;
+  f.service.pendingNewServerAdmissions.set('new-admission', {}); release.resolve();
+  try { await work; } finally { f.service.pendingNewServerAdmissions.delete('new-admission'); }
+  assert.equal(closeCalls, 1, 'second gate must reprove before attempting another CAS');
+  assert.equal(gateCalls, 2);
+  assert.equal((await f.store.getNewServerLaunch(job.jobId, f.owner.epoch)).binding.destinationDisposition, 'held');
+  assert.equal(f.reservations.isDestinationHeld(job.serverId), true);
+});
+
+test('launch queued uncertain publication requires the exact prescribed terminal pair', async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f);
+  const close = f.store.closeInterruptedQueued.bind(f.store); let calls = 0;
+  f.store.closeInterruptedQueued = async (...args) => {
+    if (++calls > 1) return close(...args);
+    const current = await f.store.getNewServerLaunch(job.jobId, f.owner.epoch);
+    await f.store.settleNewServerDestination(job.jobId, { expectedInstanceId: job.serverId,
+      expectedRecordRevision: current.recordRevision, nextDisposition: 'released', terminalUpdate: {
+        expectedPhase: 'queued', nextPhase: 'failed', patch: {
+          outcome: { status: 'failed', message: 'The operation was interrupted before execution', errorCode: 'COMMIT_FAILED', operationKind: 'install-new', actions: [] },
+          progress: { percent: 100, message: 'A different terminal publication', currentItem: null }
+        }
+      } }, f.owner.epoch);
+    throw new Error('uncertain terminal publication');
+  };
+  const { reconcileNewServerLaunches } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+  const result = await reconcileNewServerLaunches({ operationStore: f.store, recoveryRegistry: cleanRecoveryRegistry(),
+    lifecycleService: f.service, launchOwner: f.owner, jobs: [job], launches: [launch], registrationState: () => 'absent' });
+  assert.equal(result.settlements[job.jobId].settlementStatus, 'support-required');
+  assert.equal(f.reservations.isDestinationHeld(job.serverId), true);
+});
+
+for (const fault of ['before', 'after', 'always', 'revision', 'later-phase']) test(`launch queued uncertainty reproof is bounded fault=${fault}`, async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f);
+  const close = f.store.closeInterruptedQueued.bind(f.store); let attempts = 0; let scans = 0;
+  const registry = cleanRecoveryRegistry(); const initialize = registry.initialize;
+  registry.initialize = async () => { scans++; return initialize(); };
+  f.store.closeInterruptedQueued = async (...args) => {
+    attempts++;
+    if (fault === 'always' || (attempts === 1 && fault === 'before')) throw new Error('before publication');
+    if (attempts === 1 && fault === 'revision') await f.store.transition(job.jobId, { expectedPhase: 'queued', nextPhase: 'queued', patch: {} });
+    if (attempts === 1 && fault === 'later-phase') await f.store.transition(job.jobId, { expectedPhase: 'queued', nextPhase: 'preflight', patch: {} });
+    const value = await close(...args);
+    if (attempts === 1 && fault === 'after') throw new Error('after publication');
+    return value;
+  };
+  const { reconcileNewServerLaunches } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+  await reconcileNewServerLaunches({ operationStore: f.store, recoveryRegistry: registry, lifecycleService: f.service,
+    launchOwner: f.owner, jobs: [job], launches: [launch], registrationState: () => 'absent' });
+  const current = await f.store.getNewServerLaunch(job.jobId, f.owner.epoch);
+  const held = ['always', 'later-phase'].includes(fault);
+  assert.equal(current.binding.destinationDisposition, held ? 'held' : 'released');
+  assert.equal(f.reservations.isDestinationHeld(job.serverId), held);
+  assert.equal(scans, ['before', 'always', 'revision'].includes(fault) ? 4 : 2,
+    'each bounded attempt collects outside classification and gated final reproof');
+  assert.ok(attempts <= 2, 'at most one retry, including idempotent after-publication validation');
+  assert.equal(f.executions, 0);
+});
+
+test('launch destination recovery classifier rejects generic failures absent older proof and registration conflicts', () => {
+  const { isDestinationRecoveryClosure: classify } = require('../../electron/services/modpack-lifecycle/new-server-launch-closure.cjs');
+  const job = { phase: 'failed', terminalAt: '2026-10-11T00:00:00.000Z', operationKind: 'install-new',
+    outcome: { failureReason: 'destination-recovery', errorCode: 'RECOVERY_REQUIRED' } };
+  const evidence = { olderRestriction: true };
+  assert.equal(classify(job, evidence, 'absent'), true);
+  for (const changed of [{ phase: 'recovery-required' }, { terminalAt: null }, { operationKind: 'update' },
+    { outcome: { errorCode: 'RECOVERY_REQUIRED' } }, { outcome: { ...job.outcome, errorCode: 'COMMIT_FAILED' } }]) {
+    assert.equal(classify({ ...job, ...changed }, evidence, 'absent'), false);
+  }
+  for (const changed of [{ olderRestriction: false }, { corrupt: true }, { record: closureRecord() }]) {
+    assert.equal(classify(job, { ...evidence, ...changed }, 'absent'), false);
+  }
+  for (const registration of ['registered', 'conflict', undefined]) assert.equal(classify(job, evidence, registration), false);
+});
+
+test('launch queued full proof rejects incomplete scan global pending history registration cancellation and owner changes', async t => {
+  const { reconcileNewServerLaunches } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+  for (const kind of ['incomplete', 'global', 'pending', 'history', 'registered', 'cancelled', 'epoch', 'corrupt']) {
+    await t.test(kind, async t => {
+      const f = await fixture(t); const { job, launch } = await seedLaunch(f);
+      const registry = cleanRecoveryRegistry(); const scan = await registry.initialize();
+      if (kind === 'incomplete') delete scan.blocks;
+      if (kind === 'global') scan.globalBlock = true;
+      if (kind === 'pending') scan.pendingTerminalPublications.push({ jobId: job.jobId });
+      if (kind === 'corrupt') scan.corrupt.push({ jobId: job.jobId });
+      registry.initialize = async () => { if (kind === 'epoch') f.owner.epoch = Symbol('replacement'); return scan; };
+      if (kind === 'history') registry.loadHistory = async () => ({ ...closureRecord(), jobId: job.jobId });
+      if (kind === 'cancelled') await f.store.requestCancellation(job.jobId);
+      const work = reconcileNewServerLaunches({ operationStore: f.store, recoveryRegistry: registry, lifecycleService: f.service,
+        launchOwner: f.owner, jobs: [job], launches: [launch], registrationState: () => kind === 'registered' ? 'registered' : 'absent' });
+      if (kind === 'epoch') await assert.rejects(work, { code: 'PLAN_STALE' }); else await work;
+      const current = await f.store.getNewServerLaunch(job.jobId, f.owner.epoch);
+      assert.equal(current.binding.destinationDisposition, 'held', kind); assert.equal(f.executions, 0);
+    });
+  }
+});
+
+test('launch legacy unknown origin without path stays v1 deferred and never adds global denial', async t => {
+  const f = await fixture(t);
+  const job = await f.store.create({ jobId: 'unknown-legacy', operationKind: 'install-new', serverId: 'legacy-server' });
+  const { reconcileNewServerLaunches } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+  const result = await reconcileNewServerLaunches({ operationStore: f.store, recoveryRegistry: cleanRecoveryRegistry(),
+    lifecycleService: f.service, launchOwner: f.owner, jobs: [job], launches: [], registrationState: () => 'absent' });
+  assert.equal((await f.store.get(job.jobId)).sequence, 0);
+  assert.deepEqual(result.settlements[job.jobId], { disposition: null, settlementStatus: 'support-required',
+    reason: 'legacy-origin-unproven', recoveryAvailable: false });
+  assert.equal(result.globalBlock, false);
+});
 
 function preparePreflight(f, instanceId, beforePlan = async () => {}) {
   const inspectionId = 'inspection-launch';
