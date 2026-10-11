@@ -1,10 +1,12 @@
 import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import { createHash } from 'node:crypto'
+import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createViteStartupTracePlugin } from './scripts/vite-startup-trace.cjs'
+
+const { createViteStartupTracePlugin } = createRequire(import.meta.url)('./scripts/vite-startup-trace.cjs')
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL('.', import.meta.url)))
 const checkoutCacheKey = createHash('sha256')
