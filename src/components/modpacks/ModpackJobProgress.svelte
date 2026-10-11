@@ -461,12 +461,12 @@
           <p class="mp-muted">This job does not include a complete verification result. Return to the Modpack page and run Verify again.</p>
         {/if}
         <p class="mp-muted">{verificationResult?.repairAvailable === true
-          ? 'Repair is available separately from Actions on the Modpack page. Verify did not repair any files.'
+          ? 'Differences were observed at verification time. Review repair from Actions checks current files again. Verify did not repair any files.'
           : verificationAvailable && verificationResult.healthy
-            ? 'Repair is not needed for the checked content.'
+            ? 'The checked content was healthy at verification time. Review repair checks current files again.'
             : verificationResult?.repairAvailable === false
-              ? 'Repair is not available for this result.'
-              : 'Repair availability is unknown. Run Verify again before reviewing Repair.'}</p>
+              ? 'No repair was indicated at verification time. Review repair checks current files again.'
+              : 'Verification evidence is unavailable. Review repair checks the installed source and current files again.'}</p>
         <div class="mp-actions"><button class="mp-button primary" on:click={() => dispatch('return', { job })}>Return to server</button>{#if hasAction('open-details')}<button class="mp-button" on:click={() => performAction('open-details')} disabled={actionBusy}>Open details</button>{/if}</div>
       {:else if outcomeKind === 'retained-download'}
         {#if retainedDownloadRemoved}

@@ -3,6 +3,7 @@
   import { isPlanStaleError, ModpackApiError, modpackApi } from '../utils/modpacks/modpackApi.js';
   import { createServerRequestScope } from '../utils/modpacks/serverRequestScope.js';
   import { mergePublicJob } from '../utils/modpacks/publicJobMerge.js';
+  import { projectVerificationAttempt, verificationSessionReferences } from '../utils/modpacks/verificationSession.js';
   import ModpackOverview from '../components/modpacks/ModpackOverview.svelte';
   import ClientCompanionPanel from '../components/modpacks/ClientCompanionPanel.svelte';
   import ModpackVersionPanel from '../components/modpacks/ModpackVersionPanel.svelte';
@@ -57,7 +58,11 @@
   let requestedGithubNavigationToken = 0;
   let allowCurrentGithubReleaseReview = false;
   let job = null;
-  let verification = null;
+  let verificationAttempt = null;
+  let verificationAttemptStatus = 'none';
+  let verificationReference = null;
+  let verificationRequestSequence = 0;
+  let verificationInFlight = null;
   let busy = false;
   let checkingForUpdates = false;
   let updateCheckStatus = '';
@@ -122,7 +127,8 @@
   async function focusStage(expectedFlow) {
     await tick();
     if (flow !== expectedFlow || !pageRoot) return;
-    const target = [...pageRoot.querySelectorAll('h2, h3')].find(element => element.offsetParent !== null);
+    const target = [...pageRoot.querySelectorAll('h2, h3')].find(element =>
+      element.offsetParent !== null && !element.closest('[data-verification-history]'));
     if (!target) return;
     target.setAttribute('tabindex', '-1');
     target.focus();
@@ -176,7 +182,10 @@
     requestedGithubNavigationToken = 0;
     allowCurrentGithubReleaseReview = false;
     job = null;
-    verification = null;
+    invalidateVerificationRead();
+    verificationAttempt = null;
+    verificationAttemptStatus = 'none';
+    verificationReference = null;
     busy = false;
     checkingForUpdates = false;
     updateCheckStatus = '';
@@ -189,12 +198,59 @@
     rollbackOptionsServerId = nextServerId;
     focusedFlow = null;
     focusedError = null;
-    if (pageMounted && nextServerId) void refresh(nextServerId);
+    if (pageMounted && nextServerId) {
+      void refresh(nextServerId);
+      void hydrateVerificationAttempt();
+    }
   }
 
   function currentServerRequest(token) {
     return serverRequestScope.isCurrent(token, serverId);
   }
+
+  function invalidateVerificationRead() {
+    verificationRequestSequence += 1;
+    verificationInFlight = null;
+  }
+
+  async function hydrateVerificationAttempt() {
+    if (!pageMounted || !serverId) return;
+    const reference = verificationSessionReferences.get(serverId);
+    if (!reference || verificationInFlight?.reference === reference) return;
+    const token = serverRequestScope.begin();
+    const sequence = ++verificationRequestSequence;
+    const request = { reference, sequence };
+    verificationInFlight = request;
+    if (verificationReference !== reference) verificationAttempt = null;
+    verificationReference = reference;
+    verificationAttemptStatus = 'loading';
+    const isCurrent = () => pageMounted && currentServerRequest(token) && sequence === verificationRequestSequence &&
+      verificationSessionReferences.get(token.serverId) === reference;
+    try {
+      const value = await modpackApi.getJob(reference.jobId);
+      if (!isCurrent()) return;
+      verificationAttempt = projectVerificationAttempt(value, reference);
+      verificationAttemptStatus = verificationAttempt ? 'ready' : 'unavailable';
+    } catch {
+      if (!isCurrent()) return;
+      verificationAttempt = null;
+      verificationAttemptStatus = 'unavailable';
+    } finally {
+      if (verificationInFlight === request) verificationInFlight = null;
+    }
+  }
+
+  function publishVerificationAttempt(value) {
+    if (!pageMounted || !serverId) return;
+    const reference = verificationSessionReferences.get(serverId);
+    if (!reference || value?.jobId !== reference.jobId) return;
+    invalidateVerificationRead();
+    verificationReference = reference;
+    verificationAttempt = projectVerificationAttempt(value, reference);
+    verificationAttemptStatus = verificationAttempt ? 'ready' : 'unavailable';
+  }
+
+  function verificationCount(value) { return BigInt(value).toLocaleString('en-US'); }
 
   function rememberOwnedJob(value) {
     if (!value?.jobId || !activeJobs.some(item => item.job.jobId === value.jobId)) return;
@@ -212,6 +268,17 @@
     rememberOwnedJob(job);
     const item = activeJobs.find(value => value.job.jobId === jobId);
     if (!item) return;
+    if (job?.jobId !== jobId) invalidateVerificationRead();
+    if (item.job.operationKind === 'verify' && projectVerificationAttempt(item.job, { serverId, jobId })) {
+      const recorded = verificationSessionReferences.record(serverId, jobId);
+      if (recorded.changed || verificationReference !== recorded.reference) {
+        invalidateVerificationRead();
+        verificationReference = recorded.reference;
+        verificationAttempt = null;
+        void hydrateVerificationAttempt();
+      }
+    }
+    if (verificationAttemptStatus === 'loading') void hydrateVerificationAttempt();
     setSelectedJob(job?.jobId === jobId ? mergePublicJob(job, item.job, { durable: true }) : item.job);
     flow = 'job';
   }
@@ -245,7 +312,10 @@
         setSelectedJob(null);
         flow = 'owned-jobs';
       }
-      if (previouslyOwned && activeJobs.length === 0) void refresh(token.serverId);
+      if (previouslyOwned && activeJobs.length === 0) {
+        void refresh(token.serverId);
+        void hydrateVerificationAttempt();
+      }
     } catch (caught) {
       if (!isCurrent()) return;
       activityStatus = 'error';
@@ -513,6 +583,8 @@
 
   function beginSource(kind = isManaged ? 'switch' : 'install-existing') {
     if (!lifecycleAvailable) return;
+    if (kind === 'repair' && (!isManaged || busy)) return;
+    invalidateVerificationRead();
     invalidateInspectionRequests();
     operationKind = kind;
     const abandonedInspection = inspection;
@@ -528,6 +600,7 @@
     managedGithubChronologicalOperation = null;
     clearRequestedReleaseTargets();
     flow = 'source';
+    if (verificationAttemptStatus === 'loading') void hydrateVerificationAttempt();
   }
 
   async function checkForModpackUpdates() {
@@ -821,28 +894,37 @@
   }
 
   async function verifyModpack() {
-    if (!lifecycleAvailable) return;
+    if (!lifecycleAvailable || busy) return;
     const requestToken = serverRequestScope.begin();
+    invalidateVerificationRead();
     busy = true;
     error = null;
     try {
       const nextVerification = await modpackApi.verify(requestToken.serverId);
-      if (!currentServerRequest(requestToken)) return;
-      verification = nextVerification;
-      setSelectedJob(verification);
+      if (!pageMounted || !currentServerRequest(requestToken)) return;
+      const jobId = Object.getOwnPropertyDescriptor(nextVerification || {}, 'jobId')?.value;
+      if (!projectVerificationAttempt(nextVerification, { serverId: requestToken.serverId, jobId })) {
+        throw new Error('The verification response is unavailable. Check active operations before trying again.');
+      }
+      verificationSessionReferences.record(requestToken.serverId, jobId);
+      publishVerificationAttempt(nextVerification);
+      setSelectedJob(nextVerification);
       flow = 'job';
       void discoverActiveJobs();
     } catch (caught) {
-      if (!currentServerRequest(requestToken)) return;
+      if (!pageMounted || !currentServerRequest(requestToken)) return;
       error = caught;
+      if (verificationAttemptStatus === 'loading') void hydrateVerificationAttempt();
     } finally {
-      if (currentServerRequest(requestToken)) busy = false;
+      if (pageMounted && currentServerRequest(requestToken)) busy = false;
     }
   }
 
   function handleStarted(event) {
+    invalidateVerificationRead();
     setSelectedJob(event.detail.job);
     flow = 'job';
+    void hydrateVerificationAttempt();
     void discoverActiveJobs();
   }
 
@@ -924,10 +1006,14 @@
       if (event.jobId === job?.jobId) job = mergePublicJob(job, event);
       void discoverActiveJobs();
     })];
-    if (serverId) refresh(serverId);
+    if (serverId) {
+      void refresh(serverId);
+      void hydrateVerificationAttempt();
+    }
   });
   onDestroy(() => {
     pageMounted = false;
+    invalidateVerificationRead();
     refreshRequestSequence += 1;
     activityRequestSequence += 1;
     outcomeActionSequence += 1;
@@ -965,6 +1051,32 @@
 
   {#if error}<section class="mp-state error page-error" bind:this={errorRegion} tabindex="-1" aria-live="assertive"><strong>{error.code || 'Modpack action unavailable'}</strong><p>{error.message}</p><button class="mp-button" type="button" on:click={() => (error = null)}>Dismiss</button></section>{/if}
 
+  {#if verificationReference}
+    <section class="mp-panel mp-stack" data-verification-history aria-label={verificationAttempt?.status === 'completed' ? 'Last verification' : 'Last verification attempt'}>
+      <h2>{verificationAttempt?.status === 'completed' ? 'Last verification' : 'Last verification attempt'}</h2>
+      <p>Job {verificationReference.jobId}</p>
+      {#if verificationAttemptStatus === 'loading'}
+        <p>Loading historical verification evidence…</p>
+      {:else if verificationAttemptStatus === 'unavailable'}
+        <p>Historical verification evidence is unavailable. No integrity result can be inferred.</p>
+        <button class="mp-button" type="button" on:click={hydrateVerificationAttempt}>Retry historical read</button>
+      {:else if verificationAttempt?.status === 'completed'}
+        <p>Verified at <time datetime={verificationAttempt.verifiedAt}>{verificationAttempt.verifiedAt}</time> · revision {verificationAttempt.contentRevision}</p>
+        <p>Then observed: {verificationCount(verificationAttempt.checkedFiles)} checked files · {verificationCount(verificationAttempt.mismatchCount)} differences</p>
+        {#if verificationAttempt.healthy}<p>The checked content was healthy at verification time.</p>{/if}
+        {#if verificationAttempt.mismatches.length}
+          <ul aria-label="Historical managed file differences">{#each verificationAttempt.mismatches as mismatch}<li>{mismatch.entryName} — {mismatch.status} ({mismatch.origin} · {mismatch.role})</li>{/each}</ul>
+        {/if}
+        {#if verificationAttempt.mismatchesTruncated}<p>Showing {verificationAttempt.shownMismatchCount} differences; {verificationAttempt.omittedMismatchCount} additional differences are not listed.</p>{/if}
+      {:else if verificationAttempt?.status === 'in-progress'}
+        <p>This verification attempt had not completed when read. Current operation ownership is checked separately.</p>
+      {:else if verificationAttempt}
+        <p>Last verification attempt — {['failed', 'cancelled'].includes(verificationAttempt.status) ? verificationAttempt.status : 'did not complete'} at <time datetime={verificationAttempt.terminalAt}>{verificationAttempt.terminalAt}</time>. No successful integrity result is available for this attempt.</p>
+      {/if}
+      <p class="mp-muted">This is a historical observation, not a current integrity check. Review repair checks the installed source and current files again before any change.</p>
+    </section>
+  {/if}
+
   {#if activityStatus !== 'ready'}<section class="mp-panel mp-state" aria-live="polite"><strong>{activityStatus === 'error' ? 'Operation status unavailable' : 'Checking active operations…'}</strong><p>Operation ownership must be checked before new changes can start.</p>{#if activityError}<p>{activityError.message}</p>{/if}<button class="mp-button" type="button" on:click={discoverActiveJobs}>Retry operation status</button></section>{/if}
   {#if activeJobs.length > 1}<section class="mp-panel mp-stack" aria-label="Owned operations"><h2>Choose an owned operation</h2><p>Multiple operations are owned by this process. New changes remain blocked.</p>{#each activeJobs as item (item.job.jobId)}<button class="mp-button" type="button" on:click={() => selectOwnedJob(item.job.jobId)}>{item.job.operationKind} · {item.job.jobId} · {item.ownership}</button>{/each}</section>{/if}
   {#if activeJobs.length === 0 && activeSection !== 'recovery' && (recoveryStatus !== 'ready' || currentServerRecoveryItems.length > 0)}<ModpackRecoveryPanel {serverId} records={currentServerRecoveryItems} status={recoveryStatus} loadError={recoveryError} actionError={recoveryActionError} pendingAction={recoveryAction} onRefresh={() => refresh()} onRecover={recoverRecord} />{/if}
@@ -982,7 +1094,7 @@
     {:else if ['versions', 'actions'].includes(activeSection) && !lifecycleAvailable}
       <section class="mp-panel mp-state" aria-live="polite"><strong>{stateStatus === 'ready' ? 'Lifecycle actions unavailable' : stateStatus === 'error' ? 'Modpack state unavailable' : 'Loading managed modpack state…'}</strong><p>Current state, history, and recovery must be checked successfully before lifecycle actions can be reviewed.</p><button class="mp-button" type="button" on:click={() => refresh()} disabled={loading || Boolean(recoveryAction)}>Retry status reads</button></section>
     {:else if activeSection === 'versions'}<ModpackVersionPanel {state} requestedVersionId={requestedModrinthVersionId} requestedNavigationToken={requestedModrinthNavigationToken} on:select={(event) => inspectSelection(event.detail.request, event.detail.chronologicalOperation, true)} on:github={reviewManagedGithub} on:switch={() => beginSource('switch')} />
-    {:else if activeSection === 'actions'}<ModpackActionPanel {state} {busy} {verification} on:verify={verifyModpack} on:repair={() => beginSource('repair')} on:rollback={() => beginManagedOperation('rollback-restore-point')} on:detach={() => beginManagedOperation('detach')} on:uninstall={() => beginManagedOperation('uninstall')} />
+    {:else if activeSection === 'actions'}<ModpackActionPanel {state} {busy} on:verify={verifyModpack} on:repair={() => beginSource('repair')} on:rollback={() => beginManagedOperation('rollback-restore-point')} on:detach={() => beginManagedOperation('detach')} on:uninstall={() => beginManagedOperation('uninstall')} />
     {:else if activeSection === 'history'}
       <section class="mp-panel mp-stack" aria-label="Modpack history">
         <div><p class="mp-kicker">Durable audit history</p><h2 class="mp-title">Lifecycle operations</h2><p class="mp-subtitle">Managed files and user additions remain distinguished in every recorded revision.</p></div>
@@ -1011,7 +1123,7 @@
   {:else if flow === 'review'}
     <ModpackPlanReview {reviewedPlan} {operationKind} {busy} restorePointId={selectedRestorePointId} on:started={handleStarted} on:stale={refreshStaleReview} on:cancel={() => { reviewedPlan = null; flow = 'source'; }} />
   {:else if flow === 'job'}
-    {#key job?.jobId}<ModpackJobProgress bind:job on:return={returnToDashboard} on:terminal={(event) => { if (event.detail.job.operationKind === 'verify') verification = event.detail.job; }} on:action={handleOutcomeAction} />{/key}
+    {#key job?.jobId}<ModpackJobProgress bind:job on:return={returnToDashboard} on:terminal={(event) => publishVerificationAttempt(event.detail.job)} on:action={handleOutcomeAction} />{/key}
   {/if}
   {#if busy && inspectionProgress && !['modrinth', 'github-assets', 'inspection', 'review', 'job'].includes(flow)}
     <ModpackInspectionProgress progress={inspectionProgress} />

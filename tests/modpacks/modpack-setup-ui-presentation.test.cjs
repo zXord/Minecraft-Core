@@ -170,7 +170,7 @@ test('healthy Verify reports checked content without claiming a server commit', 
   assert.match(html, /Checked files: 2/u);
   assert.match(html, /Mismatches: 0/u);
   assert.match(html, /No server files were changed/u);
-  assert.match(html, /Repair is not needed/u);
+  assert.match(html, /healthy at verification time\. Review repair checks current files again/u);
   assert.match(html, /mp-badge good/u);
   assert.match(html, /Return to server/u);
   assert.doesNotMatch(html, /committed, validated from its final location, and recorded in history/u);
@@ -194,7 +194,7 @@ test('unhealthy Verify shows warning counts and relative mismatch names separate
   assert.match(html, /libraries\/runtime.jar/u);
   assert.match(html, /missing/u);
   assert.match(html, /No server files were changed/u);
-  assert.match(html, /Repair is available separately/u);
+  assert.match(html, /Differences were observed at verification time\. Review repair from Actions checks current files again/u);
   assert.match(html, /mp-badge warn/u);
   assert.match(html, /class="[^"]*outcome[^"]*warn/u);
   assert.doesNotMatch(html, /mp-badge good|committed, validated from its final location/u);
@@ -212,7 +212,7 @@ test('truncated Verify results explain shown versus full totals even when no lab
     assert.match(html, new RegExp(`${148 - mismatches.length} additional differences are not listed`, 'u'));
     assert.match(html, /Differences found/u);
     assert.match(html, /No server files were changed/u);
-    assert.match(html, /Repair is available separately/u);
+    assert.match(html, /Differences were observed at verification time\. Review repair from Actions checks current files again/u);
     assert.doesNotMatch(html, /Verified healthy|mp-badge good/u);
   }
   const complete = await renderVerification({

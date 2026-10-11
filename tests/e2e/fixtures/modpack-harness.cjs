@@ -435,8 +435,12 @@ async function launchModpackApp(options = {}) {
     async controlHeldRepair(command) {
       return running.electronApp.evaluate((_electron, value) => globalThis.__MINECRAFT_CORE_HELD_REPAIR__(value), command);
     },
+    async controlVerification(command) {
+      return running.electronApp.evaluate((_electron, value) => globalThis.__MINECRAFT_CORE_VERIFICATION__(value), command);
+    },
     readEvidence() { return readJson(prepared.scenarioFile); },
     readServerFile(relativeName) { return fs.readFileSync(path.join(prepared.serverRoot, ...relativeName.split('/')), 'utf8'); },
+    editManagedFixtureFile() { fs.writeFileSync(path.join(prepared.serverRoot, 'mods', 'managed.jar'), 'externally-edited-fixture\n'); },
     serverFileExists(relativeName) { return fs.existsSync(path.join(prepared.serverRoot, ...relativeName.split('/'))); },
     canonicalCount() { return fs.existsSync(prepared.serverRoot) ? 1 : 0; },
     serverTreeHash() { return snapshotReadOnlyFixture(prepared.serverRoot); },
@@ -872,6 +876,9 @@ function createComposition({ input, scenarioFile }) {
   let jobSequence = 0;
   let heldJobReadSequence = 0;
   const heldJobReadReleases = new Map();
+  const verificationReplies = new Map();
+  const verificationStartReleases = new Map();
+  let verificationStartCount = 0;
 
   const scenario = () => readJson(scenarioFile);
   const save = value => writeJson(scenarioFile, value);
@@ -882,6 +889,62 @@ function createComposition({ input, scenarioFile }) {
     return result;
   };
   const record = (bucket, entry) => update(value => value[bucket].push({ at: FIXED_TIME, ...clone(entry) }));
+  globalThis.__MINECRAFT_CORE_VERIFICATION__ = command => {
+    if (command.kind === 'release-start') {
+      const release = verificationStartReleases.get(command.jobId);
+      if (!release) throw new Error('No held verification start exists');
+      verificationStartReleases.delete(command.jobId); release(); return;
+    }
+    if (command.kind === 'queue-read') {
+      const replies = verificationReplies.get(command.jobId) || [];
+      replies.push(clone(command.reply));
+      verificationReplies.set(command.jobId, replies);
+      return;
+    }
+    if (command.kind === 'release-read') {
+      const release = heldJobReadReleases.get(command.readId);
+      if (!release) throw new Error('No held verification read exists');
+      heldJobReadReleases.delete(command.readId); release(); return;
+    }
+    const stored = command.jobId ? jobs.get(command.jobId) : [...jobs.values()].filter(value => value.verification).at(-1);
+    if (!stored?.verification) throw new Error('No verification fixture exists');
+    const window = input.getWindow();
+    if (command.kind === 'read') return clone(stored.job);
+    if (command.kind === 'own') { stored.owned = true; return; }
+    if (command.kind === 'settle') {
+      const phase = command.phase || 'completed';
+      stored.job = { ...stored.job, sequence: stored.job.sequence + 10, phase, terminalAt: FIXED_TIME,
+        progress: { percent: 100, message: 'Verification at fixture time', currentItem: null },
+        outcome: phase === 'completed' ? verificationOutcome(stored.job.serverId, command.result || {})
+          : { status: phase, kind: 'nothing-changed', result: { serverUnchanged: true }, actions: [] },
+        events: [{ sequence: stored.job.sequence + 9, jobId: stored.job.jobId, channel: 'log', phase,
+          timestamp: FIXED_TIME, message: 'Verify durable final log', progress: null, currentItem: null, details: null }] };
+      update(value => appendHistory(value, { operationKind: 'verify' }, phase));
+      window?.webContents?.send('modpacks:job-progress', clone(stored.job));
+      return clone(stored.job);
+    }
+    if (command.kind === 'release') {
+      stored.owned = false;
+      window?.webContents?.send('modpacks:state-changed', { instanceId: stored.job.serverId });
+      return;
+    }
+    if (command.kind === 'set-job') { stored.job = clone(command.value); return; }
+    throw new Error('Unknown verification fixture control');
+  };
+  function verificationOutcome(instanceId, overrides = {}) {
+    const large = scenario().refreshFixture?.largeVerification === true;
+    const healthy = scenario().refreshFixture?.healthyVerification === true;
+    const count = healthy ? '0' : large ? '147' : '1';
+    return { status: 'completed', kind: 'completed', actions: [], result: {
+      instanceId, type: 'modpack-verification-result', contentRevision: scenario().statesByInstanceId?.[instanceId]?.contentRevision ?? scenario().state.contentRevision,
+      checkedFiles: large ? '4596' : '2', mismatchCount: count, healthy, repairAvailable: !healthy,
+      repair: healthy ? null : { operationKind: 'repair', mismatchCount: count },
+      mismatches: healthy ? [] : [{ entryName: 'mods/managed.jar', origin: 'pack', role: 'mod', status: 'modified' }],
+      verifiedAt: FIXED_TIME,
+      ...(large && !healthy ? { shownMismatchCount: '1', omittedMismatchCount: '146', mismatchesTruncated: true } : {}),
+      ...clone(overrides)
+    } };
+  }
   if (scenario().refreshFixture?.holdRepairOwner === true) {
     // Explicit test controls own progression. Discovery only snapshots the map.
     globalThis.__MINECRAFT_CORE_HELD_REPAIR__ = command => {
@@ -1392,6 +1455,11 @@ function createComposition({ input, scenarioFile }) {
       assertNotBlocked();
       const plan = plans.get(request.planId);
       if (!plan || request.planFingerprint !== FINGERPRINT) throw new ModpackError('PLAN_STALE', 'The reviewed plan is no longer current.');
+      if (plan.operationKind === 'repair' && scenario().refreshFixture?.rejectFirstRepairStart === true) {
+        update(value => { value.refreshFixture.rejectFirstRepairStart = false; });
+        record('lifecycleCalls', { method: 'startOperationRejected', planId: request.planId, operationKind: 'repair', code: 'PLAN_STALE' });
+        throw new ModpackError('PLAN_STALE', 'The reviewed plan is no longer current.');
+      }
       if (plan.planView.blockers.length) throw new ModpackError('RECOVERY_REQUIRED', 'A required compatible restore point is missing.');
       const jobId = `job-${++jobSequence}`;
       const crash = scenario().crashPoint && plan.operationKind === 'rollback-restore-point';
@@ -1485,6 +1553,21 @@ function createComposition({ input, scenarioFile }) {
     async getJob(jobId) {
       const stored = jobs.get(jobId);
       if (!stored) throw new ModpackError('PLAN_STALE', 'The operation record is unavailable.');
+      if (stored.verification) {
+        record('lifecycleCalls', { method: 'getJob', jobId, phase: stored.job.phase });
+        const reply = verificationReplies.get(jobId)?.shift();
+        const snapshot = clone(Object.hasOwn(reply || {}, 'value') ? reply.value : stored.job);
+        if (reply?.hold) {
+          const readId = ++heldJobReadSequence;
+          await new Promise(resolve => {
+            heldJobReadReleases.set(readId, resolve);
+            record('lifecycleCalls', { method: 'heldVerificationReadEntered', jobId, readId });
+          });
+          record('lifecycleCalls', { method: 'heldVerificationReadReleased', jobId, readId });
+        }
+        if (reply?.fail) throw new ModpackError('COMMIT_FAILED', 'Historical verification read rejected');
+        return snapshot;
+      }
       if (scenario().terminalEventWithDurableLogOnFirstJob === true) {
         record('lifecycleCalls', { method: 'getJob', jobId, phase: stored.job.phase });
       }
@@ -1535,10 +1618,10 @@ function createComposition({ input, scenarioFile }) {
     },
 
     async getActiveJobs(serverId) {
-      record('lifecycleCalls', { method: 'getActiveJobs', serverId });
       const reply = heldActiveReplies.shift();
       const snapshot = reply?.value || { serverId, items: [...jobs.values()].filter(stored => stored.owned && stored.job.serverId === serverId)
         .map(stored => ({ ownership: stored.job.terminalAt ? 'settling' : 'running', job: clone(stored.job) })) };
+      record('lifecycleCalls', { method: 'getActiveJobs', serverId, itemsCount: Array.isArray(snapshot.items) ? snapshot.items.length : null });
       if (reply?.delayMs) await new Promise(resolve => setTimeout(resolve, reply.delayMs));
       if (reply?.fail || scenario().refreshFixture?.activeFailureIds?.includes(serverId)) throw new ModpackError('COMMIT_FAILED', 'Operation status unavailable');
       return snapshot;
@@ -1581,26 +1664,33 @@ function createComposition({ input, scenarioFile }) {
     async verify(instanceId) {
       assertNotBlocked();
       record('lifecycleCalls', { method: 'verify', instanceId });
-      update(value => appendHistory(value, { operationKind: 'verify' }));
+      const startFailure = scenario().refreshFixture?.verifyStartFailure;
+      if (startFailure === 'rejected') throw new Error('Fixture Verify start rejected');
+      if (startFailure === 'malformed') return { jobId: 'malformed-verify-start', serverId: instanceId, operationKind: 'verify' };
+      const held = scenario().refreshFixture?.holdVerifyOwner === true;
+      const queued = scenario().refreshFixture?.fastVerify === true;
+      if (!held) update(value => appendHistory(value, { operationKind: 'verify' }));
       const job = {
+        type: 'minecraft-core-modpack-job', schemaVersion: 1, serverId: instanceId, sequence: 1,
+        planFingerprint: null, swapStep: null,
         jobId: `verify-${++jobSequence}`,
         operationKind: 'verify',
-        phase: 'completed',
-        progress: { percent: 100, message: 'Managed and runtime hashes verified' },
+        phase: held || queued ? 'queued' : 'completed',
+        createdAt: FIXED_TIME, updatedAt: FIXED_TIME, terminalAt: held || queued ? null : FIXED_TIME, events: [],
+        progress: { percent: held || queued ? 0 : 100, message: 'Managed and runtime hashes verified', currentItem: null },
         cancellationRequested: false,
-        outcome: {
-          status: 'completed',
-          kind: 'completed',
-          result: {
-            type: 'modpack-verification-result', contentRevision: scenario().state.contentRevision,
-            checkedFiles: '2', mismatchCount: '1', healthy: false, repairAvailable: true,
-            repair: { operationKind: 'repair', mismatchCount: '1' },
-            mismatches: [{ entryName: 'mods/managed.jar', origin: 'pack', role: 'mod', status: 'modified' }],
-            verifiedAt: FIXED_TIME
-          }
-        }
+        outcome: held || queued ? null : verificationOutcome(instanceId)
       };
-      jobs.set(job.jobId, { job, reads: 0 });
+      const durable = queued ? { ...job, sequence: 2, phase: 'completed', terminalAt: FIXED_TIME, outcome: verificationOutcome(instanceId) } : job;
+      jobs.set(job.jobId, { job: durable, reads: 0, verification: true, owned: held });
+      verificationStartCount += 1;
+      if (verificationStartCount === 1 && scenario().refreshFixture?.holdFirstVerifyResponse === true) {
+        await new Promise(resolve => {
+          verificationStartReleases.set(job.jobId, resolve);
+          record('lifecycleCalls', { method: 'heldVerificationStartEntered', jobId: job.jobId });
+        });
+        record('lifecycleCalls', { method: 'heldVerificationStartReleased', jobId: job.jobId });
+      }
       return clone(job);
     }
   };

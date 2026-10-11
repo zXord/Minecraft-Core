@@ -3,7 +3,6 @@
   const dispatch = createEventDispatcher();
   export let state = null;
   export let busy = false;
-  export let verification = null;
 
   $: managed = state?.modpackManaged === true;
   $: lifecycleMode = state?.lifecycleMode || (managed ? 'managed' : 'unmanaged');
@@ -14,10 +13,10 @@
 
 <section class="modpack-surface mp-panel mp-stack" aria-label="Modpack actions">
   {#if managed}
-    <div><p class="mp-kicker">Integrity and ownership</p><h2 class="mp-title">Manage this installation</h2><p class="mp-subtitle">Verify is read-only. Repair is offered separately and only when managed content differs from the manifest.</p></div>
+    <div><p class="mp-kicker">Integrity and ownership</p><h2 class="mp-title">Manage this installation</h2><p class="mp-subtitle">Verify is read-only. Review repair checks the exact installed source and current files before any change.</p></div>
     <div class="mp-grid">
       <article class="mp-card action-card"><strong>Verify managed files</strong><p>Hash managed and runtime files without creating a restore point or changing the server.</p><button class="mp-button primary" type="button" disabled={busy} on:click={verifyModpack}>Verify</button></article>
-      <article class="mp-card action-card"><strong>Repair detected mismatches</strong><p>Rebuild only missing or corrupt managed content, using a restore point and full health validation.</p><button class="mp-button" type="button" disabled={busy || !verification?.outcome?.result?.repairAvailable} on:click={() => dispatch('repair', { verification })}>Repair</button></article>
+      <article class="mp-card action-card"><strong>Review repair</strong><p>Review the exact installed source and check current files again. Changes require fresh preflight review and an explicit Start, with a restore point and full health validation.</p><button class="mp-button" type="button" disabled={busy} on:click={() => dispatch('repair')}>Review repair</button></article>
       <article class="mp-card action-card"><strong>Restore-point rollback</strong><p>Build a fresh candidate from an exact compatible restore point and validate it before commit.</p><button class="mp-button" type="button" disabled={busy} on:click={() => dispatch('rollback')}>Choose restore point</button></article>
     </div>
     <hr class="mp-divider" />

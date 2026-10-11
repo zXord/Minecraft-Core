@@ -225,12 +225,12 @@ test.describe.serial('managed modpack lifecycle', () => {
     expect(fixture.readState().state.source).toMatchObject({ provider: 'local', version: 'local-1' });
   });
 
-  test('verify enables targeted repair and rollback restores an exact recorded point', async ({}, testInfo) => {
+  test('verify reports observations while fresh repair review and rollback retain exact sources', async ({}, testInfo) => {
     const { page } = fixture;
     await page.getByRole('button', { name: 'Actions' }).click();
-    const repair = page.getByRole('button', { name: 'Repair', exact: true });
-    await expect(repair).toBeDisabled();
-    await expect(page.getByText(/Repair is offered separately and only when managed content differs from the manifest\./u)).toBeVisible();
+    const repair = page.getByRole('button', { name: 'Review repair', exact: true });
+    await expect(repair).toBeEnabled();
+    await expect(page.getByText('Verify is read-only. Review repair checks the exact installed source and current files before any change.', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Verify', exact: true }).click();
     const verification = page.locator('section.outcome');
     await expect(verification.getByRole('heading', { name: 'Differences found' })).toBeVisible();
@@ -241,7 +241,7 @@ test.describe.serial('managed modpack lifecycle', () => {
     await expect(verification).toContainText('mods/managed.jar');
     await expect(verification).toContainText('modified');
     await expect(verification).toContainText('No server files were changed');
-    await expect(verification).toContainText('Repair is available separately');
+    await expect(verification).toContainText('Differences were observed at verification time. Review repair from Actions checks current files again.');
     await expect(verification).not.toContainText('committed, validated from its final location');
     await page.screenshot({ path: testInfo.outputPath('verify-differences.png'), fullPage: false });
     await expect(page.getByText('Operation status error', { exact: true })).not.toBeVisible();
@@ -326,7 +326,7 @@ test.describe.serial('managed modpack lifecycle', () => {
     await page.getByRole('button', { name: 'Actions' }).click();
     await expect(page.getByRole('heading', { name: 'Management is detached' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Choose restore point' })).toBeVisible();
-    for (const unavailable of ['Verify', 'Repair', 'Review detach', 'Review uninstall']) {
+    for (const unavailable of ['Verify', 'Review repair', 'Review detach', 'Review uninstall']) {
       await expect(page.getByRole('button', { name: unavailable, exact: true })).toHaveCount(0);
     }
     await page.getByRole('button', { name: 'History' }).click();
@@ -670,7 +670,7 @@ test('uninstall removes only unchanged managed files and leaves a files-only ser
     await page.getByRole('button', { name: 'Actions' }).click();
     await expect(page.getByRole('heading', { name: 'Managed files are inactive' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Choose restore point' })).toBeVisible();
-    for (const unavailable of ['Verify', 'Repair', 'Review detach', 'Review uninstall']) {
+    for (const unavailable of ['Verify', 'Review repair', 'Review detach', 'Review uninstall']) {
       await expect(page.getByRole('button', { name: unavailable, exact: true })).toHaveCount(0);
     }
   } finally {
@@ -775,7 +775,7 @@ async function startHeldRepair(fixture) {
   await expect(page.locator('section.outcome').getByRole('heading', { name: 'Differences found' })).toBeVisible();
   await page.getByRole('button', { name: 'Return to server', exact: true }).click();
   await page.getByRole('button', { name: 'Actions', exact: true }).click();
-  await page.getByRole('button', { name: 'Repair', exact: true }).click();
+  await page.getByRole('button', { name: 'Review repair', exact: true }).click();
   await page.getByRole('button', { name: /Local archive/u }).click();
   await startReviewedArchive(page);
   await expect(page.getByRole('heading', { name: 'Creating restore point', exact: true })).toBeVisible();
@@ -787,6 +787,8 @@ test('active-job navigation reattaches Repair and blocks both Starts through own
   const errors = [];
   try {
     const { page } = fixture;
+    await expect(page).toHaveTitle('Minecraft Core');
+    const initialDocument = new URL(page.url());
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
     const job = await startHeldRepair(fixture);
@@ -797,7 +799,9 @@ test('active-job navigation reattaches Repair and blocks both Starts through own
     await dashboardRecovery(page).getByRole('button', { name: 'View operation', exact: true }).click();
     await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText(job.jobId);
     await expect(page.getByRole('region', { name: 'Modpack recovery' })).toHaveCount(0);
-    expect(page.url()).toContain('http://127.0.0.1:5173');
+    expect(new URL(page.url())).toMatchObject({
+      origin: initialDocument.origin, pathname: initialDocument.pathname, search: initialDocument.search,
+    });
     await expect(page).toHaveTitle('Minecraft Core');
     await expect(page.locator('vite-error-overlay')).toHaveCount(0);
     await page.screenshot({ path: path.join(os.tmpdir(), 'task6-held-repair-navigation.png') });
@@ -973,6 +977,445 @@ async function openDashboard(page) {
   await expect(page.getByRole('heading', { name: 'Minecraft Server Control Panel' })).toBeVisible();
 }
 
+test('verification continuity restores off-route settled historical evidence without replay', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { holdVerifyOwner: true, largeVerification: true } });
+  try {
+    const { page } = fixture;
+    await fixture.openModpack();
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await page.getByRole('button', { name: 'Verify', exact: true }).click();
+    const started = await fixture.controlVerification({ kind: 'read' });
+    await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText(started.jobId);
+    await openDashboard(page);
+    await expect(dashboardRecovery(page)).toContainText('Operation in progress');
+    await expect(dashboardStarts(page).nth(0)).toBeDisabled();
+    await expect(dashboardStarts(page).nth(1)).toBeDisabled();
+    await fixture.controlVerification({ kind: 'settle' });
+    await expect(dashboardRecovery(page)).toContainText('Operation in progress');
+    await expect(dashboardStarts(page).nth(0)).toBeDisabled();
+    await fixture.controlVerification({ kind: 'release' });
+    await expect(dashboardStarts(page).nth(0)).toBeEnabled();
+    await expect(dashboardStarts(page).nth(1)).toBeEnabled();
+    const beforeReturn = fixture.readState().lifecycleCalls.length;
+    await fixture.openModpack();
+    const summary = page.getByRole('region', { name: 'Last verification' });
+    await expect(summary).toContainText(started.jobId);
+    await expect(summary).toContainText('4,596 checked files · 147 differences');
+    await expect(summary).toContainText('2026-08-01T12:00:00.000Z');
+    await expect(summary).toContainText(`revision ${fixture.readState().state.contentRevision}`);
+    await expect(summary).toContainText('historical observation, not a current integrity check');
+    expect(fixture.readState().lifecycleCalls.slice(beforeReturn).find(call => call.method === 'getActiveJobs')).toMatchObject({ serverId: harness.SERVER_ID, itemsCount: 0 });
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Review repair', exact: true })).toBeEnabled();
+    const calls = fixture.readState().lifecycleCalls;
+    expect(calls.filter(call => call.method === 'verify')).toHaveLength(1);
+    expect(calls.filter(call => ['startOperation', 'createPlan', 'createManagementPlan', 'cancelJob'].includes(call.method))).toEqual([]);
+    expect(fixture.readState().safeActions).toEqual([]);
+  } finally { await fixture.close(); }
+});
+
+test('verification continuity permits fresh Review repair before any verification without planning', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed' });
+  try {
+    const { page } = fixture;
+    await fixture.openModpack();
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Review repair', exact: true })).toBeEnabled();
+    await page.getByRole('button', { name: 'Review repair', exact: true }).click();
+    await expect(page.getByRole('button', { name: /Local archive/u })).toBeVisible();
+    expect(fixture.readState().lifecycleCalls.filter(call => ['verify', 'createPlan', 'createManagementPlan', 'startOperation'].includes(call.method))).toEqual([]);
+  } finally { await fixture.close(); }
+});
+
+async function startFixtureVerification(fixture) {
+  const { page } = fixture;
+  await fixture.openModpack();
+  await page.getByRole('button', { name: 'Actions', exact: true }).click();
+  await page.getByRole('button', { name: 'Verify', exact: true }).click();
+  await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'verify').length).toBeGreaterThan(0);
+  return fixture.controlVerification({ kind: 'read' });
+}
+
+for (const fast of [false, true]) test(`verification continuity preserves ${fast ? 'fast queued' : 'local'} completion through Back and actual route destruction`, async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { fastVerify: fast } });
+  try {
+    const { page } = fixture;
+    const job = await startFixtureVerification(fixture);
+    await expect(page.locator('section.outcome').getByRole('heading', { name: 'Differences found' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(job.jobId);
+    await page.getByRole('button', { name: 'Back to Modpack overview', exact: true }).click();
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Review repair', exact: true })).toBeEnabled();
+    await openDashboard(page);
+    await fixture.openModpack();
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(job.jobId);
+    expect(fixture.readState().lifecycleCalls.filter(call => call.method === 'verify')).toHaveLength(1);
+  } finally { await fixture.close(); }
+});
+
+test('verification continuity healthy history remains historical through source revision and inactive state changes', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { healthyVerification: true } });
+  try {
+    const { page } = fixture;
+    const job = await startFixtureVerification(fixture);
+    const summary = page.getByRole('region', { name: 'Last verification', exact: true });
+    await expect(summary).toContainText('healthy at verification time');
+    await page.getByRole('button', { name: 'Back to Modpack overview', exact: true }).click();
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Review repair', exact: true })).toBeEnabled();
+    await openDashboard(page);
+    const original = fixture.readState().state;
+    fixture.editManagedFixtureFile();
+    expect(fixture.readState().state.contentRevision).toBe(original.contentRevision);
+    await fixture.openModpack();
+    await expect(summary).toContainText('not a current integrity check');
+    await expect(summary).toContainText(`revision ${original.contentRevision}`);
+    await openDashboard(page);
+    fixture.updateScenario({ state: { ...original, contentRevision: original.contentRevision + 1, source: { ...original.source, version: 'changed-source' } } });
+    await fixture.openModpack();
+    await expect(summary).toContainText(job.jobId);
+    await expect(summary).toContainText(`revision ${original.contentRevision}`);
+    await expect(summary).toContainText('not a current integrity check');
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Review repair', exact: true })).toBeEnabled();
+    await openDashboard(page);
+    fixture.updateScenario({ state: { ...original, modpackManaged: false, lifecycleMode: 'detached' } });
+    await fixture.openModpack();
+    await expect(summary).toContainText(job.jobId);
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Review repair', exact: true })).toHaveCount(0);
+    expect(fixture.readState().lifecycleCalls.filter(call => call.method === 'verify')).toHaveLength(1);
+  } finally { await fixture.close(); }
+});
+
+for (const terminalPhase of ['failed', 'cancelled']) test(`verification continuity a newer ${terminalPhase} attempt never revives a prior successful result`, async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed' });
+  try {
+    const { page } = fixture;
+    const older = await startFixtureVerification(fixture);
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(older.jobId);
+    await page.getByRole('button', { name: 'Back to Modpack overview', exact: true }).click();
+    fixture.updateScenario({ refreshFixture: { holdVerifyOwner: true } });
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await page.getByRole('button', { name: 'Verify', exact: true }).click();
+    const newer = await fixture.controlVerification({ kind: 'read' });
+    await fixture.controlVerification({ kind: 'settle', phase: terminalPhase });
+    await fixture.controlVerification({ kind: 'release' });
+    await openDashboard(page);
+    await fixture.openModpack();
+    const summary = page.getByRole('region', { name: 'Last verification attempt', exact: true });
+    await expect(summary).toContainText(newer.jobId);
+    await expect(summary).toContainText(`— ${terminalPhase} at`);
+    await expect(summary).not.toContainText('checked files');
+    await expect(summary).not.toContainText(older.jobId);
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Review repair', exact: true })).toBeEnabled();
+    expect(fixture.readState().lifecycleCalls.filter(call => call.method === 'verify')).toHaveLength(2);
+  } finally { await fixture.close(); }
+});
+
+for (const variant of ['missing', 'rejected', 'foreign-server', 'foreign-job', 'wrong-kind', 'bad-count']) test(`verification continuity ${variant} evidence is locally unavailable without changing safe Starts`, async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed' });
+  try {
+    const { page } = fixture;
+    const job = await startFixtureVerification(fixture);
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(job.jobId);
+    await openDashboard(page);
+    const bad = structuredClone(job);
+    if (variant === 'foreign-server') bad.serverId = 'foreign';
+    if (variant === 'foreign-job') bad.jobId = 'foreign';
+    if (variant === 'wrong-kind') bad.operationKind = 'repair';
+    if (variant === 'bad-count') bad.outcome.result.checkedFiles = '0002';
+    await fixture.controlVerification({ kind: 'queue-read', jobId: job.jobId, reply: variant === 'rejected' ? { fail: true } : { value: variant === 'missing' ? null : bad } });
+    await fixture.openModpack();
+    const summary = page.getByRole('region', { name: 'Last verification attempt', exact: true });
+    await expect(summary).toContainText('Historical verification evidence is unavailable');
+    await expect(summary).not.toContainText('checked files');
+    await expect(page.locator('.page-error')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Review repair', exact: true })).toBeEnabled();
+    await page.getByRole('button', { name: 'Review repair', exact: true }).click();
+    await expect(page.getByRole('button', { name: /Local archive/u })).toBeVisible();
+    await openDashboard(page);
+    await expect(dashboardStarts(page).nth(0)).toBeEnabled();
+    await expect(dashboardStarts(page).nth(1)).toBeEnabled();
+    expect(fixture.readState().lifecycleCalls.filter(call => ['createPlan', 'startOperation', 'createManagementPlan'].includes(call.method))).toEqual([]);
+  } finally { await fixture.close(); }
+});
+
+test('verification continuity historical evidence stays visible beside unavailable current activity', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed' });
+  try {
+    const { page } = fixture;
+    const job = await startFixtureVerification(fixture);
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(job.jobId);
+    await openDashboard(page);
+    fixture.updateScenario({ refreshFixture: { activeFailureIds: [harness.SERVER_ID] } });
+    await fixture.openModpack();
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(job.jobId);
+    await expect(page.locator('.modpack-page strong').filter({ hasText: /^Operation status unavailable$/u })).toBeVisible();
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Review repair', exact: true })).toHaveCount(0);
+    await openDashboard(page);
+    await expect(dashboardStarts(page).nth(0)).toBeDisabled();
+    await expect(dashboardStarts(page).nth(1)).toBeDisabled();
+  } finally { await fixture.close(); }
+});
+
+for (const startFailure of ['rejected', 'malformed']) for (const fail of [false, true]) {
+  test(`verification continuity resumes history after ${startFailure} Verify start and stale historical ${fail ? 'rejection' : 'success'}`, async () => {
+    const fixture = await harness.launchModpackApp({ profile: 'managed' });
+    try {
+      const { page } = fixture;
+      const old = await startFixtureVerification(fixture);
+      await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(old.jobId);
+      await openDashboard(page);
+      const stale = structuredClone(old); stale.outcome.result.checkedFiles = '1111';
+      await fixture.controlVerification({ kind: 'queue-read', jobId: old.jobId, reply: { hold: true, fail, value: stale } });
+      await fixture.openModpack();
+      await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'heldVerificationReadEntered').length).toBe(1);
+      const held = fixture.readState().lifecycleCalls.find(call => call.method === 'heldVerificationReadEntered');
+      await expect(page.getByRole('region', { name: /^Last verification/u })).toContainText('Loading historical verification evidence');
+      fixture.updateScenario({ refreshFixture: { verifyStartFailure: startFailure } });
+      await page.evaluate(() => {
+        window.failedStartHistoryViolations = [];
+        window.failedStartHistoryObserver = new MutationObserver(() => {
+          const history = document.querySelector('[data-verification-history]')?.textContent;
+          if (history?.includes('1,111 checked files')) {
+            window.failedStartHistoryViolations.push('obsolete evidence');
+          }
+          if (history?.includes('Historical verification evidence is unavailable')) window.failedStartHistoryViolations.push('obsolete rejection');
+        });
+        window.failedStartHistoryObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+      });
+      await page.getByRole('button', { name: 'Actions', exact: true }).click();
+      await page.getByRole('button', { name: 'Verify', exact: true }).click();
+      await expect(page.locator('.page-error')).toBeVisible();
+      const currentError = await page.locator('.page-error').textContent();
+      await fixture.controlVerification({ kind: 'release-read', readId: held.readId });
+      await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'heldVerificationReadReleased').length).toBe(1);
+      await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText('2 checked files');
+      await page.waitForTimeout(100);
+      expect(await page.locator('.page-error').textContent()).toBe(currentError);
+      await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toHaveCount(0);
+      expect(await page.evaluate(() => { window.failedStartHistoryObserver.disconnect(); return window.failedStartHistoryViolations; })).toEqual([]);
+      expect(fixture.readState().lifecycleCalls.filter(call => call.method === 'verify')).toHaveLength(2);
+      await openDashboard(page);
+      await expect(dashboardStarts(page).nth(0)).toBeEnabled();
+      await expect(dashboardStarts(page).nth(1)).toBeEnabled();
+      await fixture.openModpack();
+      await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(old.jobId);
+    } finally { await fixture.close(); }
+  });
+}
+
+for (const scope of ['A-B-A', 'destroyed', 'newer-verify', 'non-verify', 'explicit-owner']) for (const fail of [false, true]) {
+  test(`verification continuity ignores held historical ${fail ? 'rejection' : 'success'} after ${scope}`, async () => {
+    const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { holdRepairOwner: true },
+      secondaryServerState: { schemaVersion: 1, modpackManaged: false, lifecycleMode: 'unmanaged', source: null, runtime: null, installedAt: null, contentRevision: 0, managedFileCount: 0 } });
+    try {
+      const { page } = fixture;
+      const old = await startFixtureVerification(fixture);
+      await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(old.jobId);
+      const stale = structuredClone(old); stale.outcome.result.checkedFiles = '1111';
+      await openDashboard(page);
+      await fixture.controlVerification({ kind: 'queue-read', jobId: old.jobId, reply: { hold: true, fail, value: stale } });
+      await fixture.openModpack();
+      await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'heldVerificationReadEntered').length).toBe(1);
+      const held = fixture.readState().lifecycleCalls.find(call => call.method === 'heldVerificationReadEntered');
+      let expectedJob = old.jobId;
+      if (scope === 'destroyed') {
+        await openDashboard(page);
+      } else if (scope === 'A-B-A') {
+        await page.getByRole('button', { name: '☰' }).click();
+        await page.locator('.instance-item').filter({ hasText: 'E2E Secondary Server' }).click();
+        await expect(page.getByRole('region', { name: /^Last verification/u })).toHaveCount(0);
+        await page.locator('.instance-item').filter({ hasText: 'E2E Fixture Server' }).click();
+        await page.getByRole('button', { name: '☰' }).click();
+        await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(old.jobId);
+      } else if (scope === 'newer-verify') {
+        await page.getByRole('button', { name: 'Actions', exact: true }).click();
+        await page.getByRole('button', { name: 'Verify', exact: true }).click();
+        expectedJob = (await fixture.controlVerification({ kind: 'read' })).jobId;
+        await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(expectedJob);
+      } else {
+        await page.getByRole('button', { name: 'Actions', exact: true }).click();
+        await page.getByRole('button', { name: 'Review repair', exact: true }).click();
+        await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText('2 checked files');
+        await page.getByRole('button', { name: /Local archive/u }).click();
+        await startReviewedArchive(page);
+        const repair = await fixture.controlHeldRepair({ kind: 'read' });
+        await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText(repair.jobId);
+        if (scope === 'explicit-owner') {
+          await fixture.controlHeldRepair({ kind: 'duplicate-owner' });
+          const owned = page.getByRole('region', { name: 'Owned operations' });
+          await expect(owned.getByRole('button')).toHaveCount(2);
+          await expect(page.getByRole('region', { name: /^Last verification/u })).not.toContainText('second-owned-verify');
+          await owned.getByRole('button', { name: /second-owned-verify/u }).click();
+          expectedJob = 'second-owned-verify';
+          await expect(page.getByRole('region', { name: 'Last verification attempt', exact: true })).toContainText(expectedJob);
+          await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText(expectedJob);
+        }
+        await expect(page.getByRole('button', { name: 'Review repair', exact: true })).toHaveCount(0);
+      }
+      await page.evaluate(() => {
+        window.verificationRaceViolations = [];
+        window.verificationRaceObserver = new MutationObserver(() => {
+          const root = document.querySelector('.modpack-page');
+          if (root?.textContent?.includes('1,111 checked files')) window.verificationRaceViolations.push('obsolete evidence');
+          if (root?.querySelector('.page-error')) window.verificationRaceViolations.push('historical error took current surface');
+          if (root?.textContent?.includes('Historical verification evidence is unavailable')) window.verificationRaceViolations.push('obsolete rejection');
+        });
+        window.verificationRaceObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+      });
+      await fixture.controlVerification({ kind: 'release-read', readId: held.readId });
+      await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'heldVerificationReadReleased').length).toBe(1);
+      await page.waitForTimeout(150);
+      if (scope === 'destroyed') await fixture.openModpack();
+      await expect(page.getByRole('region', { name: /^Last verification/u })).toContainText(expectedJob);
+      expect(await page.evaluate(() => { window.verificationRaceObserver.disconnect(); return window.verificationRaceViolations; })).toEqual([]);
+    } finally { await fixture.close(); }
+  });
+}
+
+test('verification continuity renderer reload loses memory hints without replay despite a durable record', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed' });
+  try {
+    const { page } = fixture;
+    const job = await startFixtureVerification(fixture);
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(job.jobId);
+    await page.reload();
+    if (!(await page.getByRole('heading', { name: 'Modpack', exact: true }).isVisible())) await fixture.openModpack();
+    await expect(page.getByRole('navigation', { name: 'Modpack sections' })).toBeVisible();
+    await expect(page.getByRole('region', { name: /^Last verification/u })).toHaveCount(0);
+    const durable = await page.evaluate(jobId => window.electron.invoke('modpacks:get-job', { jobId }), job.jobId);
+    expect(durable).toMatchObject({ ok: true, value: { jobId: job.jobId, phase: 'completed' } });
+    expect(fixture.readState().lifecycleCalls.filter(call => call.method === 'verify')).toHaveLength(1);
+  } finally { await fixture.close(); }
+});
+
+test('verification continuity a destroyed page cannot remember its late start over a newer attempt', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { holdVerifyOwner: true, holdFirstVerifyResponse: true } });
+  try {
+    const { page } = fixture;
+    const old = await startFixtureVerification(fixture);
+    await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'heldVerificationStartEntered').length).toBe(1);
+    await openDashboard(page);
+    await fixture.controlVerification({ kind: 'settle', jobId: old.jobId });
+    await fixture.controlVerification({ kind: 'release', jobId: old.jobId });
+    await expect(dashboardStarts(page).nth(0)).toBeEnabled();
+    await fixture.openModpack();
+    await expect(page.getByRole('region', { name: /^Last verification/u })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await page.getByRole('button', { name: 'Verify', exact: true }).click();
+    const newer = await fixture.controlVerification({ kind: 'read' });
+    await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toContainText(newer.jobId);
+    await fixture.controlVerification({ kind: 'release-start', jobId: old.jobId });
+    await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'heldVerificationStartReleased').length).toBe(1);
+    await expect(page.getByRole('region', { name: 'Last verification attempt', exact: true })).toContainText(newer.jobId);
+    await fixture.controlVerification({ kind: 'settle', jobId: newer.jobId });
+    await fixture.controlVerification({ kind: 'release', jobId: newer.jobId });
+    await openDashboard(page);
+    await fixture.openModpack();
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(newer.jobId);
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).not.toContainText(old.jobId);
+    expect(fixture.readState().lifecycleCalls.filter(call => call.method === 'verify')).toHaveLength(2);
+  } finally { await fixture.close(); }
+});
+
+test('verification continuity restored evidence still requires fresh repair inspection preflight and explicit Start', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed' });
+  try {
+    const { page } = fixture;
+    const job = await startFixtureVerification(fixture);
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(job.jobId);
+    await openDashboard(page);
+    await fixture.openModpack();
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(job.jobId);
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await page.getByRole('button', { name: 'Review repair', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Choose where the pack is published', exact: true })).toBeFocused();
+    expect(fixture.readState().lifecycleCalls.filter(call => ['createPlan', 'createManagementPlan', 'startOperation'].includes(call.method))).toEqual([]);
+    await page.getByRole('button', { name: /Local archive/u }).click();
+    await expect(page.getByRole('heading', { name: 'Inspect evidence before installation' })).toBeVisible();
+    expect(fixture.readState().lifecycleCalls.filter(call => call.method === 'startOperation')).toEqual([]);
+    await startReviewedArchive(page);
+    await expectCompleted(page);
+    const calls = fixture.readState().lifecycleCalls;
+    expect(calls.filter(call => call.method === 'createPlan')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ requestedOperationKind: 'repair' })
+    ]));
+    expect(calls.filter(call => call.method === 'startOperation')).toEqual([expect.objectContaining({ operationKind: 'repair' })]);
+    expect(calls.some(call => call.method === 'createManagementPlan')).toBe(false);
+    expect(calls.filter(call => call.method === 'verify')).toHaveLength(1);
+  } finally { await fixture.close(); }
+});
+
+test('verification continuity restored evidence cannot bypass stale-plan repair re-review', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { rejectFirstRepairStart: true } });
+  try {
+    const { page } = fixture;
+    const job = await startFixtureVerification(fixture);
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(job.jobId);
+    await openDashboard(page);
+    await fixture.openModpack();
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await page.getByRole('button', { name: 'Review repair', exact: true }).click();
+    await page.getByRole('button', { name: /Local archive/u }).click();
+    await startReviewedArchive(page);
+    await expect(page.getByText('Reviewed plan needs a fresh preflight', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Start reviewed operation', exact: true })).toBeDisabled();
+    const rejected = fixture.readState().lifecycleCalls;
+    expect(rejected.filter(call => call.method === 'startOperation')).toEqual([]);
+    expect(rejected.filter(call => call.method === 'startOperationRejected')).toEqual([
+      expect.objectContaining({ operationKind: 'repair', code: 'PLAN_STALE' })
+    ]);
+    await page.getByRole('button', { name: 'Run a fresh preflight review', exact: true }).click();
+    await expect(page.getByRole('button', { name: /Local archive/u })).toBeVisible();
+    await page.getByRole('button', { name: /Local archive/u }).click();
+    await startReviewedArchive(page);
+    await expectCompleted(page);
+    const calls = fixture.readState().lifecycleCalls;
+    expect(calls.filter(call => call.method === 'createPlan' && call.planId).length).toBeGreaterThan(1);
+    expect(calls.filter(call => call.method === 'startOperation')).toEqual([expect.objectContaining({ operationKind: 'repair' })]);
+    expect(calls.filter(call => call.method === 'verify')).toHaveLength(1);
+    expect(calls.filter(call => call.method === 'createManagementPlan')).toEqual([]);
+  } finally { await fixture.close(); }
+});
+
+test('verification continuity same-pair explicit owner selection refreshes invalidated hydration without a loop', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { holdRepairOwner: true } });
+  try {
+    const { page } = fixture;
+    const repair = await startHeldRepair(fixture);
+    const original = await fixture.controlVerification({ kind: 'read' });
+    // A nonterminal defensive snapshot must remain an attempt, not old counts.
+    await fixture.controlVerification({ kind: 'set-job', jobId: original.jobId, value: { ...original, phase: 'queued', terminalAt: null, outcome: null } });
+    await fixture.controlVerification({ kind: 'own', jobId: original.jobId });
+    await openDashboard(page);
+    for (let index = 0; index < 2; index++) await fixture.controlVerification({ kind: 'queue-read', jobId: original.jobId, reply: { hold: true } });
+    await fixture.openModpack();
+    const owned = page.getByRole('region', { name: 'Owned operations' });
+    await expect(owned.getByRole('button')).toHaveCount(2);
+    await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'heldVerificationReadEntered').length).toBe(1);
+    await owned.getByRole('button', { name: new RegExp(repair.jobId, 'u') }).click();
+    await expect.poll(() => fixture.readState().lifecycleCalls.filter(call => call.method === 'heldVerificationReadEntered').length).toBe(2);
+    await owned.getByRole('button', { name: new RegExp(original.jobId, 'u') }).click();
+    const summary = page.getByRole('region', { name: 'Last verification attempt', exact: true });
+    await expect(summary).toContainText('had not completed when read');
+    await expect(summary).not.toContainText('checked files');
+    const before = fixture.readState().lifecycleCalls.filter(call => call.method === 'getJob' && call.jobId === original.jobId).length;
+    await owned.getByRole('button', { name: new RegExp(original.jobId, 'u') }).click();
+    await owned.getByRole('button', { name: new RegExp(original.jobId, 'u') }).click();
+    await page.waitForTimeout(150);
+    expect(fixture.readState().lifecycleCalls.filter(call => call.method === 'getJob' && call.jobId === original.jobId).length).toBe(before);
+    for (const held of fixture.readState().lifecycleCalls.filter(call => call.method === 'heldVerificationReadEntered')) {
+      await fixture.controlVerification({ kind: 'release-read', readId: held.readId });
+    }
+    await expect(summary).toContainText('had not completed when read');
+  } finally { await fixture.close(); }
+});
+
 test('Dashboard Modpack Dashboard always rechecks recovery and normal completion restores both Starts', async () => {
   const fixture = await harness.launchModpackApp({
     profile: 'managed',
@@ -1062,7 +1505,7 @@ test('an unmanaged server shows neither a notification badge nor a notification 
     await expect(page.locator('.modpack-page .notification-host.contextual')).toHaveCount(0);
     await page.getByRole('button', { name: 'Actions' }).click();
     await expect(page.getByRole('heading', { name: 'No managed modpack is attached' })).toBeVisible();
-    for (const unavailable of ['Verify', 'Repair', 'Choose restore point', 'Review detach', 'Review uninstall']) {
+    for (const unavailable of ['Verify', 'Review repair', 'Choose restore point', 'Review detach', 'Review uninstall']) {
       await expect(page.getByRole('button', { name: unavailable, exact: true })).toHaveCount(0);
     }
     expect(fixture.readState().lifecycleCalls.some(call =>
