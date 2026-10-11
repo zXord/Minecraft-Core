@@ -6,6 +6,16 @@ const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
 const { EventEmitter } = require('node:events');
+const { createStartupTrace } = require('../../electron/utils/startup-trace.cjs');
+const { loadStartupAttributionModule } = require('../helpers/startup-attribution-loader.cjs');
+
+function tracedGraph(markStartupTrace) {
+  return loadStartupAttributionModule(
+    require.resolve('../../electron/bootstrap/create-modpack-service-graph.cjs'),
+    markStartupTrace,
+    request => request.endsWith('/startup-recovery-bootstrap.cjs')
+  ).createModpackServiceGraph;
+}
 
 const {
   createProductionDurableFsFactory,
@@ -95,7 +105,7 @@ function fakeModpackComposition(overrides = {}) {
   };
 }
 
-function graphFixture(overrides = {}) {
+function graphFixture(overrides = {}, createGraph = createModpackServiceGraph) {
   const userDataPath = path.join(os.tmpdir(), 'minecraft-core-service-graph-user-data');
   const runtimeRoot = path.resolve(__dirname, '../..');
   const resourcesPath = path.join(runtimeRoot, 'fixtures', 'resources');
@@ -126,7 +136,7 @@ function graphFixture(overrides = {}) {
     }
   };
 
-  const graph = createModpackServiceGraph({
+  const graph = createGraph({
     app,
     store,
     userDataPath,
@@ -907,9 +917,82 @@ test('service graph lazily establishes the reviewed startup recovery boundary ex
   assert.deepEqual(order, ['begin', 'runtime-quiescent', 'scan-1', 'complete']);
 });
 
+test('startup attribution brackets lazy recovery and composition exactly once without private values', async () => {
+  const order = [];
+  const lines = [];
+  const mark = createStartupTrace({ env: { MINECRAFT_CORE_STARTUP_TRACE: '1' }, now: () => 10,
+    utcNow: () => '2026-10-11T00:00:00.000Z', pid: 123,
+    sink(line) { lines.push(line); order.push(JSON.parse(line.slice('[Minecraft Core startup trace] '.length)).marker); } });
+  const { graph } = graphFixture({
+    async recoveryFactory() {
+      order.push('factory-call');
+      return { registry: { async initialize() { order.push('registry-call'); return { records: [], corrupt: [], blocks: [], globalBlock: false }; } },
+        recoveryService: { async recoverAll() { assert.fail('no automatic cleanup'); } },
+        async runtimeVerifier() { order.push('runtime-call'); return { quiescent: true }; } };
+    },
+    async modpackFactory() { order.push('composition-call'); return fakeModpackComposition({
+      async initialize() { order.push('initialize-call'); } }); }
+  }, tracedGraph(mark));
+  assert.deepEqual(order, []);
+  const first = graph.startup.initializeRecovery(graph);
+  const second = graph.startup.initializeRecovery(graph);
+  assert.equal(first, second);
+  assert.deepEqual(await first, { recovered: [], unresolved: [], globalBlock: false });
+  assert.equal(await second, await graph.startup.initializeRecovery(graph));
+  assert.deepEqual(order, [
+    'recovery:factory:start', 'factory-call', 'recovery:factory:complete',
+    'recovery:runtime-verify:start', 'runtime-call', 'recovery:runtime-verify:complete',
+    'recovery:registry-init:start', 'registry-call', 'recovery:registry-init:complete',
+    'composition:factory:start', 'composition-call', 'composition:factory:complete',
+    'composition:initialize:start', 'initialize-call', 'composition:initialize:complete'
+  ]);
+  for (const line of lines) assert.deepEqual(Object.keys(JSON.parse(line.slice('[Minecraft Core startup trace] '.length))), ['marker', 'pid', 'utc', 'elapsedMs']);
+  assert.doesNotMatch(lines.join(''), /user-data|SECRET|serverPath|records|store/);
+});
+
+for (const phase of ['recovery-factory', 'runtime', 'registry', 'composition-factory-sync', 'composition-factory-async', 'composition-initialize']) {
+  test(`startup attribution preserves ${phase} rejection identity and omits false completion`, async () => {
+    const failure = new Error('SECRET_FAILURE');
+    const expected = {
+      'recovery-factory': ['recovery:factory:start'],
+      runtime: ['recovery:factory:start', 'recovery:factory:complete', 'recovery:runtime-verify:start'],
+      registry: ['recovery:factory:start', 'recovery:factory:complete', 'recovery:runtime-verify:start', 'recovery:runtime-verify:complete', 'recovery:registry-init:start'],
+      'composition-factory-sync': ['recovery:factory:start', 'recovery:factory:complete', 'recovery:runtime-verify:start', 'recovery:runtime-verify:complete', 'recovery:registry-init:start', 'recovery:registry-init:complete', 'composition:factory:start'],
+      'composition-factory-async': ['recovery:factory:start', 'recovery:factory:complete', 'recovery:runtime-verify:start', 'recovery:runtime-verify:complete', 'recovery:registry-init:start', 'recovery:registry-init:complete', 'composition:factory:start'],
+      'composition-initialize': ['recovery:factory:start', 'recovery:factory:complete', 'recovery:runtime-verify:start', 'recovery:runtime-verify:complete', 'recovery:registry-init:start', 'recovery:registry-init:complete', 'composition:factory:start', 'composition:factory:complete', 'composition:initialize:start']
+    }[phase];
+    for (const enabled of [false, true]) {
+      const lines = [];
+      const mark = createStartupTrace({ env: { MINECRAFT_CORE_STARTUP_TRACE: enabled ? '1' : '0' },
+        now: () => 0, utcNow: () => '2026-10-11T00:00:00.000Z', pid: 123, sink: line => { lines.push(line); } });
+      const { graph } = graphFixture({
+        async recoveryFactory() {
+          if (phase === 'recovery-factory') throw failure;
+          return { registry: { async initialize() { if (phase === 'registry') throw failure; return { records: [], corrupt: [], blocks: [], globalBlock: false }; } },
+            recoveryService: { recoverAll() {} }, async runtimeVerifier() { if (phase === 'runtime') throw failure; return { quiescent: true }; } };
+        },
+        modpackFactory() {
+          if (phase === 'composition-factory-sync') throw failure;
+          if (phase === 'composition-factory-async') return Promise.reject(failure);
+          return fakeModpackComposition({ async initialize() { if (phase === 'composition-initialize') throw failure; } });
+        }
+      }, tracedGraph(mark));
+      const first = graph.startup.initializeRecovery(graph);
+      await assert.rejects(first, error => error === failure);
+      assert.equal(graph.startup.initializeRecovery(graph), first);
+      assert.deepEqual(lines.map(line => JSON.parse(line.slice('[Minecraft Core startup trace] '.length)).marker), enabled ? expected : []);
+      assert.doesNotMatch(lines.join(''), /SECRET_FAILURE/);
+    }
+  });
+}
+
 test('default production recovery services compose for a fresh isolated profile', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-production-recovery-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const markers = [];
+  const mark = createStartupTrace({ env: { MINECRAFT_CORE_STARTUP_TRACE: '1' }, now: () => 0,
+    utcNow: () => '2026-10-11T00:00:00.000Z', pid: 123,
+    sink: line => { markers.push(JSON.parse(line.slice('[Minecraft Core startup trace] '.length)).marker); } });
   const fixture = graphFixture({
     userDataPath: root,
     coordinator: new ServerMutationCoordinator(),
@@ -921,11 +1004,13 @@ test('default production recovery services compose for a fresh isolated profile'
     recoveryRuntimeVerifier: {
       async verifyBeforeRecovery() { return { quiescent: true }; }
     }
-  });
+  }, tracedGraph(mark));
 
   const result = await fixture.graph.startup.initializeRecovery(fixture.graph);
 
   assert.deepEqual(result, { recovered: [], unresolved: [], globalBlock: false });
+  assert.deepEqual(markers.slice(0, 4), ['recovery:factory:start', 'recovery:release-tracking-init:start',
+    'recovery:release-tracking-init:complete', 'recovery:factory:complete']);
   const services = fixture.graph.recovery.getServices();
   assert.equal(typeof services.runtimeWriterAuthority?.run, 'function');
   assert.equal(services.recoveryService.runtimeWriterAuthority, services.runtimeWriterAuthority);

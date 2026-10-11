@@ -1,5 +1,6 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
+const { markStartupTrace } = require('../../utils/startup-trace.cjs');
 
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 
@@ -145,8 +146,12 @@ async function establishStartupRecoveryBoundary({ coordinator, registry, runtime
   if (!runtimeVerifier) throw invalid();
 
   coordinator.beginStartupRecovery();
+  markStartupTrace('recovery:runtime-verify:start');
   await verifyRuntime(runtimeVerifier);
+  markStartupTrace('recovery:runtime-verify:complete');
+  markStartupTrace('recovery:registry-init:start');
   const scan = await registry.initialize();
+  markStartupTrace('recovery:registry-init:complete');
   const mapping = mapScanBlocks(scan);
   if (mapping.blocks.length > 0) coordinator.installRecoveryBlocks(mapping.blocks);
   coordinator.completeStartupRecovery(mapping.blocks.map(item => Object.freeze({

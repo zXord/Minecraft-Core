@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { markStartupTrace } = require('../utils/startup-trace.cjs');
 
 const { ModpackLifecycleService } = require('../services/modpack-lifecycle/modpack-lifecycle-service.cjs');
 const { ModpackRecoveryFacade } = require('../services/modpack-lifecycle/modpack-recovery-facade.cjs');
@@ -604,17 +605,27 @@ async function createProductionModpackComposition(input = {}) {
       nativeNotificationBridge,
       async initialize() {
         if (initialized) return composition;
+        markStartupTrace('composition:operation-store-init:start');
         const jobs = await operationStore.initialize();
+        markStartupTrace('composition:operation-store-init:complete');
+        markStartupTrace('composition:notification-store-init:start');
         await notificationStore.initialize();
+        markStartupTrace('composition:notification-store-init:complete');
+        markStartupTrace('composition:release-tracking-init:start');
         await releaseTrackingStore.initialize();
+        markStartupTrace('composition:release-tracking-init:complete');
+        markStartupTrace('composition:client-packs-init:start');
         await clientPacks.initialize();
+        markStartupTrace('composition:client-packs-init:complete');
         if (typeof recoveryRegistry.loadHistory === 'function') {
+          markStartupTrace('composition:recovery-history-reconcile:start');
           await reconcileOperationStoreWithRecovery({
             operationStore,
             recoveryRegistry,
             jobs,
             outcomeActionIssuer: lifecycleOutcomeActionIssuer
           });
+          markStartupTrace('composition:recovery-history-reconcile:complete');
         }
         scheduleArtifactCachePrune();
         initialized = true;

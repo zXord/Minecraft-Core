@@ -28,6 +28,20 @@ const markers = [
   'main:before-ready:start', 'main:before-ready:complete', 'main:ipc:start',
   'main:ipc:listeners:complete', 'main:ipc:handler-module:complete', 'main:ipc:complete',
   'update-service:get:start', 'update-service:get:complete', 'recovery:start', 'recovery:complete',
+  'recovery:factory:start', 'recovery:factory:complete',
+  'recovery:release-tracking-init:start', 'recovery:release-tracking-init:complete',
+  'recovery:runtime-verify:start', 'recovery:runtime-verify:complete',
+  'recovery:registry-init:start', 'recovery:registry-init:complete',
+  'composition:factory:start', 'composition:factory:complete',
+  'composition:initialize:start', 'composition:initialize:complete',
+  'composition:operation-store-init:start', 'composition:operation-store-init:complete',
+  'composition:notification-store-init:start', 'composition:notification-store-init:complete',
+  'composition:release-tracking-init:start', 'composition:release-tracking-init:complete',
+  'composition:client-packs-init:start', 'composition:client-packs-init:complete',
+  'client-packs:companion-store-init:start', 'client-packs:companion-store-init:complete',
+  'client-packs:registered-cleanup:start', 'client-packs:registered-cleanup:complete',
+  'composition:recovery-history-reconcile:start', 'composition:recovery-history-reconcile:complete',
+  'vite:config-resolved', 'vite:configure-server', 'vite:http-listening',
   'server-config:start', 'server-config:complete', 'cleanup:start', 'cleanup:complete',
   'main-window:create:start', 'main-window:create:complete',
   'main-window:browser-window:create:start', 'main-window:browser-window:create:complete',
@@ -77,17 +91,18 @@ test('trace captures one initial baseline and emits only the bounded four-field 
   assert.doesNotMatch(lines.join(''), /SECRET|PRIVATE/);
 });
 
-test('trace admits all 73 startup markers once and rejects unknown inputs without coercion', () => {
+test('trace admits all 102 startup markers once and rejects unknown inputs without coercion', () => {
   const { mark, lines } = fixture();
   let coercions = 0;
   const privateMarker = { toString() { coercions += 1; return 'SECRET_PATH'; } };
   for (const unknown of [privateMarker, null, undefined, 42, 'SECRET_PATH', 'main:entry\nSECRET',
-    'main:import:SECRET_PATH:complete', 'main:ipc:SECRET_HANDLER:complete']) {
+    'main:import:SECRET_PATH:complete', 'main:ipc:SECRET_HANDLER:complete',
+    'recovery:SECRET_PATH:start', 'composition:SECRET_STORE:complete', 'vite:SECRET_PLUGIN']) {
     assert.equal(mark(unknown), false);
   }
   for (const marker of markers) assert.equal(mark(marker), true, marker);
   for (const marker of markers) assert.equal(mark(marker), false, marker);
-  assert.equal(lines.length, 73);
+  assert.equal(lines.length, 102);
   assert.equal(coercions, 0);
   assert.deepEqual(lines.map(line => JSON.parse(line.slice(prefix.length)).marker), markers);
   for (const line of lines) {

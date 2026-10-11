@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createViteStartupTracePlugin } from './scripts/vite-startup-trace.cjs'
 
 const repositoryRoot = path.resolve(fileURLToPath(new URL('.', import.meta.url)))
 const checkoutCacheKey = createHash('sha256')
@@ -15,7 +16,7 @@ const viteCacheDir = path.join(viteCacheBase, 'Minecraft Core', 'vite-cache', ch
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [svelte(), createViteStartupTracePlugin()],
   base: './', // Important for Electron
   // Keep Vite's dependency optimizer away from cloud/sync filter drivers. The
   // checkout hash preserves isolation when multiple worktrees are open.

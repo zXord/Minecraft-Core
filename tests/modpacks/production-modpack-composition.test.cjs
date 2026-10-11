@@ -6,6 +6,16 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { EventEmitter } = require('node:events');
+const { createStartupTrace } = require('../../electron/utils/startup-trace.cjs');
+const { loadStartupAttributionModule } = require('../helpers/startup-attribution-loader.cjs');
+
+function tracedComposition(markStartupTrace) {
+  return loadStartupAttributionModule(
+    require.resolve('../../electron/bootstrap/create-production-modpack-composition.cjs'),
+    markStartupTrace,
+    request => request.endsWith('/create-client-pack-composition.cjs')
+  ).createProductionModpackComposition;
+}
 
 const { createProductionModpackComposition } = require('../../electron/bootstrap/create-production-modpack-composition.cjs');
 const { OperationStore } = require('../../electron/services/modpack-lifecycle/operation-store.cjs');
@@ -169,6 +179,52 @@ function fixture(t, { useDefaultMutationRuntime = false, useDefaultArchiveRuntim
     input
   };
 }
+
+for (const history of [false, true]) {
+  test(`startup attribution nests sequential composition and client phases with history=${history}`, async t => {
+    const f = fixture(t);
+    if (history) f.input.rawRecoveryServices.registry.loadHistory = async () => null;
+    const lines = [];
+    const mark = createStartupTrace({ env: { MINECRAFT_CORE_STARTUP_TRACE: '1' }, now: () => 0,
+      utcNow: () => '2026-10-11T00:00:00.000Z', pid: 123, sink: line => { lines.push(line); } });
+    const composition = await tracedComposition(mark)(f.input);
+    t.after(() => composition.dispose());
+    assert.equal(await composition.initialize(), composition);
+    assert.equal(await composition.initialize(), composition);
+    assert.deepEqual(lines.map(line => JSON.parse(line.slice('[Minecraft Core startup trace] '.length)).marker), [
+      'composition:operation-store-init:start', 'composition:operation-store-init:complete',
+      'composition:notification-store-init:start', 'composition:notification-store-init:complete',
+      'composition:release-tracking-init:start', 'composition:release-tracking-init:complete',
+      'composition:client-packs-init:start',
+      'client-packs:companion-store-init:start', 'client-packs:companion-store-init:complete',
+      'client-packs:registered-cleanup:start', 'client-packs:registered-cleanup:complete',
+      'composition:client-packs-init:complete',
+      ...(history ? ['composition:recovery-history-reconcile:start', 'composition:recovery-history-reconcile:complete'] : [])
+    ]);
+    for (const line of lines) assert.deepEqual(Object.keys(JSON.parse(line.slice('[Minecraft Core startup trace] '.length))), ['marker', 'pid', 'utc', 'elapsedMs']);
+    assert.doesNotMatch(lines.join(''), /user-data|companions\.json|records|SECRET/);
+    assert.equal(f.pruneCalls, 1);
+  });
+}
+
+test('startup attribution omits failed companion completion while preserving corruption and cleanup', async t => {
+  const f = fixture(t);
+  const file = path.join(f.input.userDataPath, 'client-packs', 'companions.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '{SECRET_CORRUPT');
+  const lines = [];
+  const mark = createStartupTrace({ env: { MINECRAFT_CORE_STARTUP_TRACE: '1' }, now: () => 0,
+    utcNow: () => '2026-10-11T00:00:00.000Z', pid: 123, sink: line => { lines.push(line); } });
+  const composition = await tracedComposition(mark)(f.input);
+  t.after(() => composition.dispose());
+  assert.equal(await composition.initialize(), composition);
+  const markers = lines.map(line => JSON.parse(line.slice('[Minecraft Core startup trace] '.length)).marker);
+  assert.deepEqual(markers.slice(6), ['composition:client-packs-init:start',
+    'client-packs:companion-store-init:start', 'client-packs:registered-cleanup:start',
+    'client-packs:registered-cleanup:complete', 'composition:client-packs-init:complete']);
+  assert.equal(fs.readFileSync(file, 'utf8'), '{SECRET_CORRUPT');
+  assert.doesNotMatch(lines.join(''), /SECRET_CORRUPT|companions\.json/);
+});
 
 test('production active discovery uses registration authority without reading a swapping canonical tree and shares recovery ownership', async t => {
   const f = fixture(t);

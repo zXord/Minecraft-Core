@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const https = require('node:https');
 const path = require('node:path');
+const { markStartupTrace } = require('../utils/startup-trace.cjs');
 
 const { ServerMutationCoordinator } = require('../services/server-mutation-coordinator.cjs');
 const { createServerMutationPolicy } = require('../services/server-mutation-policy.cjs');
@@ -473,7 +474,9 @@ async function createProductionRecoveryServices(input) {
       durableFs: registryDurableFs,
       clock: now
     });
+    markStartupTrace('recovery:release-tracking-init:start');
     await releaseTrackingStore.initialize();
+    markStartupTrace('recovery:release-tracking-init:complete');
     const releaseTrackingReconciler = input.releaseTrackingReconciler || new ReleaseTrackingReconciler({
       trackingStore: releaseTrackingStore,
       recoveryRegistry: registry,
@@ -684,6 +687,7 @@ function createModpackServiceGraph(deps = {}) {
     initialize() {
       if (!recoveryPromise) {
         recoveryPromise = (async () => {
+          markStartupTrace('recovery:factory:start');
           const services = await recoveryFactory({
             clock,
             coordinator,
@@ -703,6 +707,7 @@ function createModpackServiceGraph(deps = {}) {
             store,
             userDataPath
           });
+          markStartupTrace('recovery:factory:complete');
           if (!services || typeof services !== 'object' ||
               !services.registry || typeof services.registry.initialize !== 'function' ||
               !services.recoveryService || typeof services.recoveryService.recoverAll !== 'function' ||
@@ -736,6 +741,7 @@ function createModpackServiceGraph(deps = {}) {
   let modpackPromise = null;
   async function initializeModpacks() {
     if (!modpackPromise) {
+      markStartupTrace('composition:factory:start');
       modpackPromise = Promise.resolve(modpackFactory({
         app,
         artifactCache,
@@ -768,12 +774,17 @@ function createModpackServiceGraph(deps = {}) {
         userDataPath,
         workerFactory
       })).then(async services => {
+        markStartupTrace('composition:factory:complete');
         if (!services || typeof services !== 'object') throw new TypeError('Modpack composition is invalid');
         if (services.providers !== undefined && (!services.providers || typeof services.providers !== 'object' ||
             !services.providers.modrinth || !services.providers.github)) {
           throw new TypeError('Modpack composition providers are invalid');
         }
-        if (typeof services.initialize === 'function') await services.initialize();
+        if (typeof services.initialize === 'function') {
+          markStartupTrace('composition:initialize:start');
+          await services.initialize();
+          markStartupTrace('composition:initialize:complete');
+        }
         modpackServices = services;
         return services;
       });

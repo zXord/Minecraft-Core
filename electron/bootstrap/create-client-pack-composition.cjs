@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { markStartupTrace } = require('../utils/startup-trace.cjs');
 const { ModpackError } = require('../services/modpacks/errors.cjs');
 const { CompanionStore } = require('../services/client-modpacks/companion-store.cjs');
 const { CompanionService } = require('../services/client-modpacks/companion-service.cjs');
@@ -125,8 +126,15 @@ function createClientPackComposition(input) {
   return Object.freeze({ companionService, clientPackService, clientPackIntegration, managementSessionBroker, resolveClientByPath, acquireLegacyManagementContext,
     async initialize() {
       if (initialized) return;
-      try { await companionStore.initialize(); } catch { /* Corruption remains explicit in companion requests; never reset. */ }
-      await cleanupRegisteredClients(); initialized = true;
+      markStartupTrace('client-packs:companion-store-init:start');
+      try {
+        await companionStore.initialize();
+        markStartupTrace('client-packs:companion-store-init:complete');
+      } catch { /* Corruption remains explicit in companion requests; never reset. */ }
+      markStartupTrace('client-packs:registered-cleanup:start');
+      await cleanupRegisteredClients();
+      markStartupTrace('client-packs:registered-cleanup:complete');
+      initialized = true;
     },
     dispose() {
       managementSessionBroker.dispose();
