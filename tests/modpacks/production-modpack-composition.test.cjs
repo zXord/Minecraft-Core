@@ -35,6 +35,244 @@ const {
 const SHA256 = 'a'.repeat(64);
 const SHA512 = 'b'.repeat(128);
 
+test('launch owner rejects mismatched workspace and operations roots', async t => {
+  for (const key of ['workspaces', 'operations']) {
+    const f = fixture(t);
+    f.input.paths = { ...f.input.paths, modpacks: { ...f.input.paths.modpacks,
+      [key]: path.join(f.input.userDataPath, `wrong-${key}`) } };
+    let composed;
+    try { await assert.rejects(async () => { composed = await createProductionModpackComposition(f.input); }, { code: 'INVALID_REQUEST' }); }
+    finally { await composed?.dispose(); }
+  }
+});
+
+test('launch startup rejects direct admission and lost or null owner lease', async t => {
+  const f = fixture(t);
+  const c = await createProductionModpackComposition(f.input);
+  t.after(() => c.dispose());
+  await assert.rejects(c.lifecycleService.verify('server-one'), { code: 'PLAN_STALE' });
+  await assert.rejects(c.lifecycleService.inspectSource({}), { code: 'PLAN_STALE' });
+  await assert.rejects(c.destinationReservationService.reserveWithNativeDialog({}), { code: 'PLAN_STALE' });
+  await c.initialize();
+  const lease = c.workspaceRegistry.rootLease;
+  c.workspaceRegistry.rootLease = null;
+  try { await assert.rejects(c.lifecycleService.verify('server-one'), { code: 'PLAN_STALE' }); }
+  finally { c.workspaceRegistry.rootLease = lease; }
+  c.workspaceRegistry.rootLease = { assertHeld() { throw new Error('lost test lease'); } };
+  try { await assert.rejects(c.lifecycleService.verify('server-one'), { code: 'PLAN_STALE' }); }
+  finally { c.workspaceRegistry.rootLease = lease; }
+});
+
+async function retainedQueuedCancellationFixture(t) {
+  const f = fixture(t);
+  const jobId = 'job-retained-queued-cancellation';
+  const prior = new OperationStore({ userDataPath: f.input.userDataPath, durableFs: f.input.durableFsFactory() });
+  await prior.initialize();
+  await prior.create({ jobId, operationKind: 'install-new', serverId: 'server-cancellation', planFingerprint: SHA256 });
+  const composition = await createProductionModpackComposition(f.input);
+  t.after(() => composition.dispose());
+  return { composition, jobId };
+}
+
+for (const state of ['before-ready', 'after-closing', 'after-disposed', 'lost-lease']) {
+  test(`launch cancellation refuses ${state} without changing a retained queued job`, async t => {
+    const { composition: c, jobId } = await retainedQueuedCancellationFixture(t);
+    const store = c.lifecycleService.operationStore;
+    // Represents startup after durable loading but before the readiness barrier.
+    if (state === 'before-ready') await store.initialize();
+    else await c.initialize();
+    let disposal;
+    const assertLease = c.workspaceRegistry.assertLease;
+    try {
+      if (state === 'after-closing') disposal = c.dispose();
+      if (state === 'after-disposed') await c.dispose();
+      if (state === 'lost-lease') c.workspaceRegistry.assertLease = () => { throw new Error('lost cancellation fixture lease'); };
+      await assert.rejects(c.lifecycleService.cancelJob(jobId), { code: 'PLAN_STALE' });
+      const unchanged = await store.get(jobId);
+      assert.equal(unchanged.phase, 'queued');
+      assert.equal(unchanged.sequence, 0);
+      assert.equal(unchanged.cancellationRequested, false);
+    } finally {
+      c.workspaceRegistry.assertLease = assertLease;
+      await disposal;
+    }
+  });
+}
+
+for (const pause of ['lookup', 'publication']) {
+  test(`launch cancellation drain retains the lease during deferred queued ${pause}`, async t => {
+    const { composition: c, jobId } = await retainedQueuedCancellationFixture(t);
+    await c.initialize();
+    const store = c.lifecycleService.operationStore.operationStore;
+    let finish; const gate = new Promise(resolve => { finish = resolve; });
+    let enter; const entered = new Promise(resolve => { enter = resolve; });
+    const get = store.get.bind(store);
+    const durableFs = store.durableFs;
+    if (pause === 'lookup') store.get = async id => { enter(); await gate; return get(id); };
+    else {
+      const write = durableFs.writeJsonAtomicAsync;
+      store.durableFs = { ...durableFs, async writeJsonAtomicAsync(...args) { enter(); await gate; return write(...args); } };
+    }
+    const cancelling = c.lifecycleService.cancelJob(jobId);
+    await entered;
+    assert.equal(c.lifecycleService.activeOperations.size, 0);
+    const lease = c.workspaceRegistry.rootLease;
+    let disposed = false;
+    const disposing = c.dispose().then(() => { disposed = true; });
+    let cancelled;
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(disposed, false);
+      assert.equal(c.workspaceRegistry.rootLease, lease);
+      lease.assertHeld();
+      await assert.rejects(c.lifecycleService.cancelJob(jobId), { code: 'PLAN_STALE' });
+    } finally {
+      finish();
+      store.get = get;
+      store.durableFs = durableFs;
+      cancelled = await cancelling;
+      await disposing;
+    }
+    assert.equal(cancelled.phase, 'cancelling');
+    assert.equal(cancelled.cancellationRequested, true);
+    assert.equal((await get(jobId)).phase, 'cancelling');
+    assert.equal(c.workspaceRegistry.rootLease, null);
+  });
+}
+
+test('launch drain includes entire raw recovery before onResolved and refuses fresh work', async t => {
+  const f = fixture(t);
+  let enter;
+  const entered = new Promise(resolve => { enter = resolve; });
+  let finish;
+  const gate = new Promise(resolve => { finish = resolve; });
+  const record = { jobId: 'job-launch-drain', operationKind: 'repair', phase: 'validating-candidate', swapStep: 'none',
+    target: { kind: 'existing', stableServerId: 'server-one', path: path.join(f.input.userDataPath, 'server') }, outcome: { runtimeWriterProtocol: 1 } };
+  f.input.rawRecoveryServices.registry.listActive = async () => [record];
+  f.input.rawRecoveryServices.recoveryService.recover = async () => { enter(); await gate; return { resolved: true, action: 'pre-swap-restored' }; };
+  const c = await createProductionModpackComposition(f.input);
+  await c.initialize();
+  const list = await c.recoveryService.listRecovery();
+  const recovering = c.recoveryService.recover({ recoveryId: list.items[0].recoveryId, actionId: 'retry-recovery' });
+  await entered;
+  let closed = false;
+  const disposing = c.dispose().then(() => { closed = true; });
+  try {
+    await assert.rejects(c.lifecycleService.verify('server-one'), { code: 'PLAN_STALE' });
+    await assert.rejects(c.recoveryService.recover({ recoveryId: list.items[0].recoveryId, actionId: 'retry-recovery' }), { code: 'PLAN_STALE' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(closed, false);
+    assert.notEqual(c.workspaceRegistry.rootLease, null);
+  } finally { finish(); await recovering; await disposing; }
+});
+
+test('launch drain includes Verify before job creation', async t => {
+  const f = fixture(t);
+  const c = await createProductionModpackComposition(f.input);
+  await c.initialize();
+  c.lifecycleService.stateRepository = { async verifyManagedFiles() { return { valid: true }; } };
+  const store = c.lifecycleService.operationStore;
+  const create = store.create.bind(store);
+  let finish;
+  const gate = new Promise(resolve => { finish = resolve; });
+  let enter;
+  const entered = new Promise(resolve => { enter = resolve; });
+  store.create = async (...args) => { enter(); await gate; return create(...args); };
+  const verifying = c.lifecycleService.verify('server-one');
+  await entered;
+  assert.equal(c.lifecycleService.activeOperations.size, 0);
+  let disposed = false;
+  const disposal = c.dispose().then(() => { disposed = true; });
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(disposed, false);
+    c.workspaceRegistry.assertLease();
+  } finally { finish(); await verifying; await disposal; }
+  assert.equal(c.workspaceRegistry.rootLease, null);
+});
+
+test('launch drain failure keeps the lease and dependencies while admitted writers remain', async t => {
+  const f = fixture(t);
+  const c = await createProductionModpackComposition(f.input);
+  await c.initialize();
+  let finish;
+  const work = c.lifecycleService.runAdmittedWork(() => new Promise(resolve => { finish = resolve; }));
+  const drain = c.lifecycleService.drain.bind(c.lifecycleService);
+  c.lifecycleService.drain = async () => { throw new Error('drain could not be proved'); };
+  const lease = c.workspaceRegistry.rootLease;
+  let hashClosed = false;
+  c.candidateHashService.dispose = async () => { hashClosed = true; };
+  try {
+    await assert.rejects(c.dispose(), /drain could not be proved/);
+    assert.equal(c.workspaceRegistry.rootLease, lease);
+    assert.equal(hashClosed, false);
+    lease.assertHeld();
+  } finally {
+    finish(); await work;
+    c.lifecycleService.drain = drain;
+    await c.lifecycleService.dispose(); await c.planRegistry.dispose(); await c.workspaceRegistry.dispose();
+  }
+});
+
+test('launch owner rejects a dialog completion after disposal before capture or reservation publication', async t => {
+  const f = fixture(t);
+  let finish;
+  f.input.dialog.showOpenDialog = () => new Promise(resolve => { finish = resolve; });
+  const c = await createProductionModpackComposition(f.input);
+  await c.initialize();
+  c.destinationReservationService.captureReservation = async () => assert.fail('late dialog captured target');
+  const selecting = c.destinationReservationService.reserveWithNativeDialog({});
+  await new Promise(resolve => setImmediate(resolve));
+  await c.dispose();
+  finish({ canceled: false, filePaths: [path.join(f.input.userDataPath, 'late-selected')] });
+  await assert.rejects(selecting, { code: 'PLAN_STALE' });
+  assert.equal(c.destinationReservationService.records.size, 0);
+});
+
+test('launch owner never reissues a retained durable reservation incarnation after restart', async t => {
+  const f = fixture(t);
+  const epoch = Symbol('prior explicit test owner');
+  const lease = { assertHeld() { return true; } };
+  const priorOwner = { epoch, assertCurrent(expected) { assert.equal(expected, epoch); lease.assertHeld(); } };
+  const prior = new OperationStore({ userDataPath: f.input.userDataPath, durableFs: f.input.durableFsFactory(),
+    allowNewServerLaunchBindings: true, launchOwner: priorOwner });
+  await prior.initialize();
+  const instanceId = 'server-00000000-0000-4000-8000-000000000001';
+  await prior.create({ jobId: 'job-prior-launch', operationKind: 'install-new', serverId: instanceId, planFingerprint: SHA256,
+    launchBinding: { planId: 'plan-launch-v1-00000000-0000-4000-8000-000000000099', planFingerprint: SHA256,
+      instanceId, targetPath: 'c:\\launchfixture\\prior', capturedReservation: { kind: 'absent' }, displayName: 'Prior', destinationDisposition: 'held' } }, epoch);
+  const loaded = await prior.getNewServerLaunch('job-prior-launch', epoch);
+  await prior.settleNewServerDestination('job-prior-launch', { expectedInstanceId: instanceId,
+    expectedRecordRevision: loaded.recordRevision, nextDisposition: 'released' }, epoch);
+  const targetPath = path.join(f.input.userDataPath, 'fresh'); fs.mkdirSync(targetPath);
+  f.input.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [targetPath] });
+  const c = await createProductionModpackComposition(f.input);
+  t.after(() => c.dispose());
+  await c.initialize();
+  const reserved = await c.destinationReservationService.reserveWithNativeDialog({});
+  assert.notEqual(reserved.instanceId, instanceId);
+  assert.equal(c.lifecycleService.operationStore.operationStore.allowNewServerLaunchBindings, false);
+});
+
+test('launch startup disposal drains in-flight initialization without enabling admission', async t => {
+  const f = fixture(t);
+  const c = await createProductionModpackComposition(f.input);
+  const store = c.lifecycleService.operationStore;
+  const initialize = store.initialize.bind(store);
+  let finish;
+  const gate = new Promise(resolve => { finish = resolve; });
+  store.initialize = async () => { await gate; return initialize(); };
+  const initializing = c.initialize().catch(error => error);
+  let disposed = false;
+  const disposing = c.dispose().then(() => { disposed = true; });
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(disposed, false);
+    assert.notEqual(c.workspaceRegistry.rootLease, null);
+  } finally { finish(); await initializing; await disposing; }
+  await assert.rejects(c.lifecycleService.verify('server-one'), { code: 'PLAN_STALE' });
+});
+
 function verifiedLocalSet() {
   const plan = createArtifactSetPlan({
     provider: 'local',
@@ -609,7 +847,7 @@ test('production composition shares its reparse inspector with the archive worke
   await composition.dispose();
 });
 
-test('production disposal releases inspection and plan ownership before its first await', async t => {
+test('production disposal starts inspection closure synchronously and delays plan cleanup until drains', async t => {
   const context = fixture(t);
   const order = [];
   let finishHashDisposal;
@@ -631,7 +869,6 @@ test('production disposal releases inspection and plan ownership before its firs
 
   assert.deepEqual(order, [
     'inspections',
-    'plans',
     'release-monitor',
     'notifications'
   ]);
@@ -641,9 +878,9 @@ test('production disposal releases inspection and plan ownership before its firs
   await pending;
   assert.deepEqual(order, [
     'inspections',
-    'plans',
     'release-monitor',
     'notifications',
+    'plans',
     'candidate-hash',
     'workspaces'
   ]);
@@ -710,7 +947,6 @@ test('production disposal is cached and attempts every stage after lifecycle and
   assert.equal(composition.dispose(), pending);
   assert.deepEqual(order, [
     'inspections',
-    'plans',
     'release-monitor',
     'notifications'
   ]);
@@ -726,9 +962,9 @@ test('production disposal is cached and attempts every stage after lifecycle and
   );
   assert.deepEqual(order, [
     'inspections',
-    'plans',
     'release-monitor',
     'notifications',
+    'plans',
     'candidate-hash',
     'workspaces'
   ]);
@@ -757,7 +993,6 @@ test('production disposal releases the workspace lease after asynchronous candid
 
   assert.deepEqual(order, [
     'inspections',
-    'plans',
     'release-monitor',
     'notifications'
   ]);
@@ -767,9 +1002,9 @@ test('production disposal releases the workspace lease after asynchronous candid
   await assert.rejects(pending, error => error === candidateFailure);
   assert.deepEqual(order, [
     'inspections',
-    'plans',
     'release-monitor',
     'notifications',
+    'plans',
     'candidate-hash',
     'workspaces'
   ]);
@@ -1259,7 +1494,7 @@ for (const recoveryAction of ['pre-publication-cleanup', 'new-health-failed']) {
     assert.equal(result.operationStateReconciled, true);
     assert.equal(composition.destinationReservationService.resolve(reserved.instanceId), null);
     const retry = await composition.destinationReservationService.reserveWithNativeDialog({});
-    assert.equal(retry.instanceId, reserved.instanceId, 'a released identity must remain bound to the same retry path');
+    assert.notEqual(retry.instanceId, reserved.instanceId, 'same-path retry must allocate a fresh incarnation');
     assert.equal(composition.destinationReservationService.release(retry.instanceId), true);
   });
 }
@@ -1294,7 +1529,12 @@ for (const registrationState of ['registered', 'absent']) test(`authenticated me
   });
   Object.assign(context.input.rawRecoveryServices, { registry, recoveryService: service });
   const composition = await createProductionModpackComposition(context.input); t.after(() => composition.dispose());
-  const reserved = await composition.destinationReservationService.reserveWithNativeDialog({});
+  // Seed this startup-history fixture internally, without enabling public startup admission.
+  const reservationAdmission = composition.destinationReservationService.assertAdmission;
+  composition.destinationReservationService.assertAdmission = () => {};
+  let reserved;
+  try { reserved = await composition.destinationReservationService.reserveWithNativeDialog({}); }
+  finally { composition.destinationReservationService.assertAdmission = reservationAdmission; }
   const jobId = `job-metadata-${registrationState}`;
   const operationStore = new OperationStore({ userDataPath: context.input.userDataPath, durableFs: context.input.durableFsFactory() });
   await operationStore.initialize();
@@ -1338,6 +1578,6 @@ for (const registrationState of ['registered', 'absent']) test(`authenticated me
   context.input.store.set('instances', []);
   const next = await composition.destinationReservationService.reserveWithNativeDialog({});
   if (registrationState === 'registered') assert.notEqual(next.instanceId, reserved.instanceId);
-  else assert.equal(next.instanceId, reserved.instanceId);
+  else assert.notEqual(next.instanceId, reserved.instanceId);
   composition.destinationReservationService.release(next.instanceId);
 });

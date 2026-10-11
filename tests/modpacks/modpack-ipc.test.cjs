@@ -33,6 +33,7 @@ function createFixture() {
       release: value('releaseServerDestination')
     },
     lifecycleService: {
+      releaseServerDestination: value('releaseServerDestination'),
       inspectSource: value('inspectSource'),
       cancelInspection: value('cancelInspection'),
       createPlan: value('createPlan'),

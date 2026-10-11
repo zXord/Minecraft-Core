@@ -132,15 +132,17 @@ function internalRecord(record) {
     fingerprint: record.fingerprint,
     plan: record.plan,
     planView: clone(record.planView),
+    reservationInstanceId: record.reservationInstanceId ?? null,
     expiresAt: record.expiresAt
   });
 }
 
 class PlanRegistry {
-  constructor({ workspaceRegistry, clock = () => Date.now(), randomUUID = crypto.randomUUID, ttlMs = PLAN_TTL_MS } = {}) {
+  constructor({ workspaceRegistry, clock = () => Date.now(), randomUUID = crypto.randomUUID, ttlMs = PLAN_TTL_MS,
+    allowNewServerLaunchBindings = false } = {}) {
     if (!workspaceRegistry || typeof workspaceRegistry.transferOwnership !== 'function' ||
         typeof workspaceRegistry.releaseOwner !== 'function' || typeof clock !== 'function' || typeof randomUUID !== 'function' ||
-        !Number.isSafeInteger(ttlMs) || ttlMs < 1) throw invalid();
+        typeof allowNewServerLaunchBindings !== 'boolean' || !Number.isSafeInteger(ttlMs) || ttlMs < 1) throw invalid();
     this.workspaceRegistry = workspaceRegistry;
     this.clock = clock;
     this.randomUUID = randomUUID;
@@ -149,6 +151,9 @@ class PlanRegistry {
     this.allocatedIds = new Set();
     this.claimedJobIds = new Set();
     this.claimedPlans = new Map();
+    this.allowNewServerLaunchBindings = allowNewServerLaunchBindings;
+    this.invalidations = new Map();
+    this.fenceGeneration = 0;
   }
 
   create(request) {
@@ -164,7 +169,7 @@ class PlanRegistry {
     const plan = isDeepFrozen(suppliedPlan) ? suppliedPlan : deepFreeze(clonedPlan);
     const planningSessionId = assertIdentifier(descriptors.planningSessionId.value);
     const planView = validatePlanView(descriptors.sanitizedView.value);
-    const planId = this.#newId('plan');
+    const planId = this.#newId(this.allowNewServerLaunchBindings && plan.operation?.serverKind === 'new' ? 'plan-launch-v1' : 'plan');
     const createdAtMs = nowMilliseconds(this.clock);
     const expiresAtMs = createdAtMs + this.ttlMs;
     if (!Number.isSafeInteger(expiresAtMs)) throw invalid();
@@ -174,6 +179,7 @@ class PlanRegistry {
       plan,
       planView,
       planningSessionId,
+      claimable: true,
       createdAtMs,
       expiresAtMs,
       expiresAt: new Date(expiresAtMs).toISOString()
@@ -186,15 +192,18 @@ class PlanRegistry {
 
   async get(request) {
     const record = await this.#resolveCredential(request);
+    this.#assertClaimable(record);
     return internalRecord(record);
   }
 
   async claim(request) {
     const record = await this.#resolveCredential(request);
+    this.#assertClaimable(record);
     const jobId = this.#newId('job');
     this.workspaceRegistry.transferOwnership({ fromOwnerId: record.planId, toOwnerId: jobId });
     this.claimedJobIds.add(jobId);
     this.claimedPlans.set(jobId, record);
+    this.#fence(record);
     this.plans.delete(record.planId);
     return deepFreeze({
       jobId,
@@ -261,18 +270,52 @@ class PlanRegistry {
     if (!isIdentifier(planId)) return false;
     const record = this.plans.get(planId);
     if (!record) return false;
-    await this.workspaceRegistry.releaseOwner(planId);
-    this.plans.delete(planId);
+    this.#fence(record);
+    if (this.invalidations.has(planId)) return this.invalidations.get(planId);
+    const cleanup = Promise.resolve().then(async () => {
+      await this.workspaceRegistry.releaseOwner(planId);
+      if (this.plans.get(planId) === record) this.plans.delete(planId);
+      return true;
+    }).finally(() => this.invalidations.delete(planId));
+    this.invalidations.set(planId, cleanup);
+    return cleanup;
+  }
+
+  bindNewServerReservation(planId, instanceId) {
+    assertIdentifier(planId); assertIdentifier(instanceId);
+    const record = this.plans.get(planId);
+    this.#assertClaimable(record);
+    if (record.plan.operation?.serverKind !== 'new' || record.plan.operation.instanceId !== instanceId ||
+        (record.reservationInstanceId && record.reservationInstanceId !== instanceId)) throw stale();
+    record.reservationInstanceId = instanceId;
     return true;
+  }
+
+  invalidateReservation(instanceId) {
+    assertIdentifier(instanceId);
+    const ids = [];
+    for (const record of this.plans.values()) {
+      if (record.reservationInstanceId === instanceId) { this.#fence(record); ids.push(record.planId); }
+    }
+    return Promise.all(ids.map(id => this.invalidate(id))).then(() => ids.length);
+  }
+
+  #assertClaimable(record) {
+    if (!record || record.claimable !== true || this.plans.get(record.planId) !== record ||
+        nowMilliseconds(this.clock) >= record.expiresAtMs) throw stale();
+  }
+
+  #fence(record) {
+    if (record.claimable) { record.claimable = false; this.fenceGeneration++; }
   }
 
   async dispose() {
     const planIds = [...this.plans.keys()];
+    for (const record of this.plans.values()) this.#fence(record);
     let firstFailure = null;
     for (const planId of planIds) {
       try {
-        await this.workspaceRegistry.releaseOwner(planId);
-        this.plans.delete(planId);
+        await this.invalidate(planId);
       }
       catch (error) { firstFailure ??= error; }
     }
@@ -291,11 +334,10 @@ class PlanRegistry {
     const receivedFingerprint = descriptors.fingerprint.value;
     if (!isIdentifier(planId) || typeof receivedFingerprint !== 'string' || !SHA256.test(receivedFingerprint)) throw stale();
     const record = this.plans.get(planId);
-    if (!record || record.fingerprint !== receivedFingerprint) throw stale();
+    if (!record || !record.claimable || record.fingerprint !== receivedFingerprint) throw stale();
     if (nowMilliseconds(this.clock) >= record.expiresAtMs) {
-      try { await this.workspaceRegistry.releaseOwner(planId); }
+      try { await this.invalidate(planId); }
       catch (error) { throw stale(error); }
-      this.plans.delete(planId);
       throw stale();
     }
     return record;
@@ -305,6 +347,7 @@ class PlanRegistry {
     for (let attempt = 0; attempt < 10; attempt += 1) {
       const value = this.randomUUID();
       if (typeof value !== 'string' || !RANDOM_ID.test(value)) throw invalid();
+      if (prefix === 'plan-launch-v1' && !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value)) throw invalid();
       // Mutation IDs version the compact same-parent transaction namespace.
       // Plan IDs remain unchanged because they never become server-path leaves.
       const id = prefix === 'job' ? compactOperationIdFromRandomSource(value) : `${prefix}-${value}`;

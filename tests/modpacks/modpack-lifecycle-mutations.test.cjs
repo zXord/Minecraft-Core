@@ -366,6 +366,22 @@ function deferred() {
   return { promise, resolve };
 }
 
+test('launch drain waits beyond claim release until terminal publication and rejects starts', async () => {
+  const gate = deferred(); gate.entered = deferred();
+  const f = mutationFixture('install-new', { gates: { outcomeActionIssue: gate } });
+  await f.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: { acceptEula: true } });
+  await gate.entered.promise;
+  assert.deepEqual(f.released, ['job-one']);
+  let disposed = false;
+  const pending = f.service.dispose().then(() => { disposed = true; });
+  try {
+    await assert.rejects(f.service.startOperation({ planId: 'plan-one', planFingerprint: FINGERPRINT, choices: { acceptEula: true } }), { code: 'PLAN_STALE' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(disposed, false);
+  } finally { gate.resolve(); await pending; }
+  assert.equal((await f.service.getJob('job-one')).phase, 'completed');
+});
+
 function mutationFixture(operationKind, options = {}) {
   const plan = planFor(operationKind);
   const operationStore = new MemoryOperationStore({

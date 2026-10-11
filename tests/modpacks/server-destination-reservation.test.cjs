@@ -27,6 +27,9 @@ function handlerDependencies(destinationReservationService) {
     localArtifactSource: { selectWithNativeDialog: noop },
     destinationReservationService,
     lifecycleService: {
+      releaseServerDestination: instanceId => destinationReservationService.withDestinationGate(
+        destinationReservationService.peek(instanceId)?.targetPath || 'C:\\Absent',
+        () => destinationReservationService.releaseUnlaunched(instanceId)),
       inspectSource: noop, cancelInspection: noop, createPlan: noop, createManagementPlan: noop, startOperation: noop,
       cancelJob: noop, getJob: noop, getActiveJobs: noop, getState: noop, listHistory: noop, listRollbackOptions: noop, verify: noop
     },
@@ -118,14 +121,15 @@ test('renderer abandonment releases only the validated opaque destination reserv
   );
 });
 
-test('released reservation identity is reused only for the same destination until publication consumes it', async t => {
+test('reservation incarnation is never reused after release or consumption at the same path', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-destination-retry-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const targetPath = path.join(root, 'Retry Server');
   fs.mkdirSync(targetPath);
   const ids = [
     '00000000-0000-4000-8000-000000000011',
-    '00000000-0000-4000-8000-000000000012'
+    '00000000-0000-4000-8000-000000000012',
+    '00000000-0000-4000-8000-000000000013'
   ];
   const service = new ServerDestinationReservationService({
     dialog: { async showOpenDialog() { return { canceled: false, filePaths: [targetPath] }; } },
@@ -138,11 +142,12 @@ test('released reservation identity is reused only for the same destination unti
   assert.equal(service.release(first.instanceId), true);
 
   const retry = await service.reserveWithNativeDialog({});
-  assert.equal(retry.instanceId, first.instanceId);
+  assert.notEqual(retry.instanceId, first.instanceId);
+  assert.equal(service.release(first.instanceId), false);
   assert.equal(service.consume(retry.instanceId, targetPath), true);
 
   const afterPublication = await service.reserveWithNativeDialog({});
-  assert.equal(afterPublication.instanceId, 'server-00000000-0000-4000-8000-000000000012');
+  assert.equal(afterPublication.instanceId, 'server-00000000-0000-4000-8000-000000000013');
 });
 
 test('a released destination identity cannot be issued to a different path', async t => {
@@ -156,7 +161,8 @@ test('a released destination identity cannot be issued to a different path', asy
   const ids = [
     '00000000-0000-4000-8000-000000000021',
     '00000000-0000-4000-8000-000000000021',
-    '00000000-0000-4000-8000-000000000022'
+    '00000000-0000-4000-8000-000000000022',
+    '00000000-0000-4000-8000-000000000023'
   ];
   const service = new ServerDestinationReservationService({
     dialog: { async showOpenDialog() { return { canceled: false, filePaths: [selectedPath] }; } },
@@ -172,10 +178,10 @@ test('a released destination identity cannot be issued to a different path', asy
   assert.equal(second.instanceId, 'server-00000000-0000-4000-8000-000000000022');
   selectedPath = firstPath;
   const retriedFirst = await service.reserveWithNativeDialog({});
-  assert.equal(retriedFirst.instanceId, first.instanceId);
+  assert.notEqual(retriedFirst.instanceId, first.instanceId);
 });
 
-test('an unavailable released identity fails closed without escaping its original destination', async t => {
+test('reservation incarnation allocation skips unavailable and previously issued identifiers', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-destination-unavailable-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const firstPath = path.join(root, 'Original Server');
@@ -188,7 +194,9 @@ test('an unavailable released identity fails closed without escaping its origina
   const ids = [
     '00000000-0000-4000-8000-000000000041',
     '00000000-0000-4000-8000-000000000041',
-    '00000000-0000-4000-8000-000000000042'
+    '00000000-0000-4000-8000-000000000042',
+    '00000000-0000-4000-8000-000000000043',
+    '00000000-0000-4000-8000-000000000044'
   ];
   const service = new ServerDestinationReservationService({
     dialog: { async showOpenDialog() { return { canceled: false, filePaths: [selectedPath] }; } },
@@ -202,19 +210,18 @@ test('an unavailable released identity fails closed without escaping its origina
   assert.equal(service.release(first.instanceId), true);
 
   originalIdAvailable = false;
-  await assert.rejects(
-    service.reserveWithNativeDialog({}),
-    error => error?.code === 'TARGET_EXISTS'
-  );
+  const replacement = await service.reserveWithNativeDialog({});
+  assert.notEqual(replacement.instanceId, originalId);
+  assert.equal(service.release(replacement.instanceId), true);
 
   originalIdAvailable = true;
   selectedPath = secondPath;
   const second = await service.reserveWithNativeDialog({});
-  assert.equal(second.instanceId, 'server-00000000-0000-4000-8000-000000000042');
+  assert.equal(second.instanceId, 'server-00000000-0000-4000-8000-000000000043');
 
   selectedPath = firstPath;
   const retriedFirst = await service.reserveWithNativeDialog({});
-  assert.equal(retriedFirst.instanceId, originalId);
+  assert.notEqual(retriedFirst.instanceId, originalId);
 });
 
 test('concurrent reservations for the same destination produce exactly one reservation', async t => {
@@ -310,7 +317,7 @@ test('reservation finalization for different destinations remains independent', 
   assert.equal(captureCalls, 2);
 });
 
-test('an expired reservation keeps its destination identity available for a safe retry', async t => {
+test('reservation incarnation expiry finalizes under the gate without recycling identity', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-destination-expiry-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const targetPath = path.join(root, 'Expired Server');
@@ -331,9 +338,10 @@ test('an expired reservation keeps its destination identity available for a safe
   const first = await service.reserveWithNativeDialog({});
   now = 11;
   assert.throws(() => service.resolve(first.instanceId), error => error?.code === 'PLAN_STALE');
+  assert.notEqual(service.peek(first.instanceId), null, 'resolve must not delete outside the gate');
 
   const retry = await service.reserveWithNativeDialog({});
-  assert.equal(retry.instanceId, first.instanceId);
+  assert.notEqual(retry.instanceId, first.instanceId);
 });
 
 test('unmanaged adoption authority rejects a replacement directory while new-target reservation remains empty-only', async t => {

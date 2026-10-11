@@ -10,6 +10,8 @@ const {
 } = require('./publication-failure-diagnostic.cjs');
 const { runtimeDiagnosticFromError } = require('./server-runtime-writer-authority.cjs');
 const { validatePublicJob } = require('./operation-store.cjs');
+const { isDeepStrictEqual } = require('node:util');
+const { normalizeRecoveryTargetPath } = require('./recovery-target-envelope.cjs');
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SOURCE_AUTHORITY_KEY = /(?:path|directory|destination|command|argument|executable)/i;
@@ -783,6 +785,11 @@ class ModpackLifecycleService {
     stateRepository = null,
     stateEventSink = null,
     outcomeActionIssuer = null,
+    assertAdmission = () => {},
+    destinationReservations = null,
+    launchOwner = null,
+    allowNewServerLaunchBindings = false,
+    clock = () => Date.now(),
     workspaceRegistry = inspectionLoader?.workspaceRegistry ?? planRegistry?.workspaceRegistry ?? null,
     yieldControl = defaultYieldControl,
     snapshotProgressClock = () => performance.now()
@@ -798,6 +805,8 @@ class ModpackLifecycleService {
         (stateEventSink !== null && typeof stateEventSink !== 'function') ||
         (outcomeActionIssuer !== null && (!outcomeActionIssuer || typeof outcomeActionIssuer.issue !== 'function')) ||
         (workspaceRegistry !== null && (!workspaceRegistry || typeof workspaceRegistry.releaseOwner !== 'function')) ||
+        typeof assertAdmission !== 'function' || typeof clock !== 'function' || typeof allowNewServerLaunchBindings !== 'boolean' ||
+        (allowNewServerLaunchBindings && (!launchOwner || !destinationReservations)) ||
         typeof yieldControl !== 'function' || typeof snapshotProgressClock !== 'function') {
       throw invalid();
     }
@@ -824,10 +833,58 @@ class ModpackLifecycleService {
     this.inspectionDisposals = new Map();
     this.activeOperations = new Map();
     this.releasedClaims = new Set();
+    this.assertAdmission = assertAdmission;
+    this.admissionClosing = false;
+    this.admittedTasks = new Set();
+    this.destinationReservations = destinationReservations;
+    this.launchOwner = launchOwner;
+    this.allowNewServerLaunchBindings = allowNewServerLaunchBindings;
+    this.launchClock = clock;
+    this.localAdmissionGeneration = 0;
+    this.pendingNewServerAdmissions = new Map();
+    if (destinationReservations) destinationReservations.beforeUnlaunchedRelease = instanceId => {
+      this.localAdmissionGeneration++;
+      return this.planRegistry.invalidateReservation(instanceId);
+    };
+  }
+
+  get admissionGeneration() { return this.localAdmissionGeneration + (this.planRegistry.fenceGeneration ?? 0); }
+
+  closeAdmission() { if (!this.admissionClosing) { this.admissionClosing = true; this.localAdmissionGeneration++; } }
+
+  #trackAdmittedTask(value) {
+    const task = Promise.resolve(value);
+    this.admittedTasks.add(task);
+    void task.finally(() => this.admittedTasks.delete(task)).catch(() => {});
+    return task;
+  }
+
+  runAdmittedWork(work) {
+    if (this.admissionClosing) return Promise.reject(stale());
+    try { this.assertAdmission(); return this.#trackAdmittedTask(work()); }
+    catch (error) { return Promise.reject(error); }
+  }
+
+  async drain() {
+    while (this.admittedTasks.size || this.activeOperations.size || this.planningInspections.size) {
+      await Promise.allSettled([...this.admittedTasks, ...[...this.activeOperations.values()].map(owner => owner.settled),
+        ...[...this.planningInspections.values()].map(owner => owner.settled)]);
+    }
+  }
+
+  getLaunchAdmissionState(ownerEpoch) {
+    this.launchOwner.assertCurrent(ownerEpoch);
+    const now = this.launchClock();
+    return deepFreeze({ generation: this.admissionGeneration, pending: [...this.pendingNewServerAdmissions.values()].map(entry => ({
+      planId: entry.planId, planFingerprint: entry.planFingerprint, createdAt: entry.createdAt,
+      jobId: entry.jobId, instanceId: entry.instanceId,
+      ...(now - entry.createdAt >= 30000 ? { reason: 'admission-unresolved' } : {})
+    })) });
   }
 
   async dispose() {
-    if (this.planningInspections.size) throw new ModpackError('OPERATION_IN_PROGRESS', 'Archive preflight is already in progress');
+    this.closeAdmission();
+    await this.drain();
     for (const inspectionId of this.inspectionDisposals.keys()) await this.disposeInspection(inspectionId);
     const inspectionIds = [...this.inspections.keys()];
     if (inspectionIds.length === 0) return 0;
@@ -845,6 +902,10 @@ class ModpackLifecycleService {
   }
 
   async inspectSource(request, options = {}) {
+    return this.runAdmittedWork(() => this.#inspectSource(request, options));
+  }
+
+  async #inspectSource(request, options = {}) {
     const normalizedRequest = sourceRequest(request);
     const { onProgress, signal } = inspectionOptions(options);
     const reportProgress = inspectionProgressReporter(onProgress);
@@ -946,6 +1007,11 @@ class ModpackLifecycleService {
   }
 
   async createPlan(request, options = {}) {
+    return this.runAdmittedWork(() => this.#createPlan(request, options));
+  }
+
+  async #createPlan(request, options = {}) {
+    const ownerEpoch = this.launchOwner?.epoch;
     const normalizedRequest = planningRequest(request);
     const { onProgress } = preflightOptions(options);
     const reportProgress = preflightProgressReporter(onProgress);
@@ -991,6 +1057,7 @@ class ModpackLifecycleService {
       const execution = hasExecutionRecord ? this.planningAdapter.getExecutionRecord(plan).execution : null;
       if (hasExecutionRecord && typeof execution?.templateOutputId !== 'string') throw invalid();
       await retire(execution?.templateOutputId ?? null);
+      this.launchOwner?.assertCurrent(ownerEpoch);
       // The registry still holds the attempt lease: only this exact capability may seal it.
       const created = this.planRegistry.create({
         plan,
@@ -1000,6 +1067,17 @@ class ModpackLifecycleService {
         preparationAttempt
       });
       planning.planId = created.planId;
+      if (this.allowNewServerLaunchBindings && plan.operation?.serverKind === 'new') {
+        const reservation = this.destinationReservations.resolve(plan.operation.instanceId);
+        if (!reservation) throw stale();
+        await this.destinationReservations.withDestinationGate(reservation.targetPath, async () => {
+          this.launchOwner.assertCurrent(ownerEpoch);
+          if (this.destinationReservations.resolve(reservation.instanceId) !== reservation ||
+              this.destinationReservations.isDestinationHeld(reservation.instanceId)) throw stale();
+          this.planRegistry.bindNewServerReservation(created.planId, reservation.instanceId);
+          this.localAdmissionGeneration++;
+        });
+      }
       this.inspections.delete(inspectionId);
       const result = deepFreeze({
         planId: created.planId,
@@ -1011,7 +1089,12 @@ class ModpackLifecycleService {
       reportProgress({ phase: 'complete' });
       return result;
     } catch (error) {
-      if (preparationAttempt && !cleanupFailed) {
+      if (planning.planId) {
+        try { await this.planRegistry.invalidate(planning.planId); }
+        catch (cause) { throw new ModpackError('CLEANUP_FAILED', 'Prepared archive cleanup failed; discard the inspection and try again', { cause, retryable: true }); }
+      }
+      // A created plan sealed/transferred the capability; invalidate owns its cleanup.
+      if (preparationAttempt && !cleanupFailed && !planning.planId) {
         try { await preparationAttempt.retire(); }
         catch (cleanupError) {
           throw new ModpackError('CLEANUP_FAILED', 'Prepared archive cleanup failed; discard the inspection and try again', {
@@ -1027,6 +1110,10 @@ class ModpackLifecycleService {
   }
 
   async createManagementPlan(requestValue, options = {}) {
+    return this.runAdmittedWork(() => this.#createManagementPlan(requestValue, options));
+  }
+
+  async #createManagementPlan(requestValue, options = {}) {
     const request = managementPlanningRequest(requestValue);
     const { onProgress } = preflightOptions(options);
     const reportProgress = preflightProgressReporter(onProgress);
@@ -1118,6 +1205,10 @@ class ModpackLifecycleService {
   }
 
   async cancelJob(jobId) {
+    return this.runAdmittedWork(() => this.#cancelJob(jobId));
+  }
+
+  async #cancelJob(jobId) {
     const existing = await this.getJob(jobId);
     const active = this.activeOperations.get(existing.jobId);
     if (active?.isSettling()) {
@@ -1192,6 +1283,10 @@ class ModpackLifecycleService {
   }
 
   async verify(instanceIdValue) {
+    return this.runAdmittedWork(() => this.#verify(instanceIdValue));
+  }
+
+  async #verify(instanceIdValue) {
     const instanceId = assertIdentifier(instanceIdValue);
     this.#assertVerificationDependencies();
     const queued = await this.operationStore.create({
@@ -1215,12 +1310,20 @@ class ModpackLifecycleService {
   }
 
   async startOperation(request) {
+    return this.runAdmittedWork(() => this.#startOperation(request));
+  }
+
+  async #startOperation(request) {
     this.#assertMutationDependencies();
     const descriptors = strictObject(request, ['planId', 'planFingerprint', 'choices']);
     const planId = assertIdentifier(descriptors.planId.value);
     const planFingerprint = descriptors.planFingerprint.value;
     if (typeof planFingerprint !== 'string' || !SHA256.test(planFingerprint)) throw invalid();
     const choices = executionChoices(descriptors.choices.value);
+
+    if (this.allowNewServerLaunchBindings && /^plan-launch-v1-/.test(planId)) {
+      return this.#startNewServerLaunch({ planId, planFingerprint, choices });
+    }
 
     let claimed = null;
     try {
@@ -1266,6 +1369,118 @@ class ModpackLifecycleService {
         catch (releaseError) { throw recoveryRequired(releaseError); }
       }
       throw error;
+    }
+  }
+
+  async releaseServerDestination(instanceIdValue) {
+    const instanceId = assertIdentifier(instanceIdValue);
+    return this.runAdmittedWork(async () => {
+      const reservations = this.destinationReservations;
+      if (!reservations) throw invalid();
+      const record = reservations.peek(instanceId);
+      if (!record || reservations.isDestinationHeld(instanceId)) return false;
+      return reservations.withDestinationGate(record.targetPath, async () => {
+        if (this.admissionClosing) return false;
+        return reservations.releaseUnlaunched(instanceId, record);
+      });
+    });
+  }
+
+  async #startNewServerLaunch({ planId, planFingerprint, choices }) {
+    if (this.pendingNewServerAdmissions.has(planId)) throw stale();
+    if (this.pendingNewServerAdmissions.size >= 16) throw new ModpackError('OPERATION_IN_PROGRESS', 'Too many server launches are awaiting confirmation');
+    const epoch = this.launchOwner.epoch;
+    this.launchOwner.assertCurrent(epoch);
+    const entry = { planId, planFingerprint, createdAt: this.launchClock(), jobId: null, instanceId: null };
+    this.pendingNewServerAdmissions.set(planId, entry);
+    this.localAdmissionGeneration++;
+    let claimed = null;
+    let retain = false;
+    let heldAdmission = false;
+    const reservations = this.destinationReservations;
+    try {
+      const reviewed = await this.planRegistry.get({ planId, fingerprint: planFingerprint });
+      this.launchOwner.assertCurrent(epoch);
+      const instanceId = reviewed.reservationInstanceId;
+      if (!instanceId || reviewed.plan.operation?.instanceId !== instanceId) throw stale();
+      entry.instanceId = instanceId;
+      const reservation = reservations.resolve(instanceId);
+      if (!reservation) throw stale();
+      return await reservations.withDestinationGate(reservation.targetPath, async () => {
+        this.launchOwner.assertCurrent(epoch);
+        const current = await this.planRegistry.get({ planId, fingerprint: planFingerprint });
+        this.launchOwner.assertCurrent(epoch);
+        if (current.plan !== reviewed.plan || current.reservationInstanceId !== instanceId ||
+            reservations.resolve(instanceId) !== reservation || reservations.isDestinationHeld(instanceId)) throw stale();
+        const operationKind = mutationOperationKind(current.plan);
+        if (!NEW_SERVER_OPERATION_KINDS.has(operationKind)) throw stale();
+        if (EULA_REQUIRED_OPERATION_KINDS.has(operationKind) && choices.acceptEula !== true) {
+          throw new ModpackError('INVALID_REQUEST', 'Minecraft EULA acceptance is required for this server operation');
+        }
+        if (choices.restorePointId !== null) throw invalid();
+        reservations.holdAdmission(instanceId, planId);
+        heldAdmission = true;
+        claimed = await this.planRegistry.claim({ planId, fingerprint: planFingerprint });
+        entry.jobId = claimed.jobId;
+        this.launchOwner.assertCurrent(epoch);
+        if (claimed.plan !== current.plan || claimed.reservationInstanceId !== instanceId) throw stale();
+        const binding = deepFreeze({ planId, planFingerprint, instanceId,
+          targetPath: normalizeRecoveryTargetPath(reservation.targetPath), capturedReservation: clone(reservation.reservation),
+          displayName: reservation.displayName, destinationDisposition: 'held' });
+        let witness = null;
+        let queued;
+        try {
+          queued = await this.operationStore.create({ jobId: claimed.jobId, operationKind, serverId: instanceId,
+            planFingerprint, launchBinding: binding }, epoch, { onPublicationAttempt: value => { witness = value; } });
+        } catch (error) {
+          // create's finally has completed: never wait on our own publication.
+          let durable;
+          try { durable = await this.operationStore.getNewServerLaunch(claimed.jobId, epoch); }
+          catch (cause) { retain = true; throw recoveryRequired(cause); }
+          if (!durable) {
+            if (error?.code === 'TARGET_EXISTS') { retain = true; throw recoveryRequired(error); }
+            throw error;
+          }
+          if (!witness || witness.expectedTargetSha256 !== null || !isDeepStrictEqual(durable.job, witness.job) ||
+              !isDeepStrictEqual(durable.binding, witness.binding) || witness.job.sequence !== 0 ||
+              witness.job.phase !== 'queued' || witness.binding.destinationDisposition !== 'held') {
+            retain = true; throw recoveryRequired();
+          }
+          queued = durable.job;
+        }
+        // Once any durable job is known, a later handoff/owner error cannot run no-job cleanup.
+        retain = true;
+        this.launchOwner.assertCurrent(epoch, { allowClosing: true });
+        reservations.holdJobDestination({ jobId: claimed.jobId, binding });
+        reservations.removeAdmissionHold(instanceId, planId);
+        heldAdmission = false;
+        await this.planRegistry.invalidateReservation(instanceId);
+        this.launchOwner.assertCurrent(epoch, { allowClosing: true });
+        if (this.activeOperations.has(claimed.jobId)) throw recoveryRequired();
+        const controller = new AbortController();
+        const active = createActiveOperation(controller, instanceId);
+        this.activeOperations.set(claimed.jobId, active);
+        Promise.resolve().then(() => this.#executeOperation({ claimed, choices, operationKind, selectedRestorePoint: null,
+          signal: controller.signal, active })).catch(() => {}).finally(() => {
+          if (this.activeOperations.get(claimed.jobId) === active) this.activeOperations.delete(claimed.jobId);
+          active.settle();
+        });
+        this.pendingNewServerAdmissions.delete(planId);
+        this.localAdmissionGeneration++;
+        return queued;
+      });
+    } catch (error) {
+      if (!retain) {
+        try { if (claimed) await this.#releaseClaim(claimed.jobId); }
+        catch (cause) { retain = true; throw recoveryRequired(cause); }
+      }
+      throw error;
+    } finally {
+      if (!retain) {
+        if (heldAdmission) reservations.removeAdmissionHold(entry.instanceId, planId);
+        this.pendingNewServerAdmissions.delete(planId);
+        this.localAdmissionGeneration++;
+      }
     }
   }
 

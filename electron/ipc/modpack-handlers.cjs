@@ -413,7 +413,7 @@ function createModpackHandlers({
     },
     'modpacks:select-local-archive': request => localArtifactSource.selectWithNativeDialog(request),
     'modpacks:reserve-server-destination': request => destinationReservationService.reserveWithNativeDialog(request),
-    'modpacks:release-server-destination': request => destinationReservationService.release(request.instanceId),
+    'modpacks:release-server-destination': request => requireMethods(lifecycleService, ['releaseServerDestination']).releaseServerDestination(request.instanceId),
     'modpacks:inspect': async (request, event) => {
       const { requestId, ...sourceRequest } = request;
       const progress = inspectionProgressSink(event?.sender, requestId);

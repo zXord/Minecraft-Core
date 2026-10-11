@@ -42,6 +42,7 @@ const {
 const { ProductionModpackSourceResolver } = require('../services/modpacks/providers/production-source-resolver.cjs');
 const { ModpackStateRepository } = require('../services/modpacks/state/modpack-state-repository.cjs');
 const { validateServerPorts } = require('../utils/port-validator.cjs');
+const { createModpackPaths } = require('../services/modpacks/paths.cjs');
 
 const SHUTDOWN_PRUNE_TIMEOUT_MS = 2_000;
 
@@ -220,6 +221,13 @@ async function createProductionModpackComposition(input = {}) {
         !store || typeof store.get !== 'function' || typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath) ||
         typeof workerFactory !== 'function') throw invalid();
 
+    const canonicalRoot = value => typeof value === 'string' && path.isAbsolute(value)
+      ? (process.platform === 'win32' ? path.resolve(value).normalize('NFC').toLowerCase() : path.resolve(value)) : null;
+    const expectedPaths = createModpackPaths(userDataPath);
+    for (const key of ['root', 'operations', 'workspaces']) {
+      if (canonicalRoot(paths.modpacks[key]) !== canonicalRoot(expectedPaths[key])) throw invalid();
+    }
+
     for (const directory of [
       userDataPath, paths.modpacks.root, paths.modpacks.cache, paths.modpacks.workspaces,
       paths.modpacks.notifications, paths.modpacks.operations
@@ -238,6 +246,26 @@ async function createProductionModpackComposition(input = {}) {
       idFactory: randomUUID,
       reparseInspector
     });
+    let ownerState = 'starting';
+    const ownerEpoch = Symbol('modpack-launch-owner');
+    const ownerLease = workspaceRegistry.rootLease;
+    const launchOwner = Object.freeze({
+      epoch: ownerEpoch,
+      assertCurrent(expectedEpoch, { allowClosing = false, startupOnly = false } = {}) {
+        if (expectedEpoch !== ownerEpoch || ownerState === 'disposed' ||
+            (ownerState === 'closing' && !allowClosing) || (startupOnly && ownerState !== 'starting') ||
+            !ownerLease || workspaceRegistry.rootLease !== ownerLease || canonicalRoot(workspaceRegistry.root) !== canonicalRoot(expectedPaths.workspaces)) {
+          throw new ModpackError('PLAN_STALE', 'The modpack workspace owner is unavailable');
+        }
+        workspaceRegistry.assertLease();
+      }
+    });
+    const assertAdmission = () => {
+      try {
+        launchOwner.assertCurrent(ownerEpoch);
+        if (ownerState !== 'ready') throw invalid();
+      } catch (cause) { throw new ModpackError('PLAN_STALE', 'The modpack workspace owner is unavailable', { cause }); }
+    };
     const archiveRuntimeResolver = input.archiveRuntimeResolver || input.archiveRuntimePathResolver || resolveBundledArchiveRuntimePaths;
     const archiveRuntime = input.archiveRuntime || await archiveRuntimeResolver(runtimeRoots);
     if (!archiveRuntime || typeof archiveRuntime.resourcesRoot !== 'string' || typeof archiveRuntime.workerPath !== 'string' ||
@@ -294,6 +322,7 @@ async function createProductionModpackComposition(input = {}) {
       reparseInspector,
       randomUUID,
       clock: nowMs,
+      assertAdmission,
       isInstanceIdAvailable: instanceId => instanceIdAvailable(store, instanceId)
     });
     const compositeInstanceResolver = createCompositeInstanceResolver({
@@ -335,7 +364,8 @@ async function createProductionModpackComposition(input = {}) {
       fsApi: fsSync,
       durableFs: rootDurableFs,
       clock: nowDate,
-      randomUUID
+      randomUUID,
+      launchOwner
     });
     let cachePrunePromise = null;
     const runArtifactCachePrune = () => {
@@ -481,7 +511,7 @@ async function createProductionModpackComposition(input = {}) {
       artifactCache
     });
     let lifecycleService = null;
-    const recoveryService = new ModpackRecoveryFacade({
+    const recoveryFacade = new ModpackRecoveryFacade({
       recoveryRegistry,
       recoveryService: rawRecoveryService,
       canExposePendingNewServer: record => canExposePendingNewServer(store, record),
@@ -506,14 +536,19 @@ async function createProductionModpackComposition(input = {}) {
           });
           if (!result.reconciled.includes(jobId)) return false;
         }
-        // Once teardown owns all references, a late source-recovery completion
-        // must not touch a disposed plan registry or admit housekeeping.
-        if (retirementClosing) return true;
+        // Admitted recovery still owns the lease during teardown and must release
+        // its exact claim; only fresh housekeeping is suppressed while closing.
         if (!await planRegistry.releaseClaim(jobId)) await workspaceRegistry.releaseOwner(jobId);
+        if (retirementClosing) return true;
         if (record.target.kind === 'existing') startRetirementPass({ trigger: 'recovery-completed',
           selector: { instanceId: record.target.stableServerId, serverPath: record.target.path } });
         return true;
       }
+    });
+    // Admit before the facade's first scan/raw recovery await, not at onResolved.
+    const recoveryService = Object.freeze({
+      listRecovery: () => recoveryFacade.listRecovery(),
+      recover: request => lifecycleService.runAdmittedWork(() => recoveryFacade.recover(request))
     });
     const mutationRuntime = input.mutationRuntime || new (require('../services/modpack-lifecycle/production-mutation-runtime.cjs').ProductionMutationRuntime)({
       artifactCache,
@@ -561,6 +596,10 @@ async function createProductionModpackComposition(input = {}) {
       stateRepository,
       stateEventSink: state => nativeNotificationBridge.publishStateChanged(state),
       outcomeActionIssuer: lifecycleOutcomeActionIssuer,
+      assertAdmission,
+      destinationReservations: destinationReservationService,
+      launchOwner,
+      clock: nowMs,
       workspaceRegistry
     });
 
@@ -586,6 +625,7 @@ async function createProductionModpackComposition(input = {}) {
     });
 
     let initialized = false;
+    let initializationPromise = null;
     let disposePromise = null;
 
     function beginCleanup(operation) {
@@ -601,6 +641,8 @@ async function createProductionModpackComposition(input = {}) {
 
     function dispose() {
       if (disposePromise) return disposePromise;
+      ownerState = 'closing';
+      lifecycleService.closeAdmission();
       retirementClosing = true;
       if (retirementDispatch !== null) { retirementClearImmediate(retirementDispatch); retirementDispatch = null; }
       const retirementDrain = retirement?.close();
@@ -628,12 +670,16 @@ async function createProductionModpackComposition(input = {}) {
         // deletion still has unconfirmed ownership. Deliberately no deadline.
         await retirementDrain;
         await activeRetirement;
+        // Startup can already be awaiting an injected/native dependency when
+        // orderly quit closes admission. Its continuations also own the lease.
+        if (initializationPromise) await initializationPromise.catch(() => {});
+        await lifecycleService.drain();
         const planResult = await beginCleanup(() => planRegistry.dispose());
-        if (!planResult.ok) failures.push(planResult.error);
         for (const cleanupResult of cleanupResults) {
           const result = await cleanupResult;
           if (!result.ok) failures.push(result.error);
         }
+        if (!planResult.ok) failures.push(planResult.error);
 
         // Client downloads/runtime operations must settle before their shared hash/workspaces close.
         const clientResult = await clientCleanup;
@@ -642,6 +688,7 @@ async function createProductionModpackComposition(input = {}) {
         if (!hashResult.ok) failures.push(hashResult.error);
         const workspaceResult = await beginCleanup(() => workspaceRegistry.dispose());
         if (!workspaceResult.ok) failures.push(workspaceResult.error);
+        if (workspaceRegistry.disposed) ownerState = 'disposed';
 
         // Cache eligibility depends on the references released above. Bound one
         // fresh post-release maintenance pass without making cleanup failure fatal.
@@ -685,8 +732,15 @@ async function createProductionModpackComposition(input = {}) {
       nativeNotificationBridge,
       async initialize() {
         if (initialized) return composition;
+        if (initializationPromise) return initializationPromise;
+        launchOwner.assertCurrent(ownerEpoch, { startupOnly: true });
+        initializationPromise = (async () => {
         markStartupTrace('composition:operation-store-init:start');
         const jobs = await operationStore.initialize();
+        // All dispositions retain their incarnation; this is not hold reconstruction
+        // or startup closure (those remain the later launch-classification slice).
+        const launches = await operationStore.listNewServerLaunchBindings(ownerEpoch);
+        for (const launch of launches) destinationReservationService.retainInstanceId(launch.binding.instanceId);
         markStartupTrace('composition:operation-store-init:complete');
         markStartupTrace('composition:notification-store-init:start');
         await notificationStore.initialize();
@@ -708,8 +762,12 @@ async function createProductionModpackComposition(input = {}) {
           markStartupTrace('composition:recovery-history-reconcile:complete');
         }
         scheduleArtifactCachePrune();
+        launchOwner.assertCurrent(ownerEpoch, { startupOnly: true });
+        ownerState = 'ready';
         initialized = true;
         return composition;
+        })();
+        return initializationPromise;
       },
       scheduleArtifactCachePrune,
       armStartupRetirement,

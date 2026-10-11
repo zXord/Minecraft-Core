@@ -149,6 +149,32 @@ function planningWorkspace(workspaceRegistry) {
   return { outputDirectoryId, planningSessionId };
 }
 
+test('launch synchronous claim fence permits only one concurrent claimant', async t => {
+  const { registry, workspaceRegistry } = fixture(t);
+  const plan = internalPlan();
+  const created = registry.create({ plan, sanitizedView: publicView(), fingerprint: plan.fingerprint,
+    planningSessionId: planningWorkspace(workspaceRegistry).planningSessionId });
+  const results = await Promise.allSettled([registry.claim({ planId: created.planId, fingerprint: created.fingerprint }),
+    registry.claim({ planId: created.planId, fingerprint: created.fingerprint })]);
+  assert.equal(results.filter(item => item.status === 'fulfilled').length, 1);
+  assert.equal(results.find(item => item.status === 'rejected').reason.code, 'PLAN_STALE');
+});
+
+test('launch synchronous invalidation fence survives deferred cleanup and captured credential', async t => {
+  const { registry, workspaceRegistry } = fixture(t);
+  const plan = internalPlan();
+  const created = registry.create({ plan, sanitizedView: publicView(), fingerprint: plan.fingerprint,
+    planningSessionId: planningWorkspace(workspaceRegistry).planningSessionId });
+  let finish;
+  const gate = new Promise(resolve => { finish = resolve; });
+  const release = workspaceRegistry.releaseOwner.bind(workspaceRegistry);
+  workspaceRegistry.releaseOwner = async id => { await gate; return release(id); };
+  const claim = registry.claim({ planId: created.planId, fingerprint: created.fingerprint });
+  const invalidation = registry.invalidate(created.planId);
+  try { await assert.rejects(claim, { code: 'PLAN_STALE' }); }
+  finally { finish(); await invalidation; }
+});
+
 test('create returns exactly the reviewed view while retaining the internal plan in memory', async (t) => {
   const { registry, workspaceRegistry } = fixture(t);
   const { outputDirectoryId, planningSessionId } = planningWorkspace(workspaceRegistry);
@@ -507,7 +533,7 @@ test('dispose retains only a failed plan so the exact cleanup can be retried', a
   failedPlanId = failed.planId;
 
   await assert.rejects(registry.dispose(), /injected ownership release failure/);
-  assert.equal((await registry.get({ planId: failed.planId, fingerprint: failed.fingerprint })).planId, failed.planId);
+  await assert.rejects(registry.get({ planId: failed.planId, fingerprint: failed.fingerprint }), { code: 'PLAN_STALE' });
   await assert.rejects(
     registry.get({ planId: released.planId, fingerprint: released.fingerprint }),
     error => error.code === 'PLAN_STALE'
