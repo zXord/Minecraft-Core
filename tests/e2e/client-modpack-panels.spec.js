@@ -927,3 +927,132 @@ test('task7: refused one-use install capability asks for a fresh explicit review
   expect(await page.evaluate(() => window.calls.filter(call => call.channel === 'client-packs:preview').length)).toBe(2);
   expect(await page.evaluate(() => window.calls.filter(call => call.channel === 'client-packs:install').length)).toBe(1);
 });
+
+async function holdCompanionInspection(page) {
+  await start(page, 'install-required', 'companion');
+  await page.getByLabel('pack-0.13.4.mrpack').check();
+  await page.evaluate(() => { window.pending['client-packs:inspect-companion'] = []; });
+  await page.getByRole('button', { name: 'Inspect selected pack' }).click();
+  await companionJobs(page, 'inspect-companion', 1);
+}
+
+async function companionProgress(page, event, index = 0) {
+  await page.evaluate(({ event, index }) => {
+    const input = window.pending['client-packs:inspect-companion'][index].input;
+    for (const listener of window.listeners) listener({ ...input, ...event });
+  }, { event, index });
+}
+
+test('companion progress: stop prerequisite is visible before a costly inspection', async ({ page }) => {
+  await start(page, 'install-required', 'companion');
+  await expect(page.getByRole('button', { name: 'Inspect selected pack' })).toBeVisible();
+  await expect(companionPanel(page)).toContainText('The server must be stopped before pairing. Stop it before this review to avoid repeating inspection.');
+  expect(await page.evaluate(() => window.calls.some(call => call.channel === 'client-packs:inspect-companion'))).toBe(false);
+});
+
+test('companion progress: measured bundled checks cannot complete the held request and preserve cancel focus', async ({ page }) => {
+  await holdCompanionInspection(page);
+  const cancel = page.getByRole('button', { name: 'Cancel request' });
+  await cancel.focus();
+  await companionProgress(page, { phase: 'checking-bundled-files', completedItems: '1', totalItems: '4' });
+  await expect(page.getByText('Checking bundled pack files', { exact: true })).toBeVisible();
+  await expect(page.getByText('Checked 1 of 4 bundled files', { exact: true })).toBeVisible();
+  await expect(page.getByRole('progressbar', { name: 'Bundled files checked' })).toHaveAttribute('value', '250000');
+  await expect(page.getByRole('status')).not.toContainText('bytes');
+  await expect(cancel).toBeFocused();
+  await companionProgress(page, { phase: 'checking-bundled-files', completedItems: '4', totalItems: '4' });
+  await expect(page.getByText('Checked 4 of 4 bundled files', { exact: true })).toBeVisible();
+  await expect(page.getByRole('progressbar')).toHaveAttribute('value', '1000000');
+  await expect(companionPanel(page)).toHaveAttribute('aria-busy', 'true');
+  await expect(page.getByRole('button', { name: 'Accept matching client pack' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Review matching runtime' })).toHaveCount(0);
+  await companionProgress(page, { phase: 'revalidating-client-files' });
+  await expect(page.getByText('Rechecking inspected pack files', { exact: true })).toBeVisible();
+  await expect(page.getByRole('progressbar')).not.toHaveAttribute('value');
+  await expect(page.getByText('Checked 4 of 4 bundled files', { exact: true })).toHaveCount(0);
+  await expect(cancel).toBeFocused();
+  await expect(cancel).toBeEnabled();
+  await cancel.click();
+  await expect.poll(() => page.evaluate(() => window.calls.filter(call => call.channel === 'client-packs:cancel').length)).toBe(1);
+  await settleCompanion(page, 'inspect-companion', 0, { code: 'CANCELLED' });
+  await expect(page.getByRole('progressbar')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.listeners.size)).toBe(0);
+});
+
+for (const { counts, text } of [
+  { counts: { completedItems: '2' }, text: 'Checked 2 bundled files' },
+  { counts: { completedItems: '0', totalItems: '0' }, text: 'Checked 0 of 0 bundled files' },
+  { counts: { completedItems: '4', totalItems: '3' }, text: 'Checked 4 of 3 bundled files' },
+  { counts: { completedItems: '9007199254740993', totalItems: '9007199254740992' }, text: 'Checked 9,007,199,254,740,993 of 9,007,199,254,740,992 bundled files' },
+  { counts: { completedItems: '2', totalItems: '03' }, text: 'Checked 2 bundled files' },
+  { counts: { completedItems: '01', totalItems: '4' }, text: null },
+  { counts: { completedItems: '-1', totalItems: '4' }, text: null },
+  { counts: { completedItems: '2', totalItems: '1e3' }, text: 'Checked 2 bundled files' }
+]) test(`companion progress: unusable total remains indeterminate ${JSON.stringify(counts)}`, async ({ page }) => {
+  await holdCompanionInspection(page);
+  await companionProgress(page, { phase: 'checking-bundled-files', ...counts });
+  await expect(page.getByText('Checking bundled pack files', { exact: true })).toBeVisible();
+  if (text) await expect(page.getByText(text, { exact: true })).toBeVisible();
+  else await expect(page.getByRole('status')).not.toContainText('Checked');
+  await expect(page.getByRole('progressbar')).not.toHaveAttribute('value');
+  await expect(page.getByRole('button', { name: 'Cancel request' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Accept matching client pack' })).toHaveCount(0);
+  await settleCompanion(page, 'inspect-companion', 0, { code: 'CANCELLED' });
+});
+
+test('companion progress: exact large counts and initial zero have honest phase-local ratios', async ({ page }) => {
+  await holdCompanionInspection(page);
+  await companionProgress(page, { phase: 'checking-bundled-files', completedItems: '0', totalItems: '2' });
+  await expect(page.getByText('Checked 0 of 2 bundled files', { exact: true })).toBeVisible();
+  await expect(page.getByRole('progressbar')).toHaveAttribute('value', '0');
+  await companionProgress(page, { phase: 'checking-bundled-files', completedItems: '9007199254740993', totalItems: '18014398509481986' });
+  await expect(page.getByText('Checked 9,007,199,254,740,993 of 18,014,398,509,481,986 bundled files', { exact: true })).toBeVisible();
+  await expect(page.getByRole('progressbar')).toHaveAttribute('max', '1000000');
+  await expect(page.getByRole('progressbar')).toHaveAttribute('value', '500000');
+  await settleCompanion(page, 'inspect-companion', 0, { code: 'CANCELLED' });
+});
+
+test('companion progress: known phases are readable, unknown phases are safe, and download bytes stay separate', async ({ page }) => {
+  await holdCompanionInspection(page);
+  for (const [phase, label] of [
+    ['downloading-archive', 'Downloading client archive'], ['materialize', 'Preparing verified archive'],
+    ['list', 'Reading archive contents'], ['validate', 'Checking archive paths and limits'],
+    ['classify', 'Identifying archive format'], ['extracting', 'Extracting client archive'],
+    ['verifying-archive', 'Checking extracted archive safety'], ['reading-client-metadata', 'Reading client pack metadata'],
+    ['constructor', 'Inspecting matching client pack'], ['private-unknown-stage', 'Inspecting matching client pack']
+  ]) {
+    await companionProgress(page, { phase, completedBytes: '1024', totalBytes: '2048' });
+    await expect(page.getByRole('status')).toContainText(label);
+    await expect(page.getByRole('status')).toContainText('1,024 / 2,048 bytes');
+    await expect(page.getByRole('progressbar')).not.toHaveAttribute('value');
+  }
+  await expect(page.getByRole('status')).not.toContainText('private-unknown-stage');
+  await settleCompanion(page, 'inspect-companion', 0, { code: 'CANCELLED' });
+});
+
+test('companion progress: wrong scope and abandoned A-B-A events cannot replace current measurements', async ({ page }) => {
+  await holdCompanionInspection(page);
+  await page.evaluate(() => { window.abandonedCompanionListeners = [...window.listeners]; });
+  await companionProgress(page, { phase: 'checking-bundled-files', completedItems: '1', totalItems: '4' });
+  await expect(page.getByText('Checked 1 of 4 bundled files', { exact: true })).toBeVisible();
+  await companionProgress(page, { requestId: 'wrong-request', phase: 'checking-bundled-files', completedItems: '3', totalItems: '4' });
+  await companionProgress(page, { serverId: 'b', phase: 'checking-bundled-files', completedItems: '3', totalItems: '4' });
+  await expect(page.getByText('Checked 1 of 4 bundled files', { exact: true })).toBeVisible();
+  await page.evaluate(() => window.show('companion', 'b'));
+  await expect(page.getByLabel('pack-0.13.4.mrpack')).toBeEnabled();
+  await page.evaluate(() => window.show('companion', 'a'));
+  await page.getByLabel('pack-0.13.4.mrpack').check();
+  await page.getByRole('button', { name: 'Inspect selected pack' }).click();
+  await companionJobs(page, 'inspect-companion', 2);
+  await companionProgress(page, { phase: 'checking-bundled-files', completedItems: '2', totalItems: '5' }, 1);
+  await expect(page.getByText('Checked 2 of 5 bundled files', { exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    const input = window.pending['client-packs:inspect-companion'][0].input;
+    for (const listener of [...window.listeners, ...window.abandonedCompanionListeners]) listener({ ...input, phase: 'checking-bundled-files', completedItems: '99', totalItems: '100' });
+  });
+  await settleCompanion(page, 'inspect-companion', 0);
+  await expect(page.getByText('Checked 2 of 5 bundled files', { exact: true })).toBeVisible();
+  await expect(companionPanel(page)).toHaveAttribute('aria-busy', 'true');
+  await expect(page.getByRole('button', { name: 'Accept matching client pack' })).toHaveCount(0);
+  await settleCompanion(page, 'inspect-companion', 1, { code: 'CANCELLED' });
+});

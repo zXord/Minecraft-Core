@@ -6,6 +6,24 @@
   export let localArchive = false;
   let mounted=false,currentId,currentManaged,generation=0,operation=0,controller;
   let descriptor=null,assets=null,selected='',inspection=null,error=null,busy=false,progress=null;
+  const phaseLabels = {
+    inspecting:'Inspecting matching client pack', resolving:'Resolving client archive',
+    downloading:'Downloading client archive', 'downloading-archive':'Downloading client archive',
+    verifying:'Verifying client archive', materialize:'Preparing verified archive', list:'Reading archive contents',
+    validate:'Checking archive paths and limits', classify:'Identifying archive format',
+    extracting:'Extracting client archive', 'verifying-archive':'Checking extracted archive safety',
+    'reading-client-metadata':'Reading client pack metadata', 'checking-bundled-files':'Checking bundled pack files',
+    'revalidating-client-files':'Rechecking inspected pack files'
+  };
+  function count(value) {
+    return typeof value === 'string' && /^(0|[1-9][0-9]{0,29})$/.test(value) ? BigInt(value) : null;
+  }
+  $: progressLabel = Object.hasOwn(phaseLabels, progress?.phase) ? phaseLabels[progress.phase] : 'Inspecting matching client pack';
+  $: checkedItems = progress?.phase === 'checking-bundled-files' ? count(progress.completedItems) : null;
+  $: bundledTotal = checkedItems !== null ? count(progress.totalItems) : null;
+  // Exact file counts describe this phase only, never whole-inspection completion.
+  $: bundledMeter = checkedItems !== null && bundledTotal !== null && bundledTotal > 0n && checkedItems <= bundledTotal
+    ? Number(checkedItems * 1000000n / bundledTotal) : null;
   $: if (mounted && (serverId !== currentId || managed !== currentManaged)) reset();
   function reset(){currentId=serverId;currentManaged=managed;generation+=1;operation+=1;controller?.abort();descriptor=null;assets=null;selected='';inspection=null;error=null;progress=null;busy=false;if(managed&&serverId)refresh();}
   async function run(action,apply,cancellable=false,channel='Pairing status'){
@@ -60,10 +78,19 @@
     {#if assets.assets.length===0}<p>No supported client archive candidate is available for this installed server release. GitHub supports MRPACK or MultiMC ZIP; Modrinth supports MRPACK only. Server installation is unaffected.</p>
     {:else}<fieldset disabled={busy}><legend>Client archive candidates from this exact release — MRPACK or MultiMC ZIP</legend>{#each assets.assets as asset (asset.assetId)}<label><input type="radio" name={`companion-${serverId}`} bind:group={selected} value={asset.assetId} on:change={()=>inspection=null}/><span>{asset.fileName}</span><small>{number(asset.size)} bytes</small></label>{/each}</fieldset>
       <p>GitHub supports MRPACK or MultiMC ZIP; Modrinth supports MRPACK only. Inspection determines whether a candidate has a supported client format.</p>
+      <p>The server must be stopped before pairing. Stop it before this review to avoid repeating inspection.</p>
       <button type="button" disabled={busy||!selected} on:click={inspect}>Inspect selected pack</button>
     {/if}
   {/if}
-  {#if progress}<div role="status" aria-live="polite"><p>{progress.phase.replaceAll('-',' ')}</p>{#if progress.completedBytes!==undefined}<p>{number(progress.completedBytes)}{progress.totalBytes!==undefined?` / ${number(progress.totalBytes)}`:''} bytes</p>{/if}<progress aria-label="Inspecting client archive"></progress><button type="button" on:click={()=>controller?.abort()}>Cancel request</button></div>{/if}
+  {#if progress}
+    <div role="status" aria-live="polite">
+      <p>{progressLabel}</p>
+      {#if checkedItems !== null}<p>Checked {number(checkedItems)}{bundledTotal !== null ? ` of ${number(bundledTotal)}` : ''} bundled files</p>{/if}
+      {#if progress.completedBytes!==undefined}<p>{number(progress.completedBytes)}{progress.totalBytes!==undefined?` / ${number(progress.totalBytes)}`:''} bytes</p>{/if}
+      {#if bundledMeter !== null}<progress aria-label="Bundled files checked" max="1000000" value={bundledMeter}></progress>{:else}<progress aria-label="Inspecting client archive"></progress>{/if}
+      <button type="button" on:click={()=>controller?.abort()}>Cancel request</button>
+    </div>
+  {/if}
   {#if inspection}<div class="review"><h3>Review matching runtime</h3><p>{inspection.name}</p><p>Installed server release {inspection.serverVersion}</p><p>Minecraft {inspection.runtime.minecraftVersion} · {inspection.runtime.loaderFamily} {inspection.runtime.loaderVersion}</p><p>Additional pack-file downloads: {number(inspection.downloadBytes)} bytes</p>{#if inspection.downloadBytes==='0'}<p>Bundled content still needs installation.</p>{/if}<p>Archive acquisition and Minecraft/loader runtime preparation are separate costs, not included in additional pack-file downloads.</p><p>Minecraft Core prepares the declared Minecraft/loader runtime. Launcher commands and settings are not imported.</p><p>This pairs the inspected client archive only. Client installation is a separate reviewed action. Stop the server before accepting.</p><button class="primary" type="button" disabled={busy} on:click={accept}>Accept matching client pack</button></div>{/if}
   <button type="button" disabled={busy} on:click={refresh}>Refresh companion list</button>
 </section>
