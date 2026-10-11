@@ -369,6 +369,9 @@ test('Modrinth MRPACK candidate preparation preserves its exact Fabric runtime i
   const sha1 = crypto.createHash('sha1').update(modBytes).digest('hex');
   const sha512 = crypto.createHash('sha512').update(modBytes).digest('hex');
   fs.mkdirSync(archive, { recursive: true });
+  fs.mkdirSync(path.join(archive, 'overrides', 'config'), { recursive: true });
+  const overrideBytes = Buffer.from('enabled=true\n');
+  fs.writeFileSync(path.join(archive, 'overrides', 'config', 'pack.toml'), overrideBytes);
   fs.mkdirSync(cache, { recursive: true });
   fs.writeFileSync(path.join(cache, sha256), modBytes);
   fs.writeFileSync(path.join(archive, 'modrinth.index.json'), JSON.stringify({
@@ -399,15 +402,17 @@ test('Modrinth MRPACK candidate preparation preserves its exact Fabric runtime i
     resolveOwnedWorkspace({ id }) { return { id, kind: 'output', path: outputPaths.get(id) }; }
   };
   const progress = [];
+  const downloadedParts = [];
   const preparer = new ProductionCandidatePreparer({
     workspaceRegistry,
     archiveExtractor: {
       async extractArchive({ destinationId }) {
-        await fsp.copyFile(path.join(archive, 'modrinth.index.json'), path.join(outputPaths.get(destinationId), 'modrinth.index.json'));
+        await fsp.cp(archive, outputPaths.get(destinationId), { recursive: true, force: false });
       }
     },
     artifactDownloader: {
       async downloadPart(part, { onProgress }) {
+        downloadedParts.push(part);
         onProgress?.({ partBytes: '5', totalBytes: String(part.size) });
         onProgress?.({ partBytes: String(part.size), totalBytes: String(part.size) });
         return { sha256 };
@@ -423,22 +428,34 @@ test('Modrinth MRPACK candidate preparation preserves its exact Fabric runtime i
       inspectionId: 'inspection-public-entry',
       result: {
         selectedRoot: null,
+        rootCandidates: ['overrides'],
         entries: [{
           entryName: 'modrinth.index.json', canonicalName: 'modrinth.index.json', type: 'file',
           size: String(fs.statSync(path.join(archive, 'modrinth.index.json')).size), packedSize: '1', depth: 1, nameLength: 19
-        }],
+        },
+        { entryName: 'overrides', type: 'directory', size: '0' },
+        { entryName: 'overrides/config', type: 'directory', size: '0' },
+        { entryName: 'overrides/config/pack.toml', type: 'file', size: String(overrideBytes.length) }],
         classification: {
           kind: 'mrpack-server', confidence: 'exact', blocked: false,
           runtime: { minecraftVersion: '1.20.1', loaderFamily: 'fabric', loaderVersion: '0.16.10' }
         }
       }
     },
-    selections: { optionalFileIds: [] },
+    selections: { optionalFileIds: [], selectedRoot: null, runtimeChoice: null },
     onProgress: event => progress.push(event)
   });
 
   const template = outputPaths.get(result.execution.templateOutputId);
   assert.equal(fs.readFileSync(path.join(template, 'mods', 'example.jar'), 'utf8'), modBytes.toString());
+  assert.equal(fs.readFileSync(path.join(template, 'config', 'pack.toml'), 'utf8'), overrideBytes.toString());
+  assert.equal(fs.existsSync(path.join(template, 'overrides')), false);
+  assert.equal(fs.existsSync(path.join(template, 'modrinth.index.json')), false);
+  assert.equal(result.inspectionResult.selectedRoot, null);
+  assert.equal(result.inspectionResult.classification.kind, 'mrpack-server');
+  assert.deepEqual(result.incomingManifest.entries.map(entry => entry.path), ['config/pack.toml', 'mods/example.jar']);
+  assert.equal(downloadedParts.length, 1);
+  assert.equal(downloadedParts[0].downloadUrl, 'https://cdn.modrinth.com/data/fixture/version/example.jar');
   assert.deepEqual(result.runtime, {
     minecraftVersion: '1.20.1', loaderFamily: 'fabric', loaderVersion: '0.16.10',
     javaMajor: 17, os: 'win32', architecture: 'x64'
@@ -450,10 +467,14 @@ test('Modrinth MRPACK candidate preparation preserves its exact Fabric runtime i
     { activity: 'downloading-pack-files', completedItems: 1, totalItems: 1, processedBytes: modBytes.length, totalBytes: modBytes.length }
   ]);
   assert.deepEqual(progress.filter(event => event.activity === 'assembling-files'), [
-    { activity: 'assembling-files', completedItems: 0, totalItems: 1, processedBytes: 0, totalBytes: modBytes.length },
+    { activity: 'assembling-files', completedItems: 0, totalItems: 2, processedBytes: 0, totalBytes: modBytes.length + overrideBytes.length },
     {
-      activity: 'assembling-files', completedItems: 1, totalItems: 1,
-      processedBytes: modBytes.length, totalBytes: modBytes.length
+      activity: 'assembling-files', completedItems: 1, totalItems: 2,
+      processedBytes: modBytes.length, totalBytes: modBytes.length + overrideBytes.length
+    },
+    {
+      activity: 'assembling-files', completedItems: 2, totalItems: 2,
+      processedBytes: modBytes.length + overrideBytes.length, totalBytes: modBytes.length + overrideBytes.length
     }
   ]);
 });

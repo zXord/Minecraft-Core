@@ -296,6 +296,21 @@ test('archive review truthfully explains that compressed data will be verified d
   assert.doesNotMatch(source('src/components/modpacks/ModpackInspectionProgress.svelte'), /Testing archive integrity|Checking compressed archive data/u);
 });
 
+test('archive review shows inspected archive root rather than the sole payload directory', async () => {
+  const { render } = await import('svelte/server');
+  const Component = await loadServerComponent('src/components/setup/ArchiveGuidedReview.svelte');
+  for (const [kind, child] of [['mrpack-server', 'overrides'], ['prepared-server-pack', 'mods']]) {
+    const html = render(Component, { props: { inspection: {
+      inspectionId: `inspection-root-${kind}`, selectedRoot: null, rootCandidates: [child],
+      classification: { kind, confidence: 'exact', blocked: false,
+        runtime: { minecraftVersion: '1.20.1', loaderFamily: 'fabric', loaderVersion: '0.16.10' }
+      }
+    } } }).body;
+    assert.match(html, /Proposed root<\/span><strong>Archive root<\/strong>/u);
+    assert.doesNotMatch(html, /Choose the server root/u);
+  }
+});
+
 test('retained-download outcome explains automatic cleanup and confirms explicit removal', async () => {
   const { render } = await import('svelte/server');
   const Component = await loadServerComponent('src/components/modpacks/ModpackJobProgress.svelte');

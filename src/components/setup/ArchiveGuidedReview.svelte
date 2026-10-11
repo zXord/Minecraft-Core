@@ -146,13 +146,12 @@
 
   function resetInspectionSelections(nextInspection) {
     selectionInspectionId = nextInspection?.inspectionId || null;
-    const roots = nextInspection?.rootCandidates || [];
     optionalFileIds = (nextInspection?.classification?.optionalFiles || [])
       .filter(item => item?.defaultSelected === true)
       .map(item => item.id);
     selectedRoot = typeof nextInspection?.selectedRoot === 'string'
       ? nextInspection.selectedRoot
-      : roots.length === 1 ? rootLabel(roots[0]) : null;
+      : null;
     const runtimes = nextInspection?.classification?.runtimeCandidates || [];
     const suggestedRuntime = runtimes.length === 1 ? cleanRuntimeChoice(runtimes[0]) : null;
     runtimeMinecraftVersion = suggestedRuntime?.minecraftVersion || '';
