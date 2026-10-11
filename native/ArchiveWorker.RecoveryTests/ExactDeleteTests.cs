@@ -19,6 +19,8 @@ internal static partial class ExactDeleteTests
     {
         if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64) throw new InvalidOperationException("Windows x64 required");
         Console.WriteLine($"exact-delete-runtime: {Environment.Version}; {RuntimeInformation.FrameworkDescription}; {RuntimeInformation.ProcessArchitecture}");
+        SourceGeneratedRequestCompatibility();
+        SourceGeneratedLegacyOperations();
         ProductionDeleteFailureProtocol();
         ExactDeleteRegularFile();
         SubstitutionBeforeOpen();
@@ -51,13 +53,13 @@ internal static partial class ExactDeleteTests
             owned.Add(value);
             return value;
         }
-        internal DurableRequest Request(string mode = "delete") => JsonSerializer.Deserialize<DurableRequest>(JsonSerializer.Serialize(new
+        internal DurableRequest Request(string mode = "delete") => ReadProductionRequest(JsonSerializer.Serialize(new
         {
             operation = "delete-file-exact", sourcePath = Leaf, sourceIdentity = Identity(Leaf, "file"),
             sourceParentIdentity = Identity(Root, "directory"), allowedRoots = new[] { Root },
             allowedRootIdentities = new[] { new { path = Root, identity = Identity(Root, "directory") } },
             ancestorIdentities = Array.Empty<object>(), mode
-        }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }), new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })!;
+        }, JsonOptions));
         public void Dispose()
         {
             Check(Path.GetDirectoryName(Root) == Path.TrimEndingDirectorySeparator(Path.GetTempPath()) && Path.GetFileName(Root).StartsWith("minecraft-exact-delete-"));
@@ -77,6 +79,58 @@ internal static partial class ExactDeleteTests
             Mtime = v.Mtime.ToString(CultureInfo.InvariantCulture), Ctime = v.Ctime.ToString(CultureInfo.InvariantCulture), Sha256 = v.Sha256 };
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException("Exact deletion assertion failed"); }
+
+    private static DurableRequest ReadProductionRequest(string json)
+    {
+        byte[] body = Encoding.UTF8.GetBytes(json);
+        using var stream = new MemoryStream();
+        byte[] prefix = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(prefix, (uint)body.Length);
+        stream.Write(prefix); stream.Write(body); stream.Position = 0;
+        return FrameReader.ReadExactlyOneAsync(stream, WorkerJsonContext.Default.DurableRequest, CancellationToken.None).GetAwaiter().GetResult();
+    }
+
+    private static void SourceGeneratedRequestCompatibility()
+    {
+        var failures = new List<string>();
+        foreach (string operation in new[] { "move-write-through", "replace-file-write-through", "flush-directory", "flush-directories", "reconcile-move-write-through", "delete-file-exact" })
+        {
+            var request = ReadProductionRequest($"{{\"operation\":\"{operation}\"}}");
+            if (!request.SuppliedFields.SetEquals(new[] { "operation" }))
+                failures.Add($"{operation}: supplied fields = {string.Join(',', request.SuppliedFields.Order())}; expected only operation");
+        }
+        if (failures.Count > 0) throw new InvalidOperationException("Source-generated field-presence mismatch:\n" + string.Join("\n", failures));
+        var explicitNull = ReadProductionRequest("{\"operation\":\"delete-file-exact\",\"destinationPath\":null}");
+        Check(explicitNull.SuppliedFields.SetEquals(new[] { "operation", "destinationPath" }));
+        Refuses(() => ReadProductionRequest("{\"operation\":\"delete-file-exact\",\"unknown\":null}"));
+        Refuses(() => ReadProductionRequest("{\"operation\":\"delete-file-exact\",\"operation\":\"delete-file-exact\"}"));
+        Console.WriteLine("SourceGeneratedRequestCompatibility: passed (all 6 operations; absence distinguished from explicit null; unknown and duplicate fields rejected)");
+    }
+
+    private static void SourceGeneratedLegacyOperations()
+    {
+        using var f = new Fixture();
+        string destination = f.Owned("published");
+        var original = Identity(f.Leaf, "file");
+        DurableRequest Request(DurableRequest request) => Change(request, node =>
+        {
+            node["allowedRoots"] = JsonSerializer.SerializeToNode(new[] { f.Root }, JsonOptions);
+            node["allowedRootIdentities"] = JsonSerializer.SerializeToNode(new[] { new { path = f.Root, identity = Identity(f.Root, "directory") } }, JsonOptions);
+        });
+        var move = Request(new DurableRequest { Operation = "move-write-through", SourcePath = f.Leaf, DestinationPath = destination,
+            SourceIdentity = original, DestinationParentIdentity = Identity(f.Root, "directory") });
+        Refuses(() => Execute(Change(move, node => node["mode"] = null))); Check(File.Exists(f.Leaf));
+        Refuses(() => Execute(Change(move, node => node["ancestorIdentities"] = null))); Check(File.Exists(f.Leaf));
+        Execute(move); Check(!File.Exists(f.Leaf) && File.ReadAllText(destination) == "authorized bytes");
+        Execute(Request(new DurableRequest { Operation = "reconcile-move-write-through", SourcePath = f.Leaf, DestinationPath = destination,
+            SourceIdentity = original, SourceParentIdentity = Identity(f.Root, "directory"), DestinationParentIdentity = Identity(f.Root, "directory") }));
+        File.WriteAllText(f.Leaf, "replacement bytes");
+        Execute(Request(new DurableRequest { Operation = "replace-file-write-through", SourcePath = f.Leaf, DestinationPath = destination,
+            SourceIdentity = Identity(f.Leaf, "file"), DestinationIdentity = Identity(destination, "file"), DestinationParentIdentity = Identity(f.Root, "directory") }));
+        Check(!File.Exists(f.Leaf) && File.ReadAllText(destination) == "replacement bytes");
+        Execute(Request(new DurableRequest { Operation = "flush-directory", DirectoryPath = f.Root, DirectoryIdentity = Identity(f.Root, "directory") }));
+        Execute(Request(new DurableRequest { Operation = "flush-directories", Directories = new[] { new DurableDirectoryRequest { DirectoryPath = f.Root, DirectoryIdentity = Identity(f.Root, "directory") } } }));
+        Console.WriteLine("SourceGeneratedLegacyOperations: passed (move, reconcile, replace, flush, batch; mixed null fields rejected)");
+    }
 
     private static void ProductionDeleteFailureProtocol()
     {
@@ -208,7 +262,7 @@ internal static partial class ExactDeleteTests
     private static DurableRequest Change(DurableRequest request, Action<JsonObject> change)
     {
         var node = JsonNode.Parse(JsonSerializer.Serialize(request, JsonOptions))!.AsObject(); change(node);
-        return node.Deserialize<DurableRequest>(JsonOptions)!;
+        return ReadProductionRequest(node.ToJsonString());
     }
     private static void RejectMixedAndMissingRequestFields()
     {

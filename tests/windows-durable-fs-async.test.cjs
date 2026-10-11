@@ -690,12 +690,27 @@ test('async durable move rejects paths outside the owned root and file symlinks'
   );
 });
 
+function packagedDurabilityWorkerPaths() {
+  // A scoped fresh publish can be verified without overwriting checked-in vendor
+  // artifacts. Both paths remain subject to the production integrity verifier.
+  const workerPath = process.env.MINECRAFT_CORE_TEST_DURABILITY_WORKER;
+  const workerManifestPath = process.env.MINECRAFT_CORE_TEST_DURABILITY_MANIFEST;
+  if (workerPath !== undefined || workerManifestPath !== undefined) {
+    assert.equal(typeof workerPath, 'string'); assert.equal(typeof workerManifestPath, 'string');
+    assert.ok(path.isAbsolute(workerPath) && path.isAbsolute(workerManifestPath));
+    return { workerPath, workerManifestPath };
+  }
+  return {
+    workerPath: path.join(__dirname, '..', 'vendor', 'archive-worker', 'x64', 'ArchiveWorker.exe'),
+    workerManifestPath: path.join(__dirname, '..', 'build-resources', 'archive-runtime', 'archive-worker-x64.json')
+  };
+}
+
 test('packaged native worker performs asynchronous move and replacement end to end', {
   skip: process.platform !== 'win32'
 }, async t => {
   const root = rootFixture(t, 'minecraft-core-durable-async-native-');
-  const workerPath = path.join(__dirname, '..', 'vendor', 'archive-worker', 'x64', 'ArchiveWorker.exe');
-  const workerManifestPath = path.join(__dirname, '..', 'build-resources', 'archive-runtime', 'archive-worker-x64.json');
+  const { workerPath, workerManifestPath } = packagedDurabilityWorkerPaths();
   const first = path.join(root, 'first.json');
   const current = path.join(root, 'current.json');
   const replacement = path.join(root, 'replacement.json');
@@ -714,6 +729,25 @@ test('packaged native worker performs asynchronous move and replacement end to e
   assert.equal(fs.existsSync(first), false);
   assert.equal(fs.existsSync(replacement), false);
   assert.equal(fs.readFileSync(current, 'utf8'), '{"sequence":2}\n');
+});
+
+test('packaged native worker performs exact delete and absent reconciliation end to end', {
+  skip: process.platform !== 'win32'
+}, async t => {
+  const root = rootFixture(t, `minecraft-exact-delete-native-${crypto.randomUUID()}-`);
+  const leaf = path.join(root, 'authorized.bin'); const sibling = path.join(root, 'sibling.bin');
+  fs.writeFileSync(leaf, 'authorized bytes'); fs.writeFileSync(sibling, 'preserve');
+  const options = exactDeleteOptions(root, leaf);
+  const client = new WindowsDurableFsClient({
+    ...packagedDurabilityWorkerPaths(),
+    allowedRoots: [root], appOwnedRoot: path.join(root, 'broker')
+  });
+  assert.deepEqual(await client.deleteFileExactAsync(leaf, options), { deleted: true, durable: true });
+  assert.equal(fs.existsSync(leaf), false); assert.equal(fs.readFileSync(sibling, 'utf8'), 'preserve');
+  assert.deepEqual(await client.deleteFileExactAsync(leaf, { ...options, mode: 'reconcile-absent' }), { deleted: true, durable: true });
+  fs.writeFileSync(leaf, 'replacement');
+  await assert.rejects(client.deleteFileExactAsync(leaf, { ...options, mode: 'reconcile-absent' }), { code: 'COMMIT_FAILED', durableEffectState: 'none' });
+  assert.equal(fs.readFileSync(leaf, 'utf8'), 'replacement'); assert.equal(fs.readFileSync(sibling, 'utf8'), 'preserve');
 });
 
 test('timed-out async durable move retains authority until worker close is confirmed', async t => {

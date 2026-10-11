@@ -21,6 +21,7 @@
     <Compile Include="..\ArchiveWorker\Durability\DurabilityRetryExecutor.cs" Link="DurabilityRetryExecutor.cs" />
     <Compile Include="..\ArchiveWorker\Durability\DurableFilesystem.cs" Link="DurableFilesystem.cs" />
     <Compile Include="..\ArchiveWorker\Protocol\WorkerDtos.cs" Link="WorkerDtos.cs" />
+    <Compile Include="..\ArchiveWorker\Protocol\WorkerJsonContext.cs" Link="WorkerJsonContext.cs" />
     <Compile Include="..\ArchiveWorker\Sandbox\NativeMethods.cs" Link="NativeMethods.cs" />
     <Compile Include="..\ArchiveWorker\Security\CanonicalPaths.cs" Link="CanonicalPaths.cs" />
     <Compile Include="..\ArchiveWorker\Security\ReparsePointPolicy.cs" Link="ReparsePointPolicy.cs" />

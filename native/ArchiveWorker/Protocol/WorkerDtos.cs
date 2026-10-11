@@ -87,35 +87,37 @@ internal sealed class WorkerMetrics
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 internal sealed class DurableRequest
 {
+    // Source-generated JSON construction populates absent init-only members
+    // with defaults. Setters run only for wire-present properties, including null.
     internal HashSet<string> SuppliedFields { get; } = new(StringComparer.Ordinal);
     private string? operation;
-    public string? Operation { get => operation; init { operation = value; SuppliedFields.Add("operation"); } }
+    public string? Operation { get => operation; set { operation = value; SuppliedFields.Add("operation"); } }
     private string? sourcePath;
-    public string? SourcePath { get => sourcePath; init { sourcePath = value; SuppliedFields.Add("sourcePath"); } }
+    public string? SourcePath { get => sourcePath; set { sourcePath = value; SuppliedFields.Add("sourcePath"); } }
     private string? destinationPath;
-    public string? DestinationPath { get => destinationPath; init { destinationPath = value; SuppliedFields.Add("destinationPath"); } }
+    public string? DestinationPath { get => destinationPath; set { destinationPath = value; SuppliedFields.Add("destinationPath"); } }
     private string? directoryPath;
-    public string? DirectoryPath { get => directoryPath; init { directoryPath = value; SuppliedFields.Add("directoryPath"); } }
+    public string? DirectoryPath { get => directoryPath; set { directoryPath = value; SuppliedFields.Add("directoryPath"); } }
     private DurableDirectoryRequest[]? directories;
-    public DurableDirectoryRequest[]? Directories { get => directories; init { directories = value; SuppliedFields.Add("directories"); } }
+    public DurableDirectoryRequest[]? Directories { get => directories; set { directories = value; SuppliedFields.Add("directories"); } }
     private string[]? allowedRoots;
-    public string[]? AllowedRoots { get => allowedRoots; init { allowedRoots = value; SuppliedFields.Add("allowedRoots"); } }
+    public string[]? AllowedRoots { get => allowedRoots; set { allowedRoots = value; SuppliedFields.Add("allowedRoots"); } }
     private DurableObjectIdentity? sourceIdentity;
-    public DurableObjectIdentity? SourceIdentity { get => sourceIdentity; init { sourceIdentity = value; SuppliedFields.Add("sourceIdentity"); } }
+    public DurableObjectIdentity? SourceIdentity { get => sourceIdentity; set { sourceIdentity = value; SuppliedFields.Add("sourceIdentity"); } }
     private DurableObjectIdentity? sourceParentIdentity;
-    public DurableObjectIdentity? SourceParentIdentity { get => sourceParentIdentity; init { sourceParentIdentity = value; SuppliedFields.Add("sourceParentIdentity"); } }
+    public DurableObjectIdentity? SourceParentIdentity { get => sourceParentIdentity; set { sourceParentIdentity = value; SuppliedFields.Add("sourceParentIdentity"); } }
     private DurableObjectIdentity? destinationParentIdentity;
-    public DurableObjectIdentity? DestinationParentIdentity { get => destinationParentIdentity; init { destinationParentIdentity = value; SuppliedFields.Add("destinationParentIdentity"); } }
+    public DurableObjectIdentity? DestinationParentIdentity { get => destinationParentIdentity; set { destinationParentIdentity = value; SuppliedFields.Add("destinationParentIdentity"); } }
     private DurableObjectIdentity? destinationIdentity;
-    public DurableObjectIdentity? DestinationIdentity { get => destinationIdentity; init { destinationIdentity = value; SuppliedFields.Add("destinationIdentity"); } }
+    public DurableObjectIdentity? DestinationIdentity { get => destinationIdentity; set { destinationIdentity = value; SuppliedFields.Add("destinationIdentity"); } }
     private DurableObjectIdentity? directoryIdentity;
-    public DurableObjectIdentity? DirectoryIdentity { get => directoryIdentity; init { directoryIdentity = value; SuppliedFields.Add("directoryIdentity"); } }
+    public DurableObjectIdentity? DirectoryIdentity { get => directoryIdentity; set { directoryIdentity = value; SuppliedFields.Add("directoryIdentity"); } }
     private DurableRootIdentity[]? allowedRootIdentities;
-    public DurableRootIdentity[]? AllowedRootIdentities { get => allowedRootIdentities; init { allowedRootIdentities = value; SuppliedFields.Add("allowedRootIdentities"); } }
+    public DurableRootIdentity[]? AllowedRootIdentities { get => allowedRootIdentities; set { allowedRootIdentities = value; SuppliedFields.Add("allowedRootIdentities"); } }
     private DurableRootIdentity[]? ancestorIdentities;
-    public DurableRootIdentity[]? AncestorIdentities { get => ancestorIdentities; init { ancestorIdentities = value; SuppliedFields.Add("ancestorIdentities"); } }
+    public DurableRootIdentity[]? AncestorIdentities { get => ancestorIdentities; set { ancestorIdentities = value; SuppliedFields.Add("ancestorIdentities"); } }
     private string? mode;
-    public string? Mode { get => mode; init { mode = value; SuppliedFields.Add("mode"); } }
+    public string? Mode { get => mode; set { mode = value; SuppliedFields.Add("mode"); } }
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
