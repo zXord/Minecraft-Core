@@ -346,7 +346,7 @@ async function createProductionModpackComposition(input = {}) {
         return service.listAvailableRestorePoints(request);
       }
     });
-    const planRegistry = new PlanRegistry({ workspaceRegistry, clock: nowMs, randomUUID });
+    const planRegistry = new PlanRegistry({ workspaceRegistry, clock: nowMs, randomUUID, allowNewServerLaunchBindings: true });
 
     const rootDurableFs = durableFsFactory([userDataPath]);
     const nativeNotificationBridge = new NativeModpackNotificationBridge({ Notification: input.Notification || null, getWindow });
@@ -356,6 +356,7 @@ async function createProductionModpackComposition(input = {}) {
       durableFs: rootDurableFs,
       clock: nowDate,
       randomUUID,
+      allowNewServerLaunchBindings: true,
       launchOwner
     });
     let cachePrunePromise = null;
@@ -593,6 +594,7 @@ async function createProductionModpackComposition(input = {}) {
       outcomeActionIssuer: lifecycleOutcomeActionIssuer,
       assertAdmission,
       destinationReservations: destinationReservationService,
+      allowNewServerLaunchBindings: true,
       launchOwner,
       launchRecoveryRegistry: recoveryRegistry,
       launchTerminalPublicationAvailable: typeof rawRecoveryService.retryTerminalPublication === 'function',

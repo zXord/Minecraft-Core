@@ -23,6 +23,7 @@ const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
 const { createModpackPaths } = require('../../electron/services/modpacks/paths.cjs');
 const { SelectionRegistry } = require('../../electron/services/modpacks/local/selection-registry.cjs');
 const { computePreflightPlanFingerprint } = require('../../electron/services/modpacks/planning/plan-fingerprint.cjs');
+const { ModpackError, deepFreeze } = require('../../electron/services/modpacks/errors.cjs');
 const {
   PersistentCandidateHashService
 } = require('../../electron/services/modpacks/planning/candidate-hash-service.cjs');
@@ -368,8 +369,84 @@ test('launch owner never reissues a retained durable reservation incarnation aft
   await c.initialize();
   const reserved = await c.destinationReservationService.reserveWithNativeDialog({});
   assert.notEqual(reserved.instanceId, instanceId);
-  assert.equal(c.lifecycleService.operationStore.operationStore.allowNewServerLaunchBindings, false);
+  assert.equal(c.lifecycleService.operationStore.operationStore.allowNewServerLaunchBindings, true);
 });
+
+for (const operationKind of ['install-new', 'import-files-only-new']) {
+  test(`launch rollout production persists and reconciles ${operationKind}`, async t => {
+    const f = fixture(t);
+    const targetPath = path.join(f.input.userDataPath, 'selected-empty-destination');
+    fs.mkdirSync(targetPath);
+    f.input.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [targetPath] });
+    Object.assign(f.input.rawRecoveryServices.registry, {
+      async initialize() { return { records: [], corrupt: [], blocks: [], globalBlock: false, pendingTerminalPublications: [] }; },
+      async loadHistory() { return null; }
+    });
+    let releaseRuntime;
+    const runtimeGate = new Promise(resolve => { releaseRuntime = resolve; });
+    let executions = 0;
+    f.input.mutationRuntime.resolveInstance = async () => {
+      executions += 1;
+      await runtimeGate;
+      throw new ModpackError('COMMIT_FAILED', 'inert runtime stop');
+    };
+    const c = await createProductionModpackComposition(f.input);
+    try {
+      await c.initialize();
+      const reserved = await c.destinationReservationService.reserveWithNativeDialog({});
+      const planningSessionId = c.workspaceRegistry.createPlanningSession();
+      c.workspaceRegistry.createStagingOutput({ ownerId: planningSessionId });
+      const filesOnly = operationKind === 'import-files-only-new';
+      const base = {
+        operation: { kind: filesOnly ? 'files-only' : 'install', serverKind: 'new',
+          instanceId: reserved.instanceId, expectedContentRevision: 0, downgrade: false },
+        requirements: filesOnly ? { filesOnlySafetyConfirmed: true } : {},
+        ...(filesOnly ? { inspection: { kind: 'files-only' } } : {}),
+        restorePoints: []
+      };
+      const plan = deepFreeze({ ...base, fingerprint: computePreflightPlanFingerprint(base) });
+      const created = c.planRegistry.create({ plan, sanitizedView: {}, fingerprint: plan.fingerprint, planningSessionId });
+      assert.match(created.planId, /^plan-launch-v1-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+      c.planRegistry.bindNewServerReservation(created.planId, reserved.instanceId);
+      const credentials = { planId: created.planId, planFingerprint: created.fingerprint };
+      await c.lifecycleService.startOperation({ ...credentials, choices: { acceptEula: true } }); // Caller response deliberately discarded.
+      const result = await c.lifecycleService.reconcileNewServerLaunch(credentials);
+      assert.equal(result.status, 'started');
+      assert.deepEqual([...c.lifecycleService.activeOperations.keys()], [result.job.jobId]);
+      assert.equal(result.job.schemaVersion, 1);
+      assert.equal(result.job.serverId, reserved.instanceId);
+      assert.equal(result.job.operationKind, operationKind);
+      assert.equal(result.job.planFingerprint, created.fingerprint);
+      assert.deepEqual(result.settlement, { status: 'active', destinationDisposition: 'held', recoveryAvailable: false });
+      assert.equal(executions, 1);
+      assert.equal(c.destinationReservationService.isDestinationHeld(reserved.instanceId), true);
+      assert.equal(await c.lifecycleService.releaseServerDestination(reserved.instanceId), false);
+      const record = JSON.parse(fs.readFileSync(path.join(f.input.userDataPath, 'modpack-lifecycle', 'operations', `${result.job.jobId}.json`), 'utf8'));
+      assert.equal(record.schemaVersion, 2);
+      assert.equal(record.jobId, result.job.jobId);
+      assert.equal(record.launchBinding.planId, created.planId);
+      assert.equal(record.launchBinding.planFingerprint, created.fingerprint);
+      assert.equal(record.launchBinding.instanceId, reserved.instanceId);
+      assert.equal(record.launchBinding.destinationDisposition, 'held');
+      const listed = await c.lifecycleService.listNewServerLaunches();
+      assert.equal(listed.nextCursor, null);
+      assert.equal(listed.items.length, 1);
+      assert.equal(listed.items[0].status, 'started');
+      assert.equal(listed.items[0].jobId, result.job.jobId);
+      assert.equal(listed.items[0].planId, created.planId);
+      assert.equal(listed.items[0].planFingerprint, created.fingerprint);
+      assert.equal(listed.items[0].serverId, reserved.instanceId);
+      assert.equal(listed.items[0].operationKind, operationKind);
+      assert.deepEqual(listed.items[0].settlement, result.settlement);
+      assert.equal(Object.hasOwn(listed.items[0], 'job'), false);
+      assert.doesNotMatch(JSON.stringify({ result, listed }), /launchBinding|targetPath|capturedReservation|planningSessionId/);
+      assert.equal(JSON.stringify({ result, listed }).includes(JSON.stringify(targetPath).slice(1, -1)), false);
+    } finally {
+      releaseRuntime();
+      await c.dispose();
+    }
+  });
+}
 
 test('launch startup disposal drains in-flight initialization without enabling admission', async t => {
   const f = fixture(t);

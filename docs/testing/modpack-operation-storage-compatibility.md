@@ -1,6 +1,6 @@
 # Modpack operation storage compatibility
 
-Status: rollout guidance for new-server launch reconciliation. Production creation of v2 records remains disabled until the four implementation/review gates in `../superpowers/plans/2026-10-11-new-server-launch-reconciliation.md` pass and the root explicitly enables it. This document does not enable the feature or certify release readiness.
+Status: production composition explicitly opts in to new-server v2 creation after joint Task 4 implementation review, the root's pre-rollout deterministic gate, and explicit root rollout authorization at source checkpoint `36c23ec`. Primitive constructor defaults remain disabled. The root's combined enabled-wiring gate and native acceptance remain separate requirements under `../superpowers/plans/2026-10-11-new-server-launch-reconciliation.md`; this source opt-in does not certify release readiness.
 
 ## What changes
 
