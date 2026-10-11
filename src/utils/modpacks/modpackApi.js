@@ -12,6 +12,8 @@ const INVOKE = Object.freeze({
   preflight: 'modpacks:preflight',
   preflightManagement: 'modpacks:preflight-management',
   startOperation: 'modpacks:start-operation',
+  reconcileNewServerLaunch: 'modpacks:reconcile-new-server-launch',
+  listNewServerLaunches: 'modpacks:list-new-server-launches',
   cancelJob: 'modpacks:cancel-job',
   getJob: 'modpacks:get-job',
   getActiveJobs: 'modpacks:get-active-jobs',
@@ -196,6 +198,8 @@ export const modpackApi = Object.freeze({
     choices
   }),
   cancelJob: jobId => invoke(INVOKE.cancelJob, { jobId }),
+  reconcileNewServerLaunch: request => invoke(INVOKE.reconcileNewServerLaunch, request),
+  listNewServerLaunches: (request = {}) => invoke(INVOKE.listNewServerLaunches, request),
   getJob: jobId => invoke(INVOKE.getJob, { jobId }),
   getActiveJobs: serverId => invoke(INVOKE.getActiveJobs, { serverId }),
   getState: serverId => invoke(INVOKE.getState, { serverId }),

@@ -2,6 +2,7 @@ const Ajv = require('ajv');
 const { strictJsonClone } = require('../../utils/durable-fs.cjs');
 const { ModpackError, FAILURE_CODES, PUBLIC_ERROR_DETAILS_BY_CODE, deepFreeze, isValidPublicErrorResult } = require('./errors.cjs');
 const { normalizeRuntimeTuple } = require('./contracts.cjs');
+const { isSafeWindowsBasename } = require('./windows-basename.cjs');
 const { validatePublicJob, TERMINAL_PHASES } = require('../modpack-lifecycle/operation-store.cjs');
 
 const ajv = new Ajv({ allErrors: true, strict: true });
@@ -63,6 +64,7 @@ const MODPACK_INVOKE_CHANNELS = Object.freeze([
   'modpacks:list-github-assets', 'modpacks:select-local-archive', 'modpacks:reserve-server-destination',
   'modpacks:release-server-destination', 'modpacks:inspect', 'modpacks:cancel-inspection', 'modpacks:preflight',
   'modpacks:preflight-management', 'modpacks:start-operation', 'modpacks:cancel-job', 'modpacks:get-job', 'modpacks:get-active-jobs', 'modpacks:get-state',
+  'modpacks:reconcile-new-server-launch', 'modpacks:list-new-server-launches',
   'modpacks:list-history', 'modpacks:list-rollback-options', 'modpacks:list-recovery', 'modpacks:recover', 'modpacks:list-notifications',
   'modpacks:ack-notification', 'modpacks:check-updates', 'modpacks:update-tracking', 'modpacks:verify',
   'modpacks:perform-safe-action'
@@ -75,6 +77,8 @@ const MODPACK_EVENT_CHANNELS = Object.freeze([
 const idSchema = { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$' };
 const shortIdSchema = { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$' };
 const fingerprintSchema = { type: 'string', pattern: '^[a-f0-9]{64}$' };
+const launchCursorSchema = { type: 'string', maxLength: 53,
+  pattern: '^launch-cursor-v1-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$' };
 const nullableIdSchema = { anyOf: [idSchema, { type: 'null' }] };
 const nullableStringSchema = { anyOf: [{ type: 'string', minLength: 1, maxLength: 512 }, { type: 'null' }] };
 const safeJsonSchema = {
@@ -252,6 +256,9 @@ const requestSchemas = Object.freeze({
     requestId: shortIdSchema
   }, ['serverId', 'operationKind']),
   'modpacks:start-operation': closed({ planId: shortIdSchema, planFingerprint: fingerprintSchema, choices: executionChoicesSchema }),
+  'modpacks:reconcile-new-server-launch': closed({ planId: shortIdSchema, planFingerprint: fingerprintSchema }),
+  'modpacks:list-new-server-launches': closed({ cursor: launchCursorSchema,
+    limit: { type: 'integer', minimum: 1, maximum: 100 } }, []),
   'modpacks:cancel-job': closed({ jobId: shortIdSchema }),
   'modpacks:get-job': closed({ jobId: shortIdSchema }),
   'modpacks:get-active-jobs': closed({ serverId: shortIdSchema }),
@@ -283,6 +290,44 @@ const resultValidator = ajv.compile(resultSchema);
 const activeJobsValidator = ajv.compile(closed({
   serverId: shortIdSchema,
   items: { type: 'array', maxItems: 10000, items: closed({ ownership: { enum: ['running', 'settling'] }, job: { $ref: 'minecraft-core-safe-json' } }) }
+}));
+const launchReasonSchema = { enum: ['admission-unresolved', 'missing-recovery-evidence', 'conflicting-evidence',
+  'invalid-durable-evidence', 'pending-terminal-publication', 'settlement-repair-required',
+  'destination-recovery', 'legacy-origin-unproven'] };
+const newServerOperationKindSchema = { enum: ['install-new', 'import-files-only-new'] };
+const launchSettlementSchema = { oneOf: [
+  closed({ status: { const: 'active' }, destinationDisposition: { enum: ['held', 'released', 'consumed'] },
+    recoveryAvailable: { const: false } }),
+  closed({ status: { const: 'settled' }, destinationDisposition: { enum: ['released', 'consumed'] },
+    recoveryAvailable: { const: false } }),
+  ...['repair-pending', 'recovery-required', 'support-required'].map(status => closed({
+    status: { const: status }, destinationDisposition: status === 'support-required' ? { enum: ['held', 'released', 'consumed'] } : { const: 'held' }, reason: launchReasonSchema,
+    recoveryAvailable: { const: status === 'recovery-required' }
+  }))
+] };
+const launchIdentityProperties = { planId: shortIdSchema, planFingerprint: fingerprintSchema };
+const launchReconciliationValidator = ajv.compile({ oneOf: [
+  closed({ ...launchIdentityProperties, status: { const: 'pending' }, reason: { const: 'admission-unresolved' } },
+    ['planId', 'planFingerprint', 'status']),
+  closed({ ...launchIdentityProperties, status: { enum: ['not-observed', 'not-started'] } }),
+  closed({ ...launchIdentityProperties, status: { const: 'started' }, job: { $ref: 'minecraft-core-safe-json' },
+    settlement: launchSettlementSchema }),
+  closed({ ...launchIdentityProperties, status: { const: 'recovery-required' }, reason: launchReasonSchema }),
+  closed({ ...launchIdentityProperties, status: { const: 'unavailable' }, reason: { const: 'legacy-correlation-unavailable' } })
+] });
+const launchSummaryProperties = {
+  ...launchIdentityProperties,
+  createdAt: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$' },
+  serverId: shortIdSchema, operationKind: newServerOperationKindSchema,
+  displayName: { type: 'string', minLength: 1, maxLength: 128 }
+};
+const launchListValidator = ajv.compile(closed({
+  items: { type: 'array', maxItems: 100, items: { oneOf: [
+    closed({ ...launchSummaryProperties, status: { const: 'started' }, jobId: shortIdSchema, settlement: launchSettlementSchema }),
+    closed({ ...launchSummaryProperties, status: { enum: ['pending', 'not-observed', 'not-started', 'recovery-required', 'unavailable'] } },
+      ['planId', 'planFingerprint', 'status', 'createdAt'])
+  ] } },
+  nextCursor: { anyOf: [launchCursorSchema, { type: 'null' }] }
 }));
 const eventValidator = ajv.compile({ $ref: 'minecraft-core-safe-json' });
 const inspectionProgressEventValidator = ajv.compile(closed({
@@ -323,6 +368,7 @@ function validPreflightProgressMetrics(value) {
 
 const REQUEST_FORBIDDEN_KEY = /(?:path|directory|destination|command|arguments?|executable|token|secret|password|headers?|authorization|cookie|cache|workspace|provider.?internal|artifactSetId|inputDirectoryId|outputDirectoryId|planningSessionId)/i;
 const PUBLIC_FORBIDDEN_KEY = /(?:path|url|uri|directory|destination|command|arguments?|executable|token|secret|password|headers?|authorization|cookie|cache|workspace|provider.?internal|artifactSetId|inputDirectoryId|outputDirectoryId|planningSessionId|native.?error|stack|cause|errno|syscall)/i;
+const LAUNCH_PRIVATE_KEY = /(?:binding|checksum|revision|epoch|generation|captur|snapshot|raw.?error)/i;
 const INTERNAL_ID = /^(?:artifact-set|input|output|planning|workspace|cache)-/i;
 
 function assertNoAuthority(value, { channel, output = false, allowRemoteDisplay = false }, field = 'request', depth = 0) {
@@ -354,8 +400,15 @@ function assertNoAuthority(value, { channel, output = false, allowRemoteDisplay 
     const outcomeDestinationKey = output && channel === 'modpacks:perform-safe-action' && field === 'result' && key === 'destination';
     const archiveLimitMeasurementKey = output && channel === 'modpacks:inspect' && field === 'result.limitEvidence.totals' &&
       ['directoryCount', 'maximumPathLength'].includes(key);
-    if (!repositoryUrlKey && !validatedConflictPathsKey && !validatedConflictPathEntry && !displayUrlKey && !outcomeDestinationKey && !archiveLimitMeasurementKey &&
-        (output ? PUBLIC_FORBIDDEN_KEY : REQUEST_FORBIDDEN_KEY).test(key)) {
+    // Only these closed settlement DTO paths carry a public disposition enum, never target authority.
+    const launchDispositionKey = output && key === 'destinationDisposition' &&
+      ((channel === 'modpacks:reconcile-new-server-launch' && field === 'result.settlement') ||
+       (channel === 'modpacks:list-new-server-launches' && /^result\.items\.(?:0|[1-9][0-9]*)\.settlement$/u.test(field))) &&
+      ['held', 'released', 'consumed'].includes(child);
+    const launchPrivateKey = output &&
+      ['modpacks:reconcile-new-server-launch', 'modpacks:list-new-server-launches'].includes(channel) && LAUNCH_PRIVATE_KEY.test(key);
+    if (!repositoryUrlKey && !validatedConflictPathsKey && !validatedConflictPathEntry && !displayUrlKey && !outcomeDestinationKey && !archiveLimitMeasurementKey && !launchDispositionKey &&
+        ((output ? PUBLIC_FORBIDDEN_KEY : REQUEST_FORBIDDEN_KEY).test(key) || launchPrivateKey)) {
       throw new ModpackError('INVALID_REQUEST', 'Request contains unsupported authority', { details: { field: 'request' } });
     }
     assertNoAuthority(child, {
@@ -391,6 +444,34 @@ function validateModpackIpcResult(channel, value, request = null) {
     throw new ModpackError('INVALID_REQUEST', 'Modpack IPC result is invalid');
   }
   if (candidate.ok) assertNoAuthority(candidate.value, { channel, output: true }, 'result');
+  if (candidate.ok && channel === 'modpacks:reconcile-new-server-launch') {
+    const result = candidate.value;
+    const normalizedRequest = validateModpackIpcRequest(channel, request);
+    if (!launchReconciliationValidator(result) || result.planId !== normalizedRequest.planId ||
+        result.planFingerprint !== normalizedRequest.planFingerprint) {
+      throw new ModpackError('INVALID_REQUEST', 'Launch reconciliation status is invalid');
+    }
+    if (result.status === 'started') {
+      const job = validatePublicJob(result.job);
+      if (!newServerOperationKindSchema.enum.includes(job.operationKind) || job.planFingerprint !== result.planFingerprint) {
+        throw new ModpackError('INVALID_REQUEST', 'Launch reconciliation status is invalid');
+      }
+    }
+  }
+  if (candidate.ok && channel === 'modpacks:list-new-server-launches') {
+    const result = candidate.value;
+    if (!launchListValidator(result)) throw new ModpackError('INVALID_REQUEST', 'Launch list is invalid');
+    const ids = new Set();
+    for (const item of result.items) {
+      const date = new Date(item.createdAt);
+      if (!Number.isFinite(date.getTime()) || date.toISOString() !== item.createdAt || ids.has(item.planId) ||
+          (Object.hasOwn(item, 'displayName') && (item.displayName !== item.displayName.normalize('NFC').trim() ||
+            /\p{Cc}/u.test(item.displayName) || !isSafeWindowsBasename(item.displayName)))) {
+        throw new ModpackError('INVALID_REQUEST', 'Launch list is invalid');
+      }
+      ids.add(item.planId);
+    }
+  }
   if (candidate.ok && channel === 'modpacks:get-active-jobs') {
     const result = candidate.value;
     if (!activeJobsValidator(result) || (request !== null && result.serverId !== request.serverId)) throw new ModpackError('INVALID_REQUEST', 'Active operation status is invalid');

@@ -129,10 +129,11 @@ async function fixture(t) {
     'validateCandidate', 'publishCandidate', 'registerPublishedInstance', 'commitCandidate', 'startFinal', 'validateLive',
     'persistOutcome', 'cleanup', 'rollback', 'abandonCandidate', 'restorePriorState']) runtime[method] = async () => null;
   runtime.resolveInstance = async () => { executions++; await runtimeGate.promise; throw new ModpackError('COMMIT_FAILED', 'inert runtime stop'); };
-  let service = new ModpackLifecycleService({ sourceResolver: { resolveArtifactSetPlan() {} }, artifactDownloader: { downloadSet() {} },
+  const serviceDependencies = { sourceResolver: { resolveArtifactSetPlan() {} }, artifactDownloader: { downloadSet() {} },
     archiveInspector: { inspectArchive() {} }, inspectionLoader: { loadInspection() {} }, planningAdapter: { createPlan() {} },
     planRegistry: plans, operationStore: store, workspaceRegistry: workspace, mutationCoordinator: { runMutation() {} }, mutationRuntime: runtime,
-    destinationReservations: reservations, launchOwner: owner, allowNewServerLaunchBindings: true, clock: () => now });
+    destinationReservations: reservations, launchOwner: owner, allowNewServerLaunchBindings: true, clock: () => now };
+  let service = new ModpackLifecycleService(serviceDependencies);
   function reviewedPlan(instanceId) {
     const base = { operation: { kind: 'install', serverKind: 'new', instanceId, expectedContentRevision: 0, downgrade: false },
       requirements: {}, restorePoints: [] };
@@ -146,7 +147,7 @@ async function fixture(t) {
   }
   t.after(async () => { runtimeGate.resolve(); await service.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
   return { service, plans, reservations, store, durableFs, owner, plan, reviewedPlan, workspace, root, runtimeGate,
-    get executions() { return executions; }, advance(ms) { now += ms; }, loseOwner() { current = false; } };
+    serviceDependencies, get executions() { return executions; }, advance(ms) { now += ms; }, loseOwner() { current = false; } };
 }
 
 async function seedLaunch(f) {
@@ -164,6 +165,228 @@ function cleanRecoveryRegistry() {
   return { async initialize() { return { records: [], corrupt: [], blocks: [], globalBlock: false, pendingTerminalPublications: [] }; },
     async load() { return null; }, async loadHistory() { return null; } };
 }
+
+test('launch read reconciles lost Start response to the same exact job without reexecution or release', async t => {
+  const f = await fixture(t); const reserved = await f.reservations.reserveWithNativeDialog({}); const request = await f.plan(reserved.instanceId);
+  const first = await f.service.reconcileNewServerLaunch({ planId: request.planId, planFingerprint: request.planFingerprint });
+  assert.equal(first.status, 'not-observed');
+  const started = await f.service.startOperation(request); // deliberately discard the response at the caller boundary
+  const result = await f.service.reconcileNewServerLaunch({ planId: request.planId, planFingerprint: request.planFingerprint });
+  assert.equal(result.status, 'started'); assert.equal(result.job.jobId, started.jobId);
+  assert.equal(result.settlement.status, 'active'); assert.equal(result.settlement.destinationDisposition, 'held');
+  assert.equal(f.executions, 1); assert.equal(f.reservations.isDestinationHeld(reserved.instanceId), true);
+  assert.equal(JSON.stringify(result).includes('targetPath'), false);
+  await assert.rejects(f.service.reconcileNewServerLaunch({ planId: request.planId, planFingerprint: 'b'.repeat(64) }), { code: 'INVALID_REQUEST' });
+});
+
+test('launch read pending fence covers pre-plan lookup and closes only after stable plan invalidation', async t => {
+  const f = await fixture(t); const reserved = await f.reservations.reserveWithNativeDialog({}); const request = await f.plan(reserved.instanceId);
+  const gate = deferred(); const original = f.plans.get.bind(f.plans); f.plans.get = async value => { await gate.promise; return original(value); };
+  assert.equal(typeof f.service.reconcileNewServerLaunch, 'function');
+  const start = f.service.startOperation(request); const credentials = { planId: request.planId, planFingerprint: request.planFingerprint };
+  assert.equal((await f.service.reconcileNewServerLaunch(credentials)).status, 'pending');
+  f.advance(30000); assert.equal((await f.service.reconcileNewServerLaunch(credentials)).reason, 'admission-unresolved');
+  const listed = await f.service.listNewServerLaunches(); assert.equal(listed.items[0].status, 'pending');
+  assert.equal(Object.hasOwn(listed.items[0], 'serverId'), false);
+  await f.plans.invalidate(request.planId); gate.resolve(); await assert.rejects(start); // fenced, no publication
+  assert.equal((await f.service.reconcileNewServerLaunch(credentials)).status, 'not-started');
+  assert.equal((await f.service.listNewServerLaunches()).items.length, 0);
+  assert.deepEqual(await f.service.reconcileNewServerLaunch({ planId: 'legacy-plan', planFingerprint: 'a'.repeat(64) }),
+    { planId: 'legacy-plan', planFingerprint: 'a'.repeat(64), status: 'unavailable', reason: 'legacy-correlation-unavailable' });
+});
+
+test('launch read generations cannot certify negative absence across a new admission or publication', async t => {
+  const f = await fixture(t); const reserved = await f.reservations.reserveWithNativeDialog({}); const request = await f.plan(reserved.instanceId);
+  const original = f.store.findNewServerLaunch.bind(f.store);
+  f.store.findNewServerLaunch = async (...args) => { const result = await original(...args); f.service.localAdmissionGeneration++; return result; };
+  assert.equal((await f.service.reconcileNewServerLaunch({ planId: request.planId, planFingerprint: request.planFingerprint })).status, 'pending');
+  f.store.findNewServerLaunch = async () => { throw new ModpackError('PLAN_STALE', 'publication changed'); };
+  assert.equal((await f.service.reconcileNewServerLaunch({ planId: request.planId, planFingerprint: request.planFingerprint })).status, 'pending');
+});
+
+for (const closure of ['invalidate', 'release-claim']) test(`launch credential closure authenticates issued fingerprint after ${closure}`, async t => {
+  const f = await fixture(t); const reserved = await f.reservations.reserveWithNativeDialog({}); const request = await f.plan(reserved.instanceId);
+  const credentials = { planId: request.planId, planFingerprint: request.planFingerprint };
+  if (closure === 'invalidate') await f.plans.invalidate(request.planId);
+  else {
+    const claimed = await f.plans.claim({ planId: request.planId, fingerprint: request.planFingerprint });
+    assert.equal((await f.service.reconcileNewServerLaunch(credentials)).status, 'pending');
+    await f.plans.releaseClaim(claimed.jobId);
+  }
+  assert.equal(f.plans.plans.has(request.planId), false); assert.equal(f.plans.claimedPlans.size, 0);
+  const before = { generation: f.plans.fenceGeneration, allocations: f.plans.allocatedIds.size };
+  f.plans.get = () => assert.fail('closure must not resolve/clean executable plans');
+  f.workspace.releaseOwner = () => assert.fail('closure must not release ownership');
+  assert.equal((await f.service.reconcileNewServerLaunch(credentials)).status, 'not-started');
+  await assert.rejects(f.service.reconcileNewServerLaunch({ ...credentials, planFingerprint: 'b'.repeat(64) }), { code: 'INVALID_REQUEST' });
+  assert.equal(f.plans.fenceGeneration, before.generation); assert.equal(f.plans.allocatedIds.size, before.allocations);
+});
+
+for (const scope of ['unknown', 'fresh-registry']) test(`launch credential closure refuses ${scope} reference without durable authority`, async t => {
+  const f = await fixture(t); const reserved = await f.reservations.reserveWithNativeDialog({}); const request = await f.plan(reserved.instanceId);
+  const credentials = { planId: request.planId, planFingerprint: request.planFingerprint };
+  await f.plans.invalidate(request.planId);
+  if (scope === 'unknown') {
+    await assert.rejects(f.service.reconcileNewServerLaunch({ ...credentials,
+      planId: 'plan-launch-v1-00000000-0000-4000-8000-999999999999' }), { code: 'INVALID_REQUEST' });
+    return;
+  }
+  const restartedPlans = new PlanRegistry({ workspaceRegistry: f.workspace, allowNewServerLaunchBindings: true });
+  const restartedService = new ModpackLifecycleService({ ...f.serviceDependencies, planRegistry: restartedPlans });
+  t.after(() => restartedService.dispose());
+  for (const planFingerprint of [credentials.planFingerprint, 'b'.repeat(64)]) {
+    await assert.rejects(restartedService.reconcileNewServerLaunch({ ...credentials, planFingerprint }), { code: 'INVALID_REQUEST' });
+  }
+  assert.equal(f.executions, 0); assert.equal(f.plans.plans.size, 0); assert.equal(restartedPlans.plans.size, 0);
+});
+
+test('launch read owner loss after awaited catalogue lookup remains pending', async t => {
+  const f = await fixture(t); const { launch } = await seedLaunch(f);
+  const original = f.store.findNewServerLaunch.bind(f.store);
+  f.store.findNewServerLaunch = async (...args) => { const result = await original(...args); f.loseOwner(); return result; };
+  assert.equal((await f.service.reconcileNewServerLaunch({ planId: launch.binding.planId, planFingerprint: launch.binding.planFingerprint })).status, 'pending');
+});
+
+test('launch read cannot certify irreversible closure from unfenced expiry or retained claim and never runs cleanup', async t => {
+  const f = await fixture(t); const reserved = await f.reservations.reserveWithNativeDialog({}); const request = await f.plan(reserved.instanceId);
+  const credentials = { planId: request.planId, planFingerprint: request.planFingerprint };
+  const record = f.plans.plans.get(request.planId);
+  record.expiresAtMs = 0;
+  f.workspace.releaseOwner = () => assert.fail('read cannot clean a plan');
+  assert.equal((await f.service.reconcileNewServerLaunch(credentials)).status, 'pending');
+  record.expiresAtMs = Number.MAX_SAFE_INTEGER;
+  const claimed = await f.plans.claim({ planId: request.planId, fingerprint: request.planFingerprint });
+  assert.equal((await f.service.reconcileNewServerLaunch(credentials)).status, 'pending');
+  f.plans.claimedPlans.delete(claimed.jobId); f.plans.claimedJobIds.delete(claimed.jobId);
+  assert.equal((await f.service.reconcileNewServerLaunch(credentials)).status, 'not-started');
+});
+
+test('launch read gets terminal hydration outside the gate and refuses changed immutable association', async t => {
+  const f = await fixture(t); const { launch } = await seedLaunch(f);
+  const original = f.service.getJob.bind(f.service); let hydrated = false;
+  f.service.getJob = async id => f.reservations.withDestinationGate(launch.binding.targetPath, async () => { hydrated = true; return original(id); });
+  const result = await f.service.reconcileNewServerLaunch({ planId: launch.binding.planId, planFingerprint: launch.binding.planFingerprint });
+  assert.equal(hydrated, true); assert.equal(result.status, 'started');
+  f.service.getJob = async () => ({ ...launch.job, jobId: 'wrong-job' });
+  assert.notEqual((await f.service.reconcileNewServerLaunch({ planId: launch.binding.planId, planFingerprint: launch.binding.planFingerprint })).status, 'started');
+});
+
+test('launch read held terminal stays started and exposes actual held repair disposition without publication', async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f); const registry = await recordedAbandonment(f, launch);
+  await f.store.transition(job.jobId, { expectedPhase: 'queued', nextPhase: 'failed', patch: { outcome: { status: 'failed', message: 'Failed' } } });
+  registry.retryTerminalPublication = () => assert.fail('read cannot publish recovery');
+  f.store.settleNewServerDestination = () => assert.fail('read cannot settle');
+  const result = await f.service.reconcileNewServerLaunch({ planId: launch.binding.planId, planFingerprint: launch.binding.planFingerprint });
+  assert.equal(result.status, 'started'); assert.equal(result.job.phase, 'failed');
+  assert.deepEqual(result.settlement, { status: 'repair-pending', destinationDisposition: 'held', reason: 'settlement-repair-required', recoveryAvailable: false });
+  assert.equal(f.reservations.isDestinationHeld(job.serverId), true);
+});
+
+async function catalogueFixture(t, count) {
+  const f = await fixture(t); const { launch } = await seedLaunch(f);
+  const entries = Array.from({ length: count }, (_, n) => ({ ...launch,
+    job: { ...launch.job, jobId: `list-job-${n}`, serverId: `list-server-${n}` },
+    binding: { ...launch.binding, planId: `plan-launch-v1-00000000-0000-4000-8000-${String(n + 100).padStart(12, '0')}`, instanceId: `list-server-${n}` } }));
+  f.store.listNewServerLaunchBindings = async () => entries;
+  f.store.findNewServerLaunch = async ({ planId }) => entries.find(entry => entry.binding.planId === planId) || null;
+  f.store.getNewServerLaunch = async id => entries.find(entry => entry.job.jobId === id) || null;
+  f.service.getJob = async id => entries.find(entry => entry.job.jobId === id)?.job;
+  f.service.launchRecoveryRegistry = cleanRecoveryRegistry(); f.service.launchRegistrationState = () => 'absent';
+  return { f, entries };
+}
+
+for (const disposition of ['released', 'consumed']) for (const mode of ['corrupt', 'conflict', 'executable-recovery']) {
+  test(`launch read preserves known job and actual ${disposition} disposition for ${mode} evidence`, async t => {
+    const { f, entries } = await catalogueFixture(t, 1); const launch = entries[0];
+    launch.binding = { ...launch.binding, destinationDisposition: disposition };
+    launch.job = { ...launch.job, phase: 'failed', terminalAt: launch.job.createdAt, outcome: { status: 'failed', message: 'Failed' } };
+    if (mode === 'corrupt') f.service.launchRecoveryRegistry.initialize = async () => ({
+      records: [], corrupt: [{ jobId: launch.job.jobId }], blocks: [], globalBlock: false, pendingTerminalPublications: [] });
+    if (mode === 'conflict') f.service.launchRegistrationState = () => 'conflict';
+    if (mode === 'executable-recovery') {
+      const record = closureRecord({ jobId: launch.job.jobId, target: { kind: 'new', stableServerId: launch.job.serverId, path: launch.binding.targetPath } });
+      f.service.launchRecoveryRegistry.load = async () => record;
+      f.service.launchRecoveryRegistry.retryTerminalPublication = () => assert.fail('read cannot execute recovery');
+      f.service.launchTerminalPublicationAvailable = true;
+    }
+    f.store.settleNewServerDestination = () => assert.fail('read cannot settle');
+    const result = await f.service.reconcileNewServerLaunch({ planId: launch.binding.planId, planFingerprint: launch.binding.planFingerprint });
+    const settlement = { status: 'support-required', destinationDisposition: disposition,
+      reason: mode === 'corrupt' ? 'invalid-durable-evidence' : 'conflicting-evidence', recoveryAvailable: false };
+    assert.equal(result.status, 'started'); assert.equal(result.job.jobId, launch.job.jobId);
+    assert.deepEqual(result.settlement, settlement);
+    assert.deepEqual((await f.service.listNewServerLaunches()).items[0].settlement, settlement);
+  });
+}
+
+for (const authority of ['recovery', 'registration']) test(`launch read preserves exact readable job when ${authority} evidence fails`, async t => {
+  const { f, entries } = await catalogueFixture(t, 1); const launch = entries[0];
+  if (authority === 'recovery') f.service.launchRecoveryRegistry.initialize = async () => { throw new Error('private recovery failure'); };
+  else f.service.launchRegistrationState = async () => { throw new Error('private registration failure'); };
+  const result = await f.service.reconcileNewServerLaunch({ planId: launch.binding.planId, planFingerprint: launch.binding.planFingerprint });
+  assert.equal(result.status, 'started'); assert.equal(result.job.jobId, launch.job.jobId);
+  assert.deepEqual(result.settlement, { status: 'support-required', destinationDisposition: 'held',
+    reason: authority === 'recovery' ? 'invalid-durable-evidence' : 'conflicting-evidence', recoveryAvailable: false });
+  assert.equal(JSON.stringify(result).includes('private'), false);
+});
+
+test('launch discovery snapshot is bounded immutable sorted deduplicated and freshly reconciled', async t => {
+  const { f, entries } = await catalogueFixture(t, 55); const index = f.store.records;
+  f.service.pendingNewServerAdmissions.set(entries[0].binding.planId, { ...entries[0].binding, createdAt: Date.parse(entries[0].job.createdAt), jobId: null, instanceId: null });
+  const first = await f.service.listNewServerLaunches(); assert.equal(first.items.length, 50);
+  assert.match(first.nextCursor, /^launch-cursor-v1-[a-f0-9-]{36}$/);
+  assert.equal(first.items[0].planId, entries[0].binding.planId); assert.equal(first.items[0].status, 'started');
+  entries.push({ ...entries[0], binding: { ...entries[0].binding, planId: 'plan-launch-v1-00000000-0000-4000-8000-999999999999' } });
+  const second = await f.service.listNewServerLaunches({ cursor: first.nextCursor, limit: 100 });
+  assert.equal(second.items.length, 5); assert.equal(second.nextCursor, null); assert.equal(f.store.records, index);
+  assert.equal(Object.hasOwn(second.items[0], 'job'), false); assert.equal(Object.hasOwn(second.items[0], 'settlement'), true);
+  const one = await f.service.listNewServerLaunches({ limit: 1 }); assert.equal(one.items.length, 1);
+  const all = await f.service.listNewServerLaunches({ limit: 100 }); assert.equal(all.items.length, 56);
+});
+
+test('launch discovery cursor expiry capacity restart and catalogue limit are explicit safe errors', async t => {
+  const { f, entries } = await catalogueFixture(t, 2); const pages = [];
+  for (let n = 0; n < 4; n++) pages.push(await f.service.listNewServerLaunches({ limit: 1 }));
+  await assert.rejects(f.service.listNewServerLaunches(), { code: 'LAUNCH_DISCOVERY_CAPACITY', retryable: true });
+  await assert.rejects(f.service.listNewServerLaunches({ cursor: 'launch-cursor-v1-00000000-0000-4000-8000-999999999999' }), { code: 'LAUNCH_CURSOR_EXPIRED', retryable: true });
+  f.advance(120000); await assert.rejects(f.service.listNewServerLaunches({ cursor: pages[0].nextCursor }), { code: 'LAUNCH_CURSOR_EXPIRED' });
+  assert.equal((await f.service.listNewServerLaunches()).items.length, 2);
+  assert.equal(f.service.launchSnapshots.size, 4, 'only the oldest expired snapshot is evicted to make a slot');
+  entries.splice(0, entries.length, ...Array.from({ length: 2001 }, (_, n) => ({ ...entries[0], binding: { ...entries[0].binding, planId: `plan-${n}` } })));
+  await assert.rejects(f.service.listNewServerLaunches(), { code: 'LAUNCH_LIST_LIMIT_EXCEEDED', retryable: false });
+  f.service.closeAdmission(); assert.equal(f.service.launchSnapshots.size, 0);
+  for (const request of [{ limit: 0 }, { limit: 101 }, { cursor: 'offset-1' }, { path: 'C:\\private' }]) {
+    await assert.rejects(f.service.listNewServerLaunches(request), { code: 'INVALID_REQUEST' });
+  }
+});
+
+test('launch discovery concurrent capture respects four snapshots', async t => {
+  const { f } = await catalogueFixture(t, 3);
+  for (let n = 0; n < 3; n++) await f.service.listNewServerLaunches({ limit: 1 });
+  const settled = await Promise.allSettled([f.service.listNewServerLaunches({ limit: 1 }), f.service.listNewServerLaunches({ limit: 1 })]);
+  assert.equal(settled.filter(item => item.status === 'fulfilled').length, 1);
+  assert.equal(settled.find(item => item.status === 'rejected').reason.code, 'LAUNCH_DISCOVERY_CAPACITY');
+  assert.equal(f.service.launchSnapshots.size, 4);
+});
+
+test('launch discovery repeated pages bound cursor memory', async t => {
+  const { f } = await catalogueFixture(t, 3);
+  const first = await f.service.listNewServerLaunches({ limit: 1 });
+  const second = await f.service.listNewServerLaunches({ cursor: first.nextCursor, limit: 1 });
+  const count = f.service.launchCursors.size;
+  for (let n = 0; n < 5; n++) {
+    const again = await f.service.listNewServerLaunches({ cursor: first.nextCursor, limit: 1 });
+    assert.equal(again.nextCursor, second.nextCursor);
+  }
+  assert.equal(f.service.launchCursors.size, count);
+});
+
+test('launch discovery unstable scan is a retryable error and never installs a partial snapshot', async t => {
+  const { f } = await catalogueFixture(t, 1);
+  f.store.listNewServerLaunchBindings = async () => { throw new ModpackError('PLAN_STALE', 'publication changed'); };
+  await assert.rejects(f.service.listNewServerLaunches(), { code: 'PLAN_STALE', retryable: true });
+  assert.equal(f.service.launchSnapshots.size, 0);
+});
 
 async function recordedAbandonment(f, launch) {
   const { fixtureRegistry } = require('./runtime-authority-fixture.cjs');

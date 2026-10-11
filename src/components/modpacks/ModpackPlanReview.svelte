@@ -1,10 +1,12 @@
 <script>
-  import { createEventDispatcher } from 'svelte';
-  import { isPlanStaleError, modpackApi } from '../../utils/modpacks/modpackApi.js';
+  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { isPlanStaleError } from '../../utils/modpacks/modpackApi.js';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
 
   const dispatch = createEventDispatcher();
   export let reviewedPlan;
+  export let reviewContext = null;
+  export let startReviewedOperation = null;
   export let operationKind = '';
   export let targetLabel = '';
   export let busy = false;
@@ -15,6 +17,10 @@
   let startAfterInstall = false;
   let planStale = false;
   let activePlanId = null;
+  let childAlive = true;
+  let startOwner = null;
+  let launchUnknown = false;
+  onDestroy(() => { childAlive = false; startOwner = null; });
 
   $: if ((reviewedPlan?.planId || null) !== activePlanId) resetPlanState(reviewedPlan);
   $: plan = reviewedPlan?.planView || {};
@@ -27,7 +33,7 @@
     'files-only', 'import-files-only-new'
   ].includes(operationKind);
   $: hasReviewedPlan = Boolean(reviewedPlan?.planId && reviewedPlan?.planFingerprint);
-  $: canRun = hasReviewedPlan && !planStale && blockers.length === 0 && (!sourceMutation || acceptEula);
+  $: canRun = hasReviewedPlan && !planStale && !launchUnknown && blockers.length === 0 && (!sourceMutation || acceptEula);
   $: isDetach = operationKind === 'detach';
   $: isUninstall = ['uninstall', 'uninstall-managed'].includes(operationKind);
   $: isRollback = operationKind === 'rollback-restore-point';
@@ -40,25 +46,34 @@
     planStale = false;
     acceptEula = false;
     startAfterInstall = false;
+    startOwner = null;
+    launchUnknown = false;
   }
 
   async function run() {
-    if (!canRun) return;
+    if (!canRun || startOwner || launchUnknown || typeof startReviewedOperation !== 'function') return;
+    const owner = { context: reviewContext, plan: reviewedPlan };
+    startOwner = owner;
     busy = true;
     error = null;
     showConfirmation = false;
     try {
-      const job = await modpackApi.startOperation({
+      const result = await startReviewedOperation({
+        reviewContext: owner.context,
         planId: reviewedPlan.planId,
         planFingerprint: reviewedPlan.planFingerprint,
         choices: { acceptEula, startAfterInstall, restorePointId }
       });
-      dispatch('started', { job });
+      if (!childAlive || startOwner !== owner || reviewContext !== owner.context || reviewedPlan !== owner.plan) return;
+      launchUnknown = result?.status === 'unknown';
+      if (result?.status === 'not-invoked' && result.error) {
+        if (isPlanStaleError(result.error)) planStale = true;
+        else error = result.error;
+      }
     } catch (caught) {
-      if (isPlanStaleError(caught)) planStale = true;
-      else error = caught;
+      if (childAlive && startOwner === owner && reviewContext === owner.context) launchUnknown = true;
     } finally {
-      busy = false;
+      if (childAlive && startOwner === owner && reviewContext === owner.context) { busy = false; startOwner = null; }
     }
   }
 </script>
@@ -76,6 +91,7 @@
 
   {#if planStale}<div class="mp-state warning" tabindex="-1" aria-live="assertive"><strong>Reviewed plan needs a fresh preflight</strong><p>The server revision or one-use plan changed before the operation started. Nothing from this stale plan will run.</p><button class="mp-button" type="button" disabled={busy} on:click={() => dispatch('stale')}>Run a fresh preflight review</button></div>
   {:else if error}<div class="mp-state error" tabindex="-1" aria-live="assertive"><strong>Could not start the reviewed plan</strong><p>{error.message}</p></div>{/if}
+  {#if launchUnknown}<div class="mp-state warning" role="status">Start outcome is unknown; it may already have started. Check owned operations before making another change.</div>{/if}
 
   {#if destructive}
     <div class="mp-split" aria-label="Detach and uninstall behavior comparison">

@@ -5,6 +5,20 @@ const test = require('node:test');
 
 const ROOT = path.resolve(__dirname, '../..');
 
+test('launch ownership is installed before the synchronous Start bridge entry', () => {
+  const setup = source('src/components/setup/ServerSetupWizard.svelte');
+  const entry = setup.slice(setup.indexOf('function startReviewedOperation('), setup.indexOf('function completeSetup('));
+  assert.ok(entry.indexOf("record.state = 'launch-pending'") >= 0);
+  assert.ok(entry.indexOf("record.state = 'launch-pending'") < entry.indexOf('modpackApi.startOperation('));
+  assert.ok(entry.indexOf('attempt.promise =') < entry.indexOf('modpackApi.startOperation('));
+  for (const name of ['ArchiveGuidedReview', 'ModpackPlanReview']) {
+    const child = source(`src/components/${name === 'ArchiveGuidedReview' ? 'setup' : 'modpacks'}/${name}.svelte`);
+    assert.doesNotMatch(child, /modpackApi\.startOperation/u);
+    assert.match(child, /startReviewedOperation\(/u);
+    assert.match(child, /reviewContext/u);
+  }
+});
+
 function source(relativePath) {
   return fs.readFileSync(path.join(ROOT, relativePath), 'utf8');
 }
@@ -56,7 +70,7 @@ test('new-server retained-download actions consume safe result destinations and 
   assert.match(setup, /pendingInstanceId\s*=\s*instanceId/u);
   assert.match(setup, /reservedDestinationName\s*=\s*''/u);
   assert.match(setup, /<ModpackJobProgress[^>]*on:action=\{handleOutcomeAction\}/u);
-  assert.match(source('src/components/modpacks/ModpackJobProgress.svelte'), /dispatch\('action',\s*\{\s*actionId,\s*value,\s*job\s*\}\)/u);
+  assert.match(source('src/components/modpacks/ModpackJobProgress.svelte'), /dispatch\('action',\s*\{\s*actionId,\s*value,\s*job,\s*selectionContext:\s*context\s*\}\)/u);
 });
 
 test('Modrinth browser preserves filters paging history and recovery actions', () => {

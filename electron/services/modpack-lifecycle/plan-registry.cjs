@@ -148,7 +148,7 @@ class PlanRegistry {
     this.randomUUID = randomUUID;
     this.ttlMs = ttlMs;
     this.plans = new Map();
-    this.allocatedIds = new Set();
+    this.allocatedIds = new Map();
     this.claimedJobIds = new Set();
     this.claimedPlans = new Map();
     this.allowNewServerLaunchBindings = allowNewServerLaunchBindings;
@@ -187,7 +187,14 @@ class PlanRegistry {
     this.workspaceRegistry.transferOwnership({ fromOwnerId: planningSessionId, toOwnerId: planId,
       ...(descriptors.preparationAttempt ? { preparationAttempt: descriptors.preparationAttempt.value } : {}) });
     this.plans.set(planId, record);
-    return publicCreated(record);
+    const created = publicCreated(record);
+    // Reuse never-recycled ID bookkeeping; retain no executable plan or owner.
+    if (planId.startsWith('plan-launch-v1-')) this.allocatedIds.set(planId, reviewedFingerprint);
+    return created;
+  }
+
+  readIssuedNewServerPlanFingerprint(planId) {
+    return this.allocatedIds.get(assertIdentifier(planId)) ?? null;
   }
 
   async get(request) {
@@ -352,7 +359,7 @@ class PlanRegistry {
       // Plan IDs remain unchanged because they never become server-path leaves.
       const id = prefix === 'job' ? compactOperationIdFromRandomSource(value) : `${prefix}-${value}`;
       if (!this.allocatedIds.has(id) && !this.plans.has(id)) {
-        this.allocatedIds.add(id);
+        this.allocatedIds.set(id, null);
         return id;
       }
     }

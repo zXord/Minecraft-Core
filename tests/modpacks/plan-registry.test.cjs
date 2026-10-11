@@ -149,6 +149,74 @@ function planningWorkspace(workspaceRegistry) {
   return { outputDirectoryId, planningSessionId };
 }
 
+function launchPlan() {
+  const plan = internalPlan();
+  plan.operation = { ...plan.operation, serverKind: 'new' };
+  plan.fingerprint = computePreflightPlanFingerprint(plan);
+  return plan;
+}
+
+test('launch credential read retains only issued fingerprint across invalidation and claim cleanup without replay authority', async t => {
+  const { dependencies, workspaceRegistry, advance } = fixture(t);
+  let sequence = 0;
+  const registry = new PlanRegistry({ ...dependencies, allowNewServerLaunchBindings: true,
+    randomUUID: () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, '0')}` });
+  const create = () => {
+    const plan = launchPlan();
+    return registry.create({ plan, sanitizedView: publicView(), fingerprint: plan.fingerprint,
+      planningSessionId: planningWorkspace(workspaceRegistry).planningSessionId });
+  };
+  const invalidated = create();
+  assert.equal(registry.readIssuedNewServerPlanFingerprint(invalidated.planId), invalidated.fingerprint);
+  await registry.invalidate(invalidated.planId);
+  const claimedPlan = create();
+  const claim = await registry.claim({ planId: claimedPlan.planId, fingerprint: claimedPlan.fingerprint });
+  await registry.releaseClaim(claim.jobId);
+  advance(PLAN_TTL_MS + 1);
+  const fence = registry.fenceGeneration;
+  const release = workspaceRegistry.releaseOwner;
+  workspaceRegistry.releaseOwner = () => assert.fail('credential read must not release workspace ownership');
+  try {
+    for (const issued of [invalidated, claimedPlan]) {
+      assert.equal(registry.readIssuedNewServerPlanFingerprint(issued.planId), issued.fingerprint);
+      await assert.rejects(registry.claim({ planId: issued.planId, fingerprint: issued.fingerprint }), { code: 'PLAN_STALE' });
+    }
+    assert.equal(registry.readIssuedNewServerPlanFingerprint(claim.jobId), null);
+    assert.equal(registry.readIssuedNewServerPlanFingerprint('plan-launch-v1-00000000-0000-4000-8000-999999999999'), null);
+    assert.equal(new PlanRegistry({ ...dependencies, allowNewServerLaunchBindings: true })
+      .readIssuedNewServerPlanFingerprint(invalidated.planId), null);
+    assert.equal(registry.fenceGeneration, fence);
+  } finally { workspaceRegistry.releaseOwner = release; }
+  registry.randomUUID = () => invalidated.planId.slice('plan-launch-v1-'.length);
+  assert.throws(create, { code: 'PLAN_STALE' }, 'issued IDs are never reused after cleanup');
+});
+
+for (const failure of ['transfer', 'clock']) test(`launch credential read never publishes a failed create credential: ${failure}`, t => {
+  const { dependencies, workspaceRegistry } = fixture(t);
+  const suffix = '00000000-0000-4000-8000-000000000001';
+  const registry = new PlanRegistry({ ...dependencies, allowNewServerLaunchBindings: true, randomUUID: () => suffix });
+  const plan = launchPlan();
+  const request = { plan, sanitizedView: publicView(), fingerprint: plan.fingerprint,
+    planningSessionId: planningWorkspace(workspaceRegistry).planningSessionId };
+  if (failure === 'transfer') registry.workspaceRegistry = { ...dependencies.workspaceRegistry,
+    transferOwnership() { throw new Error('injected create transfer failure'); } };
+  else registry.clock = () => Number.MAX_SAFE_INTEGER;
+  assert.throws(() => registry.create(request));
+  const id = `plan-launch-v1-${suffix}`;
+  assert.equal(registry.readIssuedNewServerPlanFingerprint(id), null);
+  assert.equal(registry.plans.has(id), false);
+  registry.workspaceRegistry = workspaceRegistry; registry.clock = dependencies.clock;
+  assert.throws(() => registry.create(request), { code: 'PLAN_STALE' }, 'failed allocated IDs are not recycled');
+});
+
+test('launch credential read excludes ordinary plan IDs even after successful issue', t => {
+  const { registry, workspaceRegistry } = fixture(t); const plan = internalPlan();
+  const created = registry.create({ plan, sanitizedView: publicView(), fingerprint: plan.fingerprint,
+    planningSessionId: planningWorkspace(workspaceRegistry).planningSessionId });
+  assert.equal(registry.readIssuedNewServerPlanFingerprint(created.planId), null);
+  assert.throws(() => registry.readIssuedNewServerPlanFingerprint('C:\\private'), { code: 'INVALID_REQUEST' });
+});
+
 test('launch synchronous claim fence permits only one concurrent claimant', async t => {
   const { registry, workspaceRegistry } = fixture(t);
   const plan = internalPlan();

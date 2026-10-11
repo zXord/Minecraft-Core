@@ -39,6 +39,8 @@ function createFixture() {
       createPlan: value('createPlan'),
       createManagementPlan: value('createManagementPlan'),
       startOperation: value('startOperation'),
+      async reconcileNewServerLaunch(request) { calls.push(['reconcileNewServerLaunch', request]); return { ...request, status: 'pending' }; },
+      async listNewServerLaunches(request) { calls.push(['listNewServerLaunches', request]); return { items: [], nextCursor: null }; },
       cancelJob: value('cancelJob'),
       getJob: value('getJob'),
       async getActiveJobs(serverId) { calls.push(['getActiveJobs', serverId]); return { serverId, items: [] }; },
@@ -120,6 +122,8 @@ const VALID_REQUESTS = {
     selectionRef: 'restore-one'
   },
   'modpacks:start-operation': { planId: 'plan-one', planFingerprint: FINGERPRINT, choices: {} },
+  'modpacks:reconcile-new-server-launch': { planId: 'plan-one', planFingerprint: FINGERPRINT },
+  'modpacks:list-new-server-launches': { limit: 50 },
   'modpacks:cancel-job': { jobId: 'job-one' },
   'modpacks:get-job': { jobId: 'job-one' },
   'modpacks:get-active-jobs': { serverId: 'server-one' },
@@ -143,6 +147,20 @@ test('active discovery IPC binds the result to the requested server', async () =
   f.dependencies.lifecycleService.getActiveJobs = async () => ({ serverId: 'server-two', items: [] });
   const result = await createModpackHandlers(f.dependencies)['modpacks:get-active-jobs']({}, { serverId: 'server-one' });
   assert.equal(result.ok, false);
+});
+
+test('launch reads lazily delegate and reject malformed post-service success without a mutation retry', async () => {
+  const f = createFixture(); const request = VALID_REQUESTS['modpacks:reconcile-new-server-launch'];
+  assert.deepEqual(await f.handlers['modpacks:reconcile-new-server-launch']({}, request), { ok: true, value: { ...request, status: 'pending' } });
+  f.dependencies.lifecycleService.reconcileNewServerLaunch = async input => {
+    f.calls.push(['reconcileNewServerLaunch', input]); return { ...input, status: 'started', job: {} };
+  };
+  const bad = await createModpackHandlers(f.dependencies)['modpacks:reconcile-new-server-launch']({}, request);
+  assert.equal(bad.ok, false); assert.equal(bad.error.code, 'INVALID_REQUEST');
+  assert.deepEqual(f.calls.map(call => call[0]), ['reconcileNewServerLaunch', 'reconcileNewServerLaunch']);
+  delete f.dependencies.lifecycleService.reconcileNewServerLaunch;
+  delete f.dependencies.lifecycleService.listNewServerLaunches;
+  assert.doesNotThrow(() => createModpackHandlers(f.dependencies));
 });
 
 test('every approved invoke validates a closed request and returns a validated success envelope', async () => {

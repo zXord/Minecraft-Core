@@ -1,4 +1,5 @@
 <script>
+  import { isValidPublicJob } from '../utils/modpacks/launchResultValidation.js';
   import { onDestroy, onMount, tick } from 'svelte';
   import { isPlanStaleError, ModpackApiError, modpackApi } from '../utils/modpacks/modpackApi.js';
   import { createServerRequestScope } from '../utils/modpacks/serverRequestScope.js';
@@ -95,9 +96,23 @@
   let activityRequestSequence = 0;
   let activityTimer = null;
   let outcomeActionSequence = 0;
+  let reviewContext = null;
+  let jobSelectionContext = null;
+  let reviewIdentity = null;
+  let launchNotice = '';
+  const reviewAttempts = new WeakMap();
+  const uncertainStarts = new Map();
   const serverRequestScope = createServerRequestScope();
 
   $: serverId = currentInstance?.type === 'server' ? currentInstance.id || '' : '';
+  $: updateReviewContext(reviewedPlan, serverId, operationKind, flow);
+
+  function updateReviewContext(plan, expectedServer, kind, currentFlow) {
+    if (reviewIdentity?.plan === plan && reviewIdentity?.serverId === expectedServer && reviewIdentity?.operationKind === kind && reviewIdentity?.flow === currentFlow) return;
+    reviewIdentity = { plan, serverId: expectedServer, operationKind: kind, flow: currentFlow };
+    reviewContext = plan && ['inspection', 'review'].includes(currentFlow) ? Object.freeze({ ...reviewIdentity,
+      publicJobKind: kind === 'uninstall' ? 'uninstall-managed' : kind }) : null;
+  }
   // Expansion is local reading state, not historical evidence or authority.
   $: if (historicalDifferencesIdentity !== `${serverId}:${verificationReference?.jobId || ''}`) {
     historicalDifferencesIdentity = `${serverId}:${verificationReference?.jobId || ''}`;
@@ -269,6 +284,8 @@
     rememberOwnedJob(job);
     if (job?.jobId !== value?.jobId) outcomeActionSequence += 1;
     job = value;
+    if (!value) jobSelectionContext = null;
+    else if (jobSelectionContext?.serverId !== serverId || jobSelectionContext?.jobId !== value.jobId) jobSelectionContext = Object.freeze({ serverId, jobId: value.jobId });
   }
 
   function selectOwnedJob(jobId) {
@@ -290,6 +307,18 @@
     flow = 'job';
   }
 
+  function settleExistingStart(value, expectedAttempt = null) {
+    const attempt = uncertainStarts.get(value?.serverId);
+    if (!attempt || expectedAttempt && attempt !== expectedAttempt || !isValidPublicJob(value, {
+      serverId: attempt.serverId, operationKind: attempt.publicJobKind, planFingerprint: attempt.planFingerprint,
+      ...(attempt.jobId ? { jobId: attempt.jobId } : {})
+    })) return false;
+    attempt.jobId = value.jobId;
+    uncertainStarts.delete(attempt.serverId);
+    if (reviewContext === attempt.context) launchNotice = '';
+    return true;
+  }
+
   async function discoverActiveJobs() {
     const token = serverRequestScope.begin();
     const generation = ++activityRequestSequence;
@@ -305,6 +334,9 @@
       const previouslyOwned = activeJobs.length > 0;
       const previousJobs = new Map(activeJobs.map(item => [item.job.jobId, item.job]));
       activeJobs = result.items.map(item => {
+        // Only the authoritative full snapshot settles a captured Start, never
+        // an empty list, merged progress hint, or unrelated terminal operation.
+        settleExistingStart(item.job);
         let current = mergePublicJob(previousJobs.get(item.job.jobId), item.job, { durable: true });
         if (current.jobId === job?.jobId) current = mergePublicJob(current, job, { durable: true });
         return { ...item, job: current };
@@ -927,12 +959,43 @@
     }
   }
 
-  function handleStarted(event) {
-    invalidateVerificationRead();
-    setSelectedJob(event.detail.job);
-    flow = 'job';
-    void hydrateVerificationAttempt();
-    void discoverActiveJobs();
+  function startReviewedOperation(request) {
+    const context = request?.reviewContext;
+    if (context && reviewAttempts.has(context)) return reviewAttempts.get(context);
+    if (!pageMounted || !context || context !== reviewContext || context.plan !== reviewedPlan || context.serverId !== serverId ||
+        context.operationKind !== operationKind || uncertainStarts.has(serverId) ||
+        request.planId !== reviewedPlan?.planId || request.planFingerprint !== reviewedPlan?.planFingerprint) {
+      return Promise.resolve({ status: 'not-invoked', error: new Error('The reviewed selection changed. Run a fresh preflight review.') });
+    }
+    const token = serverRequestScope.begin();
+    const choices = { ...request.choices };
+    const isCurrent = () => pageMounted && currentServerRequest(token) && reviewContext === context && reviewedPlan === context.plan;
+    let resolveAttempt;
+    const promise = new Promise(resolve => { resolveAttempt = resolve; });
+    reviewAttempts.set(context, promise);
+    const attempt = { context, serverId: context.serverId, publicJobKind: context.publicJobKind,
+      planId: request.planId, planFingerprint: request.planFingerprint, jobId: null };
+    uncertainStarts.set(context.serverId, attempt);
+    void (async () => {
+      try {
+        const value = await modpackApi.startOperation({ planId: request.planId, planFingerprint: request.planFingerprint, choices });
+        if (!isValidPublicJob(value, { serverId: context.serverId, operationKind: context.publicJobKind, planFingerprint: request.planFingerprint })) throw new Error('The launched operation could not be confirmed.');
+        settleExistingStart(value, attempt);
+        if (isCurrent()) {
+          invalidateVerificationRead();
+          setSelectedJob(value);
+          launchNotice = '';
+          flow = 'job';
+          void hydrateVerificationAttempt();
+          void discoverActiveJobs();
+        }
+        resolveAttempt({ status: 'started' });
+      } catch {
+        if (isCurrent()) launchNotice = 'Start outcome is unknown; it may already have started. Refresh owned operations before making another change. Do not retry Start to discover its outcome.';
+        resolveAttempt({ status: 'unknown' });
+      }
+    })();
+    return promise;
   }
 
   async function handleOutcomeAction(event) {
@@ -942,7 +1005,9 @@
     if (!pageMounted || !originJobId || originJobId !== job?.jobId) return;
     const requestToken = serverRequestScope.begin();
     const sequence = ++outcomeActionSequence;
-    const isCurrent = () => pageMounted && currentServerRequest(requestToken) &&
+    const originContext = event.detail.selectionContext;
+    if (originContext !== jobSelectionContext) return;
+    const isCurrent = () => pageMounted && originContext === jobSelectionContext && currentServerRequest(requestToken) &&
       sequence === outcomeActionSequence && job?.jobId === originJobId;
     const destination = value?.destination;
     if (!destination && !value?.operationRef) {
@@ -1035,6 +1100,7 @@
 </script>
 
 <div class="modpack-surface modpack-page mp-stack" bind:this={pageRoot}>
+  {#if launchNotice}<section class="mp-state warning" role="status">{launchNotice}</section>{/if}
   <header class="page-header mp-toolbar">
     <div class="grow"><p class="mp-kicker">Server lifecycle</p><h1 class="mp-title">Modpack</h1><p class="mp-subtitle">Install, verify, update, downgrade, switch, repair, roll back, detach, or uninstall with reviewed durable transactions.</p></div>
     <div class="page-actions">
@@ -1129,13 +1195,13 @@
   {:else if flow === 'github-assets'}
     <GitHubAssetReview release={githubRelease} assetResult={githubAssets} {busy} {inspectionProgress} on:select={inspectGithubSelection} on:back={() => navigateSelectionFlow('github')} on:local={selectLocalArchive} on:custom={returnToDashboard} />
   {:else if flow === 'inspection'}
-    <ArchiveGuidedReview {inspection} {reviewedPlan} {busy} {error} {operationKind} {preflightProgress} {selectingDestination} on:preflight={buildPreflight} on:filesonly={(event) => buildPreflight(event, 'import-files-only-new')} on:started={handleStarted} on:stale={refreshStaleReview} on:error={(event) => (error = event.detail.error)} on:back={() => abandonInspection('source')} />
+    <ArchiveGuidedReview {inspection} {reviewedPlan} {reviewContext} {startReviewedOperation} {busy} {error} {operationKind} {preflightProgress} {selectingDestination} on:preflight={buildPreflight} on:filesonly={(event) => buildPreflight(event, 'import-files-only-new')} on:stale={refreshStaleReview} on:error={(event) => (error = event.detail.error)} on:back={() => abandonInspection('source')} />
   {:else if flow === 'restore-points'}
     <section class="mp-panel mp-stack" aria-label="Choose a restore point"><div><p class="mp-kicker">Exact rollback source</p><h2 class="mp-title">Choose a compatible restore point</h2><p class="mp-subtitle">Rollback reconstructs a fresh candidate from one retained restore point. The archive is fully verified again before a plan can be reviewed. Version downgrade is a separate risk-acknowledged action that first saves the current server for recovery.</p></div>{#if rollbackOptionsLoading}<div class="mp-state" aria-live="polite">Checking retained restore-point archives…</div>{:else if rollbackOptionsError}<div class="mp-state error" role="alert"><strong>Restore points could not be checked</strong><p>{rollbackOptionsError.message}</p><button class="mp-button" type="button" on:click={loadRollbackOptions}>Retry</button></div>{:else if rollbackOptions.length === 0}<div class="mp-state warning"><strong>No retained restore point is available</strong><p>History can outlive a pruned or missing archive. Create or retain a verified restore point before attempting rollback.</p></div>{:else}<ul class="mp-list">{#each rollbackOptions as item (item.restorePointId)}<li><button class="mp-row" class:selected={selectedRestorePointId === item.restorePointId} aria-pressed={selectedRestorePointId === item.restorePointId} type="button" disabled={busy} on:click={() => buildManagementPlan('rollback-restore-point', item.restorePointId)}><span><strong>{item.operationKind?.replaceAll('-', ' ')} restore point</strong><br /><span class="mp-muted">Created {new Date(item.createdAt).toLocaleString()} · source revision {item.sourceRevision} · {item.runtime?.minecraftVersion} {item.runtime?.loaderFamily}</span></span><span class="mp-badge good">{selectedRestorePointId === item.restorePointId && busy ? 'Verifying selection…' : 'Available · verify on selection'}</span></button></li>{/each}</ul>{/if}</section>
   {:else if flow === 'review'}
-    <ModpackPlanReview {reviewedPlan} {operationKind} {busy} targetLabel={currentInstance?.name || serverId} restorePointId={selectedRestorePointId} on:started={handleStarted} on:stale={refreshStaleReview} on:cancel={() => { reviewedPlan = null; flow = 'source'; }} />
+    <ModpackPlanReview {reviewedPlan} {reviewContext} {startReviewedOperation} {operationKind} {busy} targetLabel={currentInstance?.name || serverId} restorePointId={selectedRestorePointId} on:stale={refreshStaleReview} on:cancel={() => { reviewedPlan = null; flow = 'source'; }} />
   {:else if flow === 'job'}
-    {#key job?.jobId}<ModpackJobProgress bind:job on:return={returnToDashboard} on:terminal={(event) => publishVerificationAttempt(event.detail.job)} on:action={handleOutcomeAction} />{/key}
+    {#key jobSelectionContext}<ModpackJobProgress bind:job selectionContext={jobSelectionContext} on:return={returnToDashboard} on:terminal={(event) => { if (event.detail.selectionContext === jobSelectionContext && event.detail.job?.jobId === job?.jobId && event.detail.job?.serverId === serverId) publishVerificationAttempt(event.detail.job); }} on:action={handleOutcomeAction} />{/key}
   {/if}
   {#if busy && inspectionProgress && !['modrinth', 'github-assets', 'inspection', 'review', 'job'].includes(flow)}
     <ModpackInspectionProgress progress={inspectionProgress} />

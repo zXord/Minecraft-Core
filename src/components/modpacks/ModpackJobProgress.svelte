@@ -6,6 +6,7 @@
 
   const dispatch = createEventDispatcher();
   export let job = null;
+  export let selectionContext = null;
 
   const stageLabels = Object.freeze({
     queued: 'Resolving',
@@ -281,10 +282,11 @@
 
   async function focusResult() {
     const epoch = jobEpoch;
+    const context = selectionContext;
     await tick();
-    if (!mounted || epoch !== jobEpoch) return;
+    if (!mounted || epoch !== jobEpoch || context !== selectionContext) return;
     resultHeading?.focus?.();
-    dispatch('terminal', { job });
+    dispatch('terminal', { job, selectionContext: context });
   }
 
   async function refresh() {
@@ -368,6 +370,8 @@
 
   async function performAction(actionId) {
     const epoch = jobEpoch;
+    const context = selectionContext;
+    const revision = job?.sequence;
     const jobId = job?.jobId;
     const opaqueRef = actionReference(actionId);
     if (!opaqueRef) {
@@ -378,11 +382,11 @@
     error = null;
     try {
       const value = await modpackApi.performSafeAction(actionId, opaqueRef);
-      if (!mounted || epoch !== jobEpoch || job?.jobId !== jobId) return;
+      if (!mounted || epoch !== jobEpoch || context !== selectionContext || job?.jobId !== jobId || job?.sequence !== revision) return;
       if (actionId === 'remove-retained-download' && value?.status === 'removed') {
         retainedDownloadRemoved = true;
       }
-      dispatch('action', { actionId, value, job });
+      dispatch('action', { actionId, value, job, selectionContext: context });
     } catch (caught) {
       if (mounted && epoch === jobEpoch && job?.jobId === jobId) error = caught;
     } finally {

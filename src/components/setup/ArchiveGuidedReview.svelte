@@ -1,10 +1,12 @@
 <script>
-  import { createEventDispatcher } from 'svelte';
-  import { isPlanStaleError, modpackApi } from '../../utils/modpacks/modpackApi.js';
+  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { isPlanStaleError } from '../../utils/modpacks/modpackApi.js';
 
   const dispatch = createEventDispatcher();
   export let inspection;
   export let reviewedPlan = null;
+  export let reviewContext = null;
+  export let startReviewedOperation = null;
   export let busy = false;
   export let error = null;
   export let operationKind = 'install-existing';
@@ -58,6 +60,10 @@
   let starting = false;
   let planStale = false;
   let activeReviewedPlanId = null;
+  let childAlive = true;
+  let startOwner = null;
+  let launchUnknown = false;
+  onDestroy(() => { childAlive = false; startOwner = null; });
 
   $: rootCandidates = inspection?.rootCandidates || [];
   $: detectedRuntime = cleanRuntimeChoice(inspection?.classification?.runtime);
@@ -194,6 +200,9 @@
     planStale = false;
     acceptEula = false;
     startAfterInstall = true;
+    startOwner = null;
+    starting = false;
+    launchUnknown = false;
   }
 
   function conflictDecision(conflictId, selections = conflictChoices) {
@@ -282,21 +291,24 @@
   }
 
   async function startReviewedPlan() {
-    if (!canStart) return;
+    if (!canStart || starting || launchUnknown || typeof startReviewedOperation !== 'function') return;
+    const owner = { context: reviewContext, plan: reviewedPlan };
+    startOwner = owner;
     starting = true;
     try {
       const { planId, planFingerprint } = reviewedPlan;
       const choices = { acceptEula, startAfterInstall, restorePointId: null };
-      const job = await modpackApi.startOperation({ planId, planFingerprint, choices });
-      dispatch('started', { job });
-    } catch (caught) {
-      if (isPlanStaleError(caught)) {
-        planStale = true;
-        return;
+      const result = await startReviewedOperation({ reviewContext: owner.context, planId, planFingerprint, choices });
+      if (!childAlive || startOwner !== owner || reviewContext !== owner.context || reviewedPlan !== owner.plan) return;
+      launchUnknown = result?.status === 'unknown';
+      if (result?.status === 'not-invoked' && result.error) {
+        if (isPlanStaleError(result.error)) planStale = true;
+        else dispatch('error', { error: result.error });
       }
-      dispatch('error', { error: caught });
+    } catch (caught) {
+      if (childAlive && startOwner === owner && reviewContext === owner.context) launchUnknown = true;
     } finally {
-      starting = false;
+      if (childAlive && startOwner === owner && reviewContext === owner.context) starting = false;
     }
   }
 
@@ -419,7 +431,7 @@
       {#if blockers.length}<div class="mp-state error"><strong>Plan has unresolved blockers</strong><ul>{#each blockers as blocker, index (index)}<li>{blocker.message || blocker.code || blocker}</li>{/each}</ul></div>{/if}
       <label class="acknowledgement"><input type="checkbox" bind:checked={acceptEula} /><span><strong>I accept the Minecraft EULA</strong><br /><small>Pack-supplied EULA files are ignored; this explicit choice controls application-owned acceptance.</small></span></label>
       <label class="acknowledgement"><input type="checkbox" bind:checked={startAfterInstall} /><span>Start after install and validate final health</span></label>
-      <div class="mp-actions"><button type="button" class="mp-button primary" disabled={!canStart || busy || starting} on:click={startReviewedPlan}>{starting ? 'Starting…' : 'Install this exact reviewed plan'}</button></div>
+      <div class="mp-actions"><button data-launch-start type="button" class="mp-button primary" disabled={!canStart || busy || starting || launchUnknown} on:click={startReviewedPlan}>{starting ? 'Starting…' : launchUnknown ? 'Checking Start outcome…' : 'Install this exact reviewed plan'}</button></div>
     </section>
   {/if}
 </div>

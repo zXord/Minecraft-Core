@@ -12,6 +12,7 @@ const INVOKES = [
   'modpacks:list-github-assets', 'modpacks:select-local-archive', 'modpacks:reserve-server-destination',
   'modpacks:release-server-destination', 'modpacks:inspect', 'modpacks:cancel-inspection', 'modpacks:preflight',
   'modpacks:preflight-management', 'modpacks:start-operation', 'modpacks:cancel-job', 'modpacks:get-job', 'modpacks:get-active-jobs', 'modpacks:get-state',
+  'modpacks:reconcile-new-server-launch', 'modpacks:list-new-server-launches',
   'modpacks:list-history', 'modpacks:list-rollback-options', 'modpacks:list-recovery', 'modpacks:recover', 'modpacks:list-notifications',
   'modpacks:ack-notification', 'modpacks:check-updates', 'modpacks:update-tracking', 'modpacks:verify',
   'modpacks:perform-safe-action'
@@ -58,4 +59,18 @@ test('all lifecycle invoke and event channels are symmetrically allowlisted', as
     assert.equal(fixture.calls.some(call => call[0] === 'removeListener' && call[1] === channel), true, `${channel}:removeListener`);
     assert.equal(fixture.calls.some(call => call[0] === 'removeAllListeners' && call[1] === channel), true, `${channel}:removeAllListeners`);
   }
+});
+
+test('launch read channels preserve exact requests and deny similarly named unapproved channels', async () => {
+  const fixture = loadPreload();
+  const requests = [
+    ['modpacks:reconcile-new-server-launch', { planId: 'plan-one', planFingerprint: 'a'.repeat(64) }],
+    ['modpacks:list-new-server-launches', { cursor: 'launch-cursor-v1-12345678-1234-4234-8234-123456789abc', limit: 1 }]
+  ];
+  for (const [channel, request] of requests) assert.equal(await fixture.electron.invoke(channel, request), channel);
+  assert.deepEqual(fixture.calls, requests.map(([channel, request]) => ['invoke', channel, [request]]));
+  for (const channel of ['modpacks:reconcile-new-server-launch-private', 'modpacks:list-new-server-launches-internal']) {
+    await assert.rejects(fixture.electron.invoke(channel, {}));
+  }
+  assert.equal(fixture.calls.length, 2);
 });

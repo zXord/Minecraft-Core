@@ -11,6 +11,7 @@ const {
 const { runtimeDiagnosticFromError } = require('./server-runtime-writer-authority.cjs');
 const { validatePublicJob } = require('./operation-store.cjs');
 const { isDeepStrictEqual } = require('node:util');
+const { randomUUID } = require('node:crypto');
 const { normalizeRecoveryTargetPath } = require('./recovery-target-envelope.cjs');
 const { classifyLaunchDestination, isDestinationRecoveryClosure } = require('./new-server-launch-closure.cjs');
 const { readLaunchRecoveryEvidence } = require('./operation-recovery-reconciler.cjs');
@@ -853,6 +854,8 @@ class ModpackLifecycleService {
     this.pendingNewServerAdmissions = new Map();
     this.newServerLaunchIds = new Set();
     this.launchSettlements = new Map();
+    this.launchSnapshots = new Map();
+    this.launchCursors = new Map();
     if (destinationReservations) destinationReservations.beforeUnlaunchedRelease = instanceId => {
       this.localAdmissionGeneration++;
       return this.planRegistry.invalidateReservation(instanceId);
@@ -948,7 +951,202 @@ class ModpackLifecycleService {
     });
   }
 
-  closeAdmission() { if (!this.admissionClosing) { this.admissionClosing = true; this.localAdmissionGeneration++; } }
+  closeAdmission() {
+    this.launchSnapshots.clear(); this.launchCursors.clear();
+    if (!this.admissionClosing) { this.admissionClosing = true; this.localAdmissionGeneration++; }
+  }
+
+  #launchReadState(epoch) {
+    this.launchOwner.assertCurrent(epoch);
+    return { admission: this.admissionGeneration, publication: this.operationStore.getLaunchPublicationState(epoch) };
+  }
+
+  #launchReadStable(epoch, before) {
+    const after = this.#launchReadState(epoch);
+    return !before.publication.pending && !after.publication.pending && before.admission === after.admission &&
+      before.publication.generation === after.publication.generation;
+  }
+
+  async reconcileNewServerLaunch(input) {
+    const { validateModpackIpcRequest, validateModpackIpcResult } = require('../modpacks/ipc-schemas.cjs');
+    const channel = 'modpacks:reconcile-new-server-launch';
+    const request = validateModpackIpcRequest(channel, input);
+    const finish = value => validateModpackIpcResult(channel, { ok: true, value: { ...request, ...value } }, request).value;
+    if (!/^plan-launch-v1-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(request.planId)) {
+      return finish({ status: 'unavailable', reason: 'legacy-correlation-unavailable' });
+    }
+    const epoch = this.launchOwner?.epoch;
+    const pending = () => {
+      const entry = this.pendingNewServerAdmissions.get(request.planId);
+      if (entry && entry.planFingerprint !== request.planFingerprint) throw invalid();
+      return finish({ status: 'pending', ...(entry && this.launchClock() - entry.createdAt >= 30000 ? { reason: 'admission-unresolved' } : {}) });
+    };
+    let before;
+    try { before = this.#launchReadState(epoch); } catch { return pending(); }
+    let launch;
+    try { launch = await this.operationStore.findNewServerLaunch(request, epoch); }
+    catch (error) {
+      try { this.launchOwner.assertCurrent(epoch); } catch { return pending(); }
+      if (error?.code === 'INVALID_REQUEST') throw error;
+      if (error?.code === 'PLAN_STALE') return pending();
+      return finish({ status: 'recovery-required', reason: 'invalid-durable-evidence' });
+    }
+    try {
+      if (!this.#launchReadStable(epoch, before)) return pending();
+      const entry = this.pendingNewServerAdmissions.get(request.planId);
+      if (entry && entry.planFingerprint !== request.planFingerprint) throw invalid();
+      if (!launch) {
+        if (entry) return pending();
+        // get() can expire/invalidate/clean a plan. This read inspects only the
+        // existing registry records; it never grants claim or cleanup authority.
+        if (!(this.planRegistry.plans instanceof Map) || !(this.planRegistry.claimedPlans instanceof Map)) return pending();
+        const record = this.planRegistry.plans.get(request.planId);
+        const claimed = [...this.planRegistry.claimedPlans.values()].find(item => item.planId === request.planId);
+        if ([record, claimed].some(item => item && item.fingerprint !== request.planFingerprint)) throw invalid();
+        if (!record && !claimed && (typeof this.planRegistry.readIssuedNewServerPlanFingerprint !== 'function' ||
+            this.planRegistry.readIssuedNewServerPlanFingerprint(request.planId) !== request.planFingerprint)) throw invalid();
+        // A retained claim or elapsed clock alone is not a completed plan fence.
+        if (claimed || (record?.claimable === true && this.launchClock() >= record.expiresAtMs)) return pending();
+        const usable = record?.claimable === true;
+        if (!this.#launchReadStable(epoch, before)) return pending();
+        return finish({ status: usable ? 'not-observed' : 'not-started' });
+      }
+      launch = await this.destinationReservations.withDestinationGate(launch.binding.targetPath,
+        () => this.operationStore.getNewServerLaunch(launch.job.jobId, epoch));
+      if (!launch || !this.#launchReadStable(epoch, before)) return pending();
+      // Terminal getJob may drain settlement, which needs the path gate.
+      const job = await this.getJob(launch.job.jobId);
+      if (!job || !this.#launchReadStable(epoch, before)) return pending();
+      const current = await this.operationStore.getNewServerLaunch(job.jobId, epoch);
+      if (!current || current.binding.planId !== request.planId || current.binding.planFingerprint !== request.planFingerprint ||
+          current.job.serverId !== job.serverId || current.job.operationKind !== job.operationKind ||
+          !isDeepStrictEqual({ ...current.binding, destinationDisposition: 'held' }, { ...launch.binding, destinationDisposition: 'held' })) {
+        return finish({ status: 'recovery-required', reason: 'conflicting-evidence' });
+      }
+      let evidence = {};
+      let registrationState = 'absent';
+      if (this.launchRecoveryRegistry) {
+        try {
+          evidence = await readLaunchRecoveryEvidence({ recoveryRegistry: this.launchRecoveryRegistry, launch: current,
+            assertCurrent: () => this.launchOwner.assertCurrent(epoch), allowTerminalPublication: false,
+            terminalPublicationAvailable: this.launchTerminalPublicationAvailable });
+        } catch {
+          this.launchOwner.assertCurrent(epoch);
+          evidence = { corrupt: true };
+        }
+        if (evidence.record && !evidence.active && !evidence.pendingTerminalPublication &&
+            typeof this.launchRecoveryRegistry.loadPublishedTerminalEvidence === 'function') {
+          try {
+            const published = await this.launchRecoveryRegistry.loadPublishedTerminalEvidence(job.jobId, {
+              expectedTarget: { kind: 'new', stableServerId: job.serverId, path: current.binding.targetPath },
+              expectedOperationKind: job.operationKind === 'install-new' ? 'install' : 'import'
+            });
+            this.launchOwner.assertCurrent(epoch);
+            evidence = { ...evidence, record: published.record, terminalPublished: true };
+          } catch { this.launchOwner.assertCurrent(epoch); }
+        }
+      }
+      if (typeof this.launchRegistrationState === 'function') {
+        try { registrationState = await this.launchRegistrationState(current); }
+        catch { this.launchOwner.assertCurrent(epoch); registrationState = 'conflict'; }
+      }
+      if (!this.#launchReadStable(epoch, before)) return pending();
+      const verified = await this.operationStore.getNewServerLaunch(job.jobId, epoch);
+      if (!verified || !isDeepStrictEqual(verified.recordRevision, current.recordRevision) || !this.#launchReadStable(epoch, before)) return pending();
+      const destinationRecovery = isDestinationRecoveryClosure(current.job, evidence, registrationState);
+      const classified = classifyLaunchDestination({ ...current, registrationState,
+        recoveryEvidence: { ...(destinationRecovery ? { destinationRecovery: true } : evidence), owned: this.hasActiveJob(job.jobId) } });
+      const settlement = current.binding.destinationDisposition !== 'held' &&
+        ['repair-pending', 'recovery-required'].includes(classified.settlementStatus)
+        ? { settlementStatus: 'support-required', reason: 'conflicting-evidence', recoveryAvailable: false } : classified;
+      return finish({ status: 'started', job: current.job, settlement: {
+        status: settlement.settlementStatus, destinationDisposition: current.binding.destinationDisposition,
+        ...(settlement.reason ? { reason: settlement.reason } : {}), recoveryAvailable: settlement.recoveryAvailable
+      } });
+    } catch (error) {
+      try { this.launchOwner.assertCurrent(epoch); } catch { return pending(); }
+      if (error?.code === 'INVALID_REQUEST') throw error;
+      if (error?.code === 'PLAN_STALE') return pending();
+      return finish({ status: 'recovery-required', reason: 'invalid-durable-evidence' });
+    }
+  }
+
+  async listNewServerLaunches(input = {}) {
+    const { validateModpackIpcRequest, validateModpackIpcResult } = require('../modpacks/ipc-schemas.cjs');
+    const channel = 'modpacks:list-new-server-launches'; const request = validateModpackIpcRequest(channel, input);
+    const expired = () => new ModpackError('LAUNCH_CURSOR_EXPIRED', 'The setup list expired. Refresh it to continue.', { retryable: true });
+    const epoch = this.launchOwner?.epoch; const now = this.launchClock(); const limit = request.limit ?? 50;
+    let snapshot; let offset = 0;
+    if (request.cursor) {
+      const cursor = this.launchCursors.get(request.cursor); snapshot = cursor?.snapshot; offset = cursor?.offset;
+      if (!snapshot || snapshot.epoch !== epoch || now >= snapshot.expiresAt || !this.launchSnapshots.has(snapshot.id)) throw expired();
+      try { this.launchOwner.assertCurrent(epoch); } catch { throw expired(); }
+    } else {
+      const makeSlot = () => {
+        if (this.launchSnapshots.size < 4) return;
+        const oldestExpired = [...this.launchSnapshots.values()].filter(item => this.launchClock() >= item.expiresAt)
+          .sort((a, b) => a.expiresAt - b.expiresAt)[0];
+        if (!oldestExpired) throw new ModpackError('LAUNCH_DISCOVERY_CAPACITY', 'The setup list is busy. Try again shortly.', { retryable: true });
+        this.launchSnapshots.delete(oldestExpired.id);
+        for (const [token, cursor] of this.launchCursors) if (cursor.snapshot === oldestExpired) this.launchCursors.delete(token);
+      };
+      // Do not evict until the new immutable identity set is ready to install.
+      if (this.launchSnapshots.size >= 4 && ![...this.launchSnapshots.values()].some(item => now >= item.expiresAt)) {
+        throw new ModpackError('LAUNCH_DISCOVERY_CAPACITY', 'The setup list is busy. Try again shortly.', { retryable: true });
+      }
+      const before = this.#launchReadState(epoch);
+      const pending = [...this.pendingNewServerAdmissions.values()].map(entry => ({ planId: entry.planId,
+        planFingerprint: entry.planFingerprint, createdAt: new Date(entry.createdAt).toISOString() }));
+      let launches;
+      try { launches = await this.operationStore.listNewServerLaunchBindings(epoch); }
+      catch (error) {
+        if (error?.code !== 'PLAN_STALE') throw error;
+        throw new ModpackError('PLAN_STALE', 'The setup list changed. Refresh it to continue.', { retryable: true });
+      }
+      if (!this.#launchReadStable(epoch, before)) throw new ModpackError('PLAN_STALE', 'The setup list changed. Refresh it to continue.', { retryable: true });
+      const identities = new Map(pending.map(item => [item.planId, item]));
+      for (const launch of launches) {
+        const binding = launch.binding;
+        identities.set(binding.planId, { planId: binding.planId, planFingerprint: binding.planFingerprint,
+          createdAt: launch.job.createdAt, serverId: launch.job.serverId, operationKind: launch.job.operationKind, displayName: binding.displayName });
+      }
+      if (identities.size > 2000) throw new ModpackError('LAUNCH_LIST_LIMIT_EXCEEDED',
+        'Too many setups are available to list. Use an exact setup reference.', { retryable: false });
+      const items = [...identities.values()].sort((a, b) => b.createdAt < a.createdAt ? -1 : b.createdAt > a.createdAt ? 1 : a.planId < b.planId ? -1 : a.planId > b.planId ? 1 : 0);
+      makeSlot(); // another concurrent capture may have taken the last slot
+      snapshot = { id: randomUUID(), epoch, expiresAt: this.launchClock() + 120000, items: deepFreeze(items), cursors: new Map() };
+      this.launchSnapshots.set(snapshot.id, snapshot);
+    }
+    const items = [];
+    for (const identity of snapshot.items.slice(offset, offset + limit)) {
+      const result = await this.reconcileNewServerLaunch({ planId: identity.planId, planFingerprint: identity.planFingerprint });
+      const summary = { ...identity, status: result.status };
+      if (result.status === 'started') {
+        summary.serverId = result.job.serverId; summary.operationKind = result.job.operationKind;
+        summary.jobId = result.job.jobId; summary.settlement = result.settlement;
+        // A pending-only captured identity may become durable between pages.
+        if (!summary.displayName) {
+          const launch = await this.operationStore.getNewServerLaunch(result.job.jobId, epoch);
+          if (!launch || launch.binding.planId !== identity.planId || launch.binding.planFingerprint !== identity.planFingerprint) throw recoveryRequired();
+          summary.displayName = launch.binding.displayName;
+        }
+      }
+      items.push(summary);
+    }
+    this.launchOwner.assertCurrent(epoch);
+    if (this.launchClock() >= snapshot.expiresAt || !this.launchSnapshots.has(snapshot.id)) throw expired();
+    let nextCursor = null;
+    if (offset + limit < snapshot.items.length) {
+      const nextOffset = offset + limit;
+      nextCursor = snapshot.cursors.get(nextOffset);
+      if (!nextCursor) {
+        nextCursor = `launch-cursor-v1-${randomUUID()}`;
+        snapshot.cursors.set(nextOffset, nextCursor);
+        this.launchCursors.set(nextCursor, { snapshot, offset: nextOffset });
+      }
+    }
+    return validateModpackIpcResult(channel, { ok: true, value: { items, nextCursor } }, request).value;
+  }
 
   #trackAdmittedTask(value) {
     const task = Promise.resolve(value);

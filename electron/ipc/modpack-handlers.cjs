@@ -496,6 +496,14 @@ function createModpackHandlers({
       }
     },
     'modpacks:start-operation': request => lifecycleService.startOperation(request),
+    'modpacks:reconcile-new-server-launch': request => {
+      if (typeof lifecycleService.reconcileNewServerLaunch !== 'function') throw invalid();
+      return lifecycleService.reconcileNewServerLaunch(request);
+    },
+    'modpacks:list-new-server-launches': request => {
+      if (typeof lifecycleService.listNewServerLaunches !== 'function') throw invalid();
+      return lifecycleService.listNewServerLaunches(request);
+    },
     'modpacks:cancel-job': request => lifecycleService.cancelJob(request.jobId),
     'modpacks:get-job': request => lifecycleService.getJob(request.jobId),
     'modpacks:get-active-jobs': request => lifecycleService.getActiveJobs(request.serverId),
