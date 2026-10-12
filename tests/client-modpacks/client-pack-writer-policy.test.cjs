@@ -44,12 +44,12 @@ test('server-only path request cannot sidestep managed client guards', async t =
 for (const channel of ['minecraft-save-auth', 'minecraft-check-refresh-auth', 'minecraft-clear-auth']) test(`${channel} remains available without inspecting pack content`, async t => {
   const f = fixture(t);
   assert.equal(await f.policy.wrapHandler(channel, async () => 'saved')(null, { clientPath: f.root }), 'saved');
-  assert.equal(f.state.guards, 0);
+  assert.equal(f.state.guards, 1);
 });
 test('connection persistence stays usable but cannot reinitialize a registered client personal server list', async t => {
   const f = fixture(t);
   const result = await f.policy.wrapHandler('save-client-config', async (_event, value) => value.initializeMultiplayer)(null, { path: f.root, initializeMultiplayer: true });
-  assert.equal(result, false); assert.equal(f.state.guards, 0);
+  assert.equal(result, false); assert.equal(f.state.guards, 1);
 });
 
 for (const channel of ['disable-client-mod', 'update-client-mod', 'auto-redownload-corrupted-file']) {

@@ -2,6 +2,9 @@ const { execFile } = require('node:child_process');
 const { lookup } = require('node:dns').promises;
 const net = require('node:net');
 const path = require('node:path');
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const { createClientProcessInspector, validateProcessSnapshot, validIdentity } = require('./client-modpacks/client-process-inspector.cjs');
 const { promisify } = require('node:util');
 const { spawn } = require('child_process');
 
@@ -26,6 +29,39 @@ const LAUNCH_KEYS = new Set([
 const WAIT_KEYS = new Set(['signal', 'timeoutMs']);
 const ENDPOINT_KEYS = new Set(['allowWildcard', 'host', 'port', 'signal', 'timeoutMs']);
 const STOP_KEYS = new Set(['gracefulTimeoutMs', 'killTimeoutMs']);
+const SPAWN_MARKER = '-Dminecraft.core.server.launch=';
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
+const pathKey = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+const commandHash = value => crypto.createHash('sha256').update(value).digest('hex');
+
+// One directory only: no recursive inspection, argument-file reads, or native helper.
+function captureLaunchRoot(directory) {
+  const before = fs.lstatSync(directory, { bigint: true });
+  const canonicalPath = fs.realpathSync.native(directory);
+  const after = fs.lstatSync(directory, { bigint: true });
+  const identity = stat => `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`;
+  if (!before.isDirectory() || before.isSymbolicLink() || !after.isDirectory() || after.isSymbolicLink() ||
+      pathKey(canonicalPath) !== pathKey(directory) || before.ino === 0n || identity(before) !== identity(after)) throw invalidRequest();
+  return Object.freeze({ canonicalPath, identity: identity(before) });
+}
+
+function frozenRoot(capture, directory) {
+  const value = capture(directory);
+  if (!value || typeof value.canonicalPath !== 'string' || !path.isAbsolute(value.canonicalPath) ||
+      pathKey(value.canonicalPath) !== pathKey(directory) || typeof value.identity !== 'string' ||
+      !value.identity || value.identity.length > 1024) throw invalidRequest();
+  return Object.freeze({ canonicalPath: pathKey(value.canonicalPath), identity: value.identity });
+}
+
+function containsPath(root, target) {
+  const relative = path.relative(root, target);
+  return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
+}
+
+function singleSpawnMarker(commandLine, nonce) {
+  const markers = commandLine.split(/\s/u).map(token => token.replace(/^"|"$/gu, '')).filter(token => token.startsWith(SPAWN_MARKER));
+  return markers.length === 1 && markers[0] === `${SPAWN_MARKER}${nonce}`;
+}
 
 function invalidRequest(cause) {
   return new ModpackError('INVALID_REQUEST', 'Server process request is invalid', { cause });
@@ -262,7 +298,10 @@ function createServerProcessRunner(dependencies = {}) {
     'resolveLaunchPlan',
     'resolvePrevalidatedLaunchPlan',
     'spawnProcess',
-    'supervisionRequired'
+    'supervisionRequired',
+    'inspectProcesses',
+    'captureLaunchRoot',
+    'randomUUID'
   ]));
   const eventBus = dependencies.eventBus || defaultEventBus;
   const getListeningEndpoints = dependencies.getListeningEndpoints || defaultGetListeningEndpoints;
@@ -272,11 +311,17 @@ function createServerProcessRunner(dependencies = {}) {
   const resolvePrevalidatedPlan = dependencies.resolvePrevalidatedLaunchPlan || resolvePrevalidatedLaunchPlan;
   const spawnProcess = dependencies.spawnProcess || spawn;
   const supervisionRequired = dependencies.supervisionRequired || isServerProcessSupervisionRequired;
+  const inspectProcesses = dependencies.inspectProcesses;
+  const captureRoot = dependencies.captureLaunchRoot || captureLaunchRoot;
+  const randomUUID = dependencies.randomUUID || crypto.randomUUID;
+  const processEvidence = new Map();
   if (!eventBus || typeof eventBus.emit !== 'function' ||
       typeof getListeningEndpoints !== 'function' || typeof lookupHost !== 'function' ||
       typeof isRuntimeValidation !== 'function' ||
       typeof resolvePlan !== 'function' || typeof resolvePrevalidatedPlan !== 'function' ||
-      typeof spawnProcess !== 'function' || typeof supervisionRequired !== 'function') {
+      typeof spawnProcess !== 'function' || typeof supervisionRequired !== 'function' || typeof randomUUID !== 'function' ||
+      (inspectProcesses !== undefined && typeof inspectProcesses !== 'function') ||
+      (captureRoot !== undefined && typeof captureRoot !== 'function')) {
     throw invalidRequest();
   }
 
@@ -285,6 +330,13 @@ function createServerProcessRunner(dependencies = {}) {
     const runtime = request.runtime;
     let plan;
     let child;
+    let launchAuthority = null;
+    let evidenceEntry = null;
+    const invalidateEvidence = () => {
+      if (!evidenceEntry) return;
+      evidenceEntry.invalidated = true;
+      if (processEvidence.get(evidenceEntry.pid) === evidenceEntry) processEvidence.delete(evidenceEntry.pid);
+    };
     try {
       const planOptions = {
         javaMajor: runtime.javaMajor,
@@ -302,9 +354,24 @@ function createServerProcessRunner(dependencies = {}) {
       const launchArguments = request.forgeCandidateHealthAuthorization
         ? withForgeCandidateConfirmation(plan)
         : plan.args;
+      const nonce = randomUUID();
+      if (!UUID.test(nonce)) throw invalidRequest();
+      const spawnArguments = [`-Dminecraft.core.server.id=${request.operationId}`, `${SPAWN_MARKER}${nonce}`, ...launchArguments];
+      // Evidence failure never changes the existing server startup/supervision contract.
+      if (inspectProcesses && captureRoot) {
+        try {
+          const serverRoot = frozenRoot(captureRoot, request.serverPath);
+          const cwdRoot = frozenRoot(captureRoot, plan.cwd);
+          if (serverRoot.canonicalPath !== cwdRoot.canonicalPath || serverRoot.identity !== cwdRoot.identity ||
+              plan.loader !== runtime.loaderFamily || (plan.runtime && plan.runtime.loaderFamily !== runtime.loaderFamily) ||
+              spawnArguments.filter(argument => argument.startsWith(SPAWN_MARKER)).length !== 1) throw invalidRequest();
+          launchAuthority = Object.freeze({ serverRoot, cwd: path.resolve(plan.cwd), serverPath: path.resolve(request.serverPath),
+            executablePath: pathKey(request.javaPath), nonce, args: Object.freeze([...spawnArguments]) });
+        } catch { /* No positive root/launch evidence; still launch the server normally. */ }
+      }
       child = spawnProcess(
         request.javaPath,
-        [`-Dminecraft.core.server.id=${request.operationId}`, ...launchArguments],
+        spawnArguments,
         {
           cwd: plan.cwd,
           detached: false,
@@ -395,6 +462,7 @@ function createServerProcessRunner(dependencies = {}) {
       const fatalMarker = plan.fatalMarkers.find(marker => line.includes(marker));
       if (fatalMarker) {
         fatal = true;
+        invalidateEvidence();
         settleAllWaiters(healthFailure());
         return;
       }
@@ -411,6 +479,7 @@ function createServerProcessRunner(dependencies = {}) {
       let next = current + chunk.toString();
       if (Buffer.byteLength(next, 'utf8') > MAX_LINE_BYTES) {
         fatal = true;
+        invalidateEvidence();
         next = '';
         settleAllWaiters(healthFailure());
       }
@@ -432,6 +501,7 @@ function createServerProcessRunner(dependencies = {}) {
     const onStderrEnd = () => flush('stderr');
     const onStreamError = () => {
       fatal = true;
+      invalidateEvidence();
       settleAllWaiters(healthFailure());
     };
     const detachStreams = () => {
@@ -444,10 +514,12 @@ function createServerProcessRunner(dependencies = {}) {
     };
     const onChildError = () => {
       fatal = true;
+      invalidateEvidence();
       settleAllWaiters(healthFailure());
     };
     const onChildClose = (exitCode, signal) => {
       if (closedInfo) return;
+      invalidateEvidence();
       flush('stdout');
       flush('stderr');
       closedInfo = Object.freeze({ exitCode, signal });
@@ -466,6 +538,7 @@ function createServerProcessRunner(dependencies = {}) {
     child.stderr.on('error', onStreamError);
     child.on('error', onChildError);
     child.on('close', onChildClose);
+    child.once('exit', invalidateEvidence);
 
     const ownership = Object.freeze({ instanceId: request.instanceId, operationId: request.operationId, pid });
     child.once('close', () => {
@@ -476,6 +549,7 @@ function createServerProcessRunner(dependencies = {}) {
     const supervisionFailure = () => {
       if (closedInfo) return;
       fatal = true;
+      invalidateEvidence();
       settleAllWaiters(healthFailure());
       if (supervisionTerminationRequested) return;
       supervisionTerminationRequested = true;
@@ -558,6 +632,7 @@ function createServerProcessRunner(dependencies = {}) {
       },
       async stopFully(inputValue) {
         const stop = normalizeStopRequest(inputValue);
+        invalidateEvidence();
         let forced = false;
         if (!closedInfo) {
           const gracefulRequested = writeStdin('stop\n');
@@ -582,13 +657,50 @@ function createServerProcessRunner(dependencies = {}) {
         });
       }
     };
+    if (launchAuthority && handle.isLive()) {
+      const previous = processEvidence.get(pid);
+      if (previous) {
+        previous.invalidated = true;
+        processEvidence.delete(pid); // Conflicting live handles never receive a PID-only exemption.
+      } else {
+        evidenceEntry = { pid, handle, authority: launchAuthority, identity: null, invalidated: false,
+          isSupervised: () => supervisionEstablished };
+        processEvidence.set(pid, evidenceEntry);
+        const entry = evidenceEntry;
+        void Promise.resolve().then(() => inspectProcesses()).then(value => {
+          const row = validateProcessSnapshot(value).processes.find(item => item.pid === pid);
+          if (processEvidence.get(pid) !== entry || entry.invalidated || !handle.isLive() ||
+              !validIdentity(row) || row.parentPid !== process.pid || pathKey(row.executablePath) !== launchAuthority.executablePath ||
+              !singleSpawnMarker(row.commandLine, launchAuthority.nonce)) return;
+          entry.identity = Object.freeze({ pid, parentPid: row.parentPid, creationTime: row.creationTime,
+            executablePath: row.executablePath, commandHash: commandHash(row.commandLine) });
+        }).catch(() => { /* Missing/failed bounded identity capture grants no exemption and never kills the server. */ });
+      }
+    }
     return Object.freeze(handle);
   }
 
-  return Object.freeze({ launchServerProcess });
+  function isCurrentUnrelatedServer({ process: row, clientPath } = {}) {
+    try {
+      if (!validIdentity(row) || typeof clientPath !== 'string' || !path.isAbsolute(clientPath)) return false;
+      const entry = processEvidence.get(row.pid); const identity = entry?.identity;
+      if (!entry || entry.invalidated || !identity || !entry.handle.isLive() || !entry.isSupervised() ||
+          row.pid !== identity.pid || row.parentPid !== identity.parentPid || row.creationTime !== identity.creationTime ||
+          row.executablePath !== identity.executablePath || commandHash(row.commandLine) !== identity.commandHash ||
+          !singleSpawnMarker(row.commandLine, entry.authority.nonce)) return false;
+      const root = frozenRoot(captureRoot, entry.authority.serverPath);
+      const cwd = frozenRoot(captureRoot, entry.authority.cwd);
+      const original = entry.authority.serverRoot; const target = pathKey(clientPath);
+      return root.canonicalPath === original.canonicalPath && cwd.canonicalPath === original.canonicalPath &&
+        root.identity === original.identity && cwd.identity === original.identity &&
+        !containsPath(root.canonicalPath, target) && !containsPath(target, root.canonicalPath) &&
+        processEvidence.get(row.pid) === entry && !entry.invalidated && entry.handle.isLive() && entry.isSupervised();
+    } catch { return false; }
+  }
+  return Object.freeze({ launchServerProcess, isCurrentUnrelatedServer });
 }
 
-const sharedServerProcessRunner = createServerProcessRunner();
+const sharedServerProcessRunner = createServerProcessRunner({ inspectProcesses: createClientProcessInspector(), captureLaunchRoot });
 
 function launchServerProcess(request) {
   return sharedServerProcessRunner.launchServerProcess(request);

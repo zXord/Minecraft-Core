@@ -11,6 +11,7 @@ const { isLegalJobTransition } = require('../../../electron/services/modpack-lif
 const { detectArchiveFamily } = require('../../../electron/services/modpacks/archive/archive-magic.cjs');
 const { classifyArchive } = require('../../../electron/services/modpacks/archive/archive-classifier.cjs');
 const { ArtifactCache } = require('../../../electron/services/modpacks/artifacts/artifact-cache.cjs');
+const { ArtifactWorkspaceRegistry } = require('../../../electron/services/modpacks/artifacts/artifact-workspace-registry.cjs');
 const { ArtifactDownloader } = require('../../../electron/services/modpacks/artifacts/artifact-downloader.cjs');
 const { LocalArtifactSource } = require('../../../electron/services/modpacks/local/local-artifact-source.cjs');
 const { SelectionRegistry } = require('../../../electron/services/modpacks/local/selection-registry.cjs');
@@ -721,6 +722,10 @@ async function createLifecycleHarness() {
   };
 
   const planRegistry = new MemoryPlanRegistry();
+  const workspaceRegistry = new ArtifactWorkspaceRegistry({
+    root: workspaceRoot, clock: () => FIXED_NOW,
+    reparseInspector: { async isReparsePoint() { return false; } }
+  });
   const operationStore = new MemoryOperationStore();
   const stateRepository = new MemoryStateRepository();
   const instancePaths = new Map();
@@ -837,6 +842,7 @@ async function createLifecycleHarness() {
     inspectionLoader,
     planningAdapter,
     planRegistry,
+    workspaceRegistry,
     operationStore,
     mutationCoordinator,
     mutationRuntime,

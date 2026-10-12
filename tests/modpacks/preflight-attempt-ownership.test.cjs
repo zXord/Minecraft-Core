@@ -458,7 +458,6 @@ test('same-inspection concurrent preflight and discard reject before they can di
   await assert.rejects(Promise.race([concurrent,
     new Promise(resolve => setImmediate(() => resolve('concurrent preflight was not rejected')))]), error => error.code === 'OPERATION_IN_PROGRESS');
   await assert.rejects(f.service.cancelInspection(f.inspectionId), error => error.code === 'OPERATION_IN_PROGRESS');
-  await assert.rejects(f.service.dispose(), error => error.code === 'OPERATION_IN_PROGRESS');
   f.advance(8 * 60 * 60 * 1000);
   assert.equal(await f.registry.sweepExpired(), 0);
   assert.equal(f.attempts.length, 1);
@@ -469,6 +468,36 @@ test('same-inspection concurrent preflight and discard reject before they can di
   assert.deepEqual(fs.readdirSync(f.workspaceRoot), [f.originalInput]);
   assert.equal(await f.service.cancelInspection(f.inspectionId), true);
   assert.deepEqual(fs.readdirSync(f.workspaceRoot), []);
+});
+
+test('service disposal drains an exact active preparation before cleanup and closes further admission', async t => {
+  let enter;
+  let resume;
+  const started = new Promise(resolve => { enter = resolve; });
+  const gate = new Promise(resolve => { resume = resolve; });
+  const outstanding = [];
+  t.after(async () => { resume(); await Promise.allSettled(outstanding); });
+  const f = await fixture(t, { preparing: async () => { enter(); await gate; } });
+  const pending = f.service.createPlan(f.request());
+  outstanding.push(pending);
+  await started;
+  let disposed = false;
+  const disposal = f.service.dispose().then(value => { disposed = true; return value; });
+  outstanding.push(disposal);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(disposed, false, 'graceful disposal must await the exact active preparation');
+  assert.equal(f.attempts.length, 1);
+  assert.equal(fs.existsSync(f.directory(f.attempts[0].raw)), true, 'drain must retain active raw authority');
+  assert.equal(fs.existsSync(f.directory(f.attempts[0].input)), true, 'drain must retain active input authority');
+  await assert.rejects(f.service.createPlan(f.request()), stale);
+  resume();
+  assert.equal((await pending).requiresConflictReview, true);
+  assert.equal(await disposal, 1);
+  assert.equal(disposed, true);
+  assert.equal(f.service.inspections.size, 0);
+  assert.equal(f.registry.records.size, 0);
+  assert.deepEqual(fs.readdirSync(f.workspaceRoot), []);
+  await assert.rejects(f.service.createPlan(f.request()), stale);
 });
 
 test('preparation failure retires only its attempt and leaves normal inspection discard usable', async t => {

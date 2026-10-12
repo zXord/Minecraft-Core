@@ -244,7 +244,53 @@ test('L4 long recovery words and bounded identifier fit; Refresh is read-only an
     await health(fixture, info);
   } finally { await fixture.close(); }
 });
-test('C1 GitHub keeps one local held status and unaffected Dashboard and Method ancestry', async ({}, info) => {
+for (const viewport of [{ width: 800, height: 600 }, { width: 788, height: 595 }, sizes[2]]) {
+  test(`C2 Dashboard settings and server tabs remain reachable at ${viewport.width}x${viewport.height}`, async ({}, info) => {
+    const fixture = await launch('unmanaged', viewport);
+    try {
+      const { page } = fixture;
+      await expect(page.locator('.dashboard-panel')).toBeVisible();
+      const settings = page.getByRole('button', { name: 'Open app settings', exact: true });
+      const tabs = page.locator('.server-tabs').getByRole('button');
+      await expect(tabs).toHaveCount(6);
+      inViewport(await evidence(page, page.locator('.server-header'), info, `C2-${viewport.width}-header`), 'server header');
+      inViewport(await evidence(page, settings, info, `C2-${viewport.width}-settings`), 'app settings');
+      expect(await settings.evaluate(element => {
+        const r = element.getBoundingClientRect();
+        return element.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+      }), 'settings center receives pointer input without horizontal scrolling').toBe(true);
+      const panel = await page.locator('.content-panel').boundingBox();
+      expect(panel.x).toBeGreaterThanOrEqual(0);
+      expect(panel.x + panel.width).toBeLessThanOrEqual(viewport.width);
+      if (viewport.width === 1440) expect(panel.width).toBeCloseTo(1240, 2);
+
+      await settings.click();
+      const dialog = page.getByRole('dialog', { name: 'App Settings' });
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole('button', { name: 'Close settings', exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      await tabs.first().focus();
+      await page.keyboard.press('Shift+Tab');
+      await expect(settings).toBeFocused();
+      await page.keyboard.press('Enter');
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole('button', { name: 'Close settings', exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      await settings.focus();
+      for (let index = 0; index < 6; index += 1) {
+        await page.keyboard.press('Tab');
+        await expect(tabs.nth(index)).toBeFocused();
+        inViewport(await evidence(page, tabs.nth(index), info, `C2-${viewport.width}-tab-${index}`), 'server tab');
+      }
+      await page.locator('.server-tabs').getByRole('button', { name: 'Modpack', exact: true }).click();
+      await expect(page.getByRole('heading', { name: 'Modpack', exact: true })).toBeVisible();
+      noPlans(fixture);
+      await health(fixture, info);
+    } finally { await fixture.close(); }
+  });
+}
+
+test('C1 GitHub keeps one local held status and fitted Dashboard and Method ancestry', async ({}, info) => {
   for (const viewport of [sizes[0], sizes[2]]) {
     for (const origin of ['existing', 'new']) {
       const fixture = await launch(origin === 'new' ? 'empty' : 'unmanaged', viewport, { inspectionFixture: { holdProgress: true } });
@@ -253,7 +299,8 @@ test('C1 GitHub keeps one local held status and unaffected Dashboard and Method 
         if (origin === 'existing') {
           await expect(page.locator('.dashboard-panel')).toBeVisible();
           const width = await page.locator('.content-panel').evaluate(el => el.getBoundingClientRect().width);
-          expect(width).toBe(viewport.width === 800 ? 800 : 1240);
+          if (viewport.width === 800) expect(width).toBeLessThanOrEqual(736);
+          else expect(width).toBe(1240);
           await evidence(page, page.locator('.server-tabs'), info, `C1-${viewport.width}-dashboard-header`);
         }
         if (origin === 'new') {

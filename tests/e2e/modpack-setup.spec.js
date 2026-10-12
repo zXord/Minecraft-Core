@@ -533,6 +533,7 @@ test.describe.serial('new server setup', () => {
 
   test('Modrinth setup traverses exact version, preflight, progress, and managed completion', async () => {
     const { page } = fixture;
+    fixture.updateScenario({ holdFirstJobBeforeCommit: true });
     await page.getByRole('button', { name: /Browse Modrinth/u }).click();
     await page.getByRole('button', { name: /Fixture Factory Pack/u }).click();
     await page.getByRole('button', { name: /^2\.0\.0/u }).click();
@@ -544,10 +545,15 @@ test.describe.serial('new server setup', () => {
     await page.getByRole('button', { name: 'Install this exact reviewed plan' }).click();
     await expect(page.getByRole('progressbar', { name: 'Downloading' })).not.toHaveAttribute('aria-valuenow');
     await expect(page.getByText('Verifying exact offline fixture bytes', { exact: true })).toHaveAttribute('aria-live', 'polite');
+    expect(fixture.readState().state.modpackManaged).toBe(false);
+    fixture.updateScenario({ releaseFirstJobBeforeCommit: true });
     // Completing initial setup publishes the instance and intentionally returns to
     // the server dashboard; result-focus coverage lives in the management flow.
     await expect(page.locator('.server-tabs').getByRole('button', { name: /^Modpack(?:,|$)/u })).toBeVisible();
     const evidence = fixture.readState();
+    expect(evidence.lifecycleCalls.filter(call => call.method === 'releaseHeldFirstJob')).toEqual([
+      expect.objectContaining({ jobId: 'job-1' })
+    ]);
     expect(evidence.state).toMatchObject({ modpackManaged: true, lifecycleMode: 'managed' });
     expect(evidence.lifecycleCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({ method: 'createPlan', operationKind: 'install-new' }),

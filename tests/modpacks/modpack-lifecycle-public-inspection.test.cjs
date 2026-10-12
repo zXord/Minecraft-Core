@@ -5,7 +5,31 @@ const { ModpackLifecycleService } = require('../../electron/services/modpack-lif
 const { validateModpackIpcResult } = require('../../electron/services/modpacks/ipc-schemas.cjs');
 
 function createService(overrides = {}) {
+  const attempts = [];
   return new ModpackLifecycleService({
+    workspaceRegistry: {
+      attempts,
+      async releaseOwner(ownerId) {
+        assert.equal(attempts.some(state => state.ownerId === ownerId && !state.finished), false);
+        return 0;
+      },
+      beginPreparationAttempt({ ownerId }) {
+        const state = { ownerId, retired: false, finished: false };
+        attempts.push(state);
+        return Object.freeze({
+          async retire({ templateOutputId }) {
+            assert.equal(templateOutputId, null, 'projection fixtures allocate no candidate template');
+            assert.equal(state.finished, false);
+            state.retired = true;
+          },
+          finish() {
+            assert.equal(state.retired, true, 'fixture capability must retire before finish');
+            assert.equal(state.finished, false);
+            state.finished = true;
+          }
+        });
+      }
+    },
     sourceResolver: {
       async resolveArtifactSetPlan() {
         return {
@@ -259,6 +283,7 @@ test('large inspections return a bounded public projection while preflight retai
   });
   assert.equal(loadedInspection.result.entries.length, 10_001);
   assert.equal(plannedWith.result.entries.length, 10_001);
+  assert.deepEqual(service.workspaceRegistry.attempts, [{ ownerId: publicInspection.inspectionId, retired: true, finished: true }]);
 });
 
 test('oversized root candidate lists are bounded publicly while preflight retains every internal candidate', async () => {
@@ -315,6 +340,7 @@ test('oversized root candidate lists are bounded publicly while preflight retain
   });
   assert.equal(loadedInspection.result.rootCandidates.length, 10_001);
   assert.equal(plannedWith.result.rootCandidates.at(-1), 'root-10000');
+  assert.deepEqual(service.workspaceRegistry.attempts, [{ ownerId: publicInspection.inspectionId, retired: true, finished: true }]);
 });
 
 test('preflight permits the public UI empty conflict-choice maps without widening planning authority', async () => {
@@ -340,6 +366,7 @@ test('preflight permits the public UI empty conflict-choice maps without widenin
   });
 
   assert.deepEqual(received.request.selections.conflictChoices, { paths: {}, categories: {} });
+  assert.deepEqual(service.workspaceRegistry.attempts, [{ ownerId: 'inspection-real-lifecycle', retired: true, finished: true }]);
 });
 
 test('rollback-option listing delegates one exact instance ID and returns only its public lazy options', async () => {

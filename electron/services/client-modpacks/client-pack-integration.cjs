@@ -44,6 +44,19 @@ function createClientPackIntegration({ resolveClient, resolveClientByPath, proce
         return work();
       });
     },
+    async runPersonalMutation({ clientId, clientPath }, work) {
+      const target = await resolveClient(clientId);
+      if (!target || target.clientId !== clientId || pathKey(clientPath) !== pathKey(target.clientPath)) throw fail('INVALID_REQUEST');
+      return processGuard.withMutation(target, async () => {
+        const current = await resolveClient(clientId);
+        if (!current || pathKey(current.clientPath) !== pathKey(target.clientPath)) throw fail('PLAN_STALE');
+        const journal = await transaction.status(target);
+        if (journal && !['committed', 'abandoned'].includes(journal.phase)) throw fail('RECOVERY_REQUIRED');
+        // Personal settings are permitted for managed clients, but never race
+        // their pack's path reservation or an unfinished durable transaction.
+        return work();
+      });
+    },
     async beginManagedLaunch({ clientPath }, options = {}) {
       const target = await resolveClientByPath(clientPath);
       if (!target) throw fail('INVALID_REQUEST');

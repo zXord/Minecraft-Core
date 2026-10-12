@@ -312,22 +312,47 @@ async function archiveForRetry(f, method = 'cleanup') {
   f.runtime.destinationReservations.release = forbidden;
 }
 
+// These legacy records have no launch binding. Their exact destination may be
+// settled again after authenticated publication, but source recovery cannot replay.
+function expectHistoricalDestinationSettlement(f, disposition) {
+  const names = ['job-alpha.json', 'job-alpha.target.json'];
+  const publishedBytes = names.map(name => fs.readFileSync(path.join(f.registry.historyPath, name)));
+  const calls = [];
+  const forbidden = () => assert.fail('wrong historical destination disposition');
+  f.runtime.destinationReservations.consume = forbidden;
+  f.runtime.destinationReservations.release = forbidden;
+  const method = disposition === 'consumed' ? 'consume' : 'release';
+  f.runtime.destinationReservations[method] = (...args) => {
+    assert.deepEqual(args, disposition === 'consumed' ? [f.resolved.instanceId, f.serverPath] : [f.resolved.instanceId]);
+    for (const [index, name] of names.entries()) {
+      assert.equal(fs.existsSync(path.join(f.registry.activePath, name)), false);
+      assert.deepEqual(fs.readFileSync(path.join(f.registry.historyPath, name)), publishedBytes[index]);
+    }
+    calls.push(disposition);
+    return true;
+  };
+  return calls;
+}
+
 for (const kind of ['existing', 'new']) for (const layout of ['complete', 'split']) {
   test(`cleanup historical ${kind} ${layout}: authenticates publication before every source side effect`, async t => {
     const f = await fixture(t, { kind, committed: true }); await archiveForRetry(f);
+    const settlements = kind === 'new' ? expectHistoricalDestinationSettlement(f, 'consumed') : [];
     const historyEnvelope = path.join(f.registry.historyPath, 'job-alpha.target.json');
     if (layout === 'split') fs.renameSync(historyEnvelope, path.join(f.registry.activePath, 'job-alpha.target.json'));
     f.controls.revision += 10;
     const before = fs.readFileSync(path.join(f.registry.historyPath, 'job-alpha.json'));
     const result = await f.withLease(lease => f.invoke('cleanup', lease));
     assert.equal(result.alreadyCleaned, true);
+    assert.deepEqual(settlements, kind === 'new' ? ['consumed'] : []);
     assert.deepEqual(fs.readFileSync(path.join(f.registry.historyPath, 'job-alpha.json')), before);
     assert.ok(fs.existsSync(historyEnvelope)); assert.deepEqual(f.controls.calls, []); await f.assertUsable();
   });
 }
-for (const damage of ['missing', 'wrong-kind', 'malformed', 'missing-cleanup-proof', 'pending-tracking', 'wrong-tracking-server']) {
-  test(`cleanup historical ${damage}: refuses without any source or tracking callback`, async t => {
-    const f = await fixture(t, { committed: true }); await archiveForRetry(f);
+for (const kind of ['existing', 'new']) for (const damage of ['missing', 'wrong-kind', 'malformed',
+  kind === 'existing' ? 'missing-cleanup-proof' : 'missing-registration-proof', 'pending-tracking', 'wrong-tracking-server']) {
+  test(`cleanup historical ${kind} ${damage}: refuses without any source, tracking, or destination callback`, async t => {
+    const f = await fixture(t, { kind, committed: true }); await archiveForRetry(f);
     const history = path.join(f.registry.historyPath, 'job-alpha.json');
     const record = JSON.parse(fs.readFileSync(history));
     if (damage === 'missing') fs.unlinkSync(history);
@@ -335,6 +360,7 @@ for (const damage of ['missing', 'wrong-kind', 'malformed', 'missing-cleanup-pro
     else {
       if (damage === 'wrong-kind') record.operationKind = 'upgrade';
       if (damage === 'missing-cleanup-proof') delete record.outcome.cleanup;
+      if (damage === 'missing-registration-proof') delete record.outcome.registration;
       if (damage === 'pending-tracking') record.outcome.releaseTracking.status = 'pending';
       if (damage === 'wrong-tracking-server') record.outcome.releaseTracking.serverId = 'beta';
       fs.writeFileSync(history, JSON.stringify(record));
@@ -456,10 +482,13 @@ for (const [kind, phase, action, swapStep, wantAbandon] of [
   const forbidden = () => assert.fail('historical terminal source replay forbidden');
   f.service.recoverWithLease = f.service.rollbackWithLease = f.service.failNewWithLease = forbidden;
   f.runtime.runtimeWriterAuthority.assertRecoveryAllowed = forbidden;
+  f.runtime.destinationReservations.consume = forbidden;
   f.runtime.destinationReservations.release = forbidden;
+  const settlements = kind === 'new' ? expectHistoricalDestinationSettlement(f, 'released') : [];
   assert.equal((await f.withLease(lease => f.invoke('rollback', lease))).resolved, true);
   if (wantAbandon) assert.equal((await f.withLease(lease => f.invoke('abandonCandidate', lease))).resolved, true);
   else await assert.rejects(f.withLease(lease => f.invoke('abandonCandidate', lease)), { code: 'RECOVERY_REQUIRED' });
+  assert.deepEqual(settlements, kind === 'new' ? ['released', 'released'] : []);
   await f.assertUsable();
 });
 

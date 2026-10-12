@@ -661,17 +661,6 @@
 
   {#if launchNotice}<section class="mp-state warning" role="status" aria-live="polite"><p>{launchNotice}</p>{#if selectedLaunch && !selectedLaunch.reading}<button class="mp-button" type="button" on:click={() => reconcileLaunch(selectedLaunch)}>Check exact launch status</button>{/if}</section>{/if}
   {#if launchSettlement && settlementCopy(launchSettlement)}<section class="mp-state warning" role="status"><p>{settlementCopy(launchSettlement)}</p></section>{/if}
-  {#if ['method', 'source'].includes(stage)}
-    <section class="mp-panel mp-stack" aria-label="Previous server setups">
-      <h2>Previous server setups</h2><p class="mp-muted">Refresh, then explicitly choose the exact setup to inspect. Nothing is selected automatically.</p>
-      <button class="mp-button" type="button" on:click={() => refreshLaunches(false)}>Refresh previous setups</button>
-      {#if discoveryBusy}<p role="status">Reading previous setup identities…</p>{/if}
-      {#if discoveryError}<p role="alert">{discoveryError}</p>{/if}
-      {#if discoveryNotice}<p role="status">{discoveryNotice}</p>{/if}
-      {#each launchCandidates as candidate (candidate.planId)}<button class="mp-button" type="button" on:click={() => selectLaunch(candidate)}>{candidate.displayName || 'Unresolved setup'} · {candidate.status} · {candidate.planId}</button>{/each}
-      {#if launchCursor}<button class="mp-button" type="button" disabled={discoveryBusy} on:click={() => refreshLaunches(true)}>Load more previous setups</button>{/if}
-    </section>
-  {/if}
 
   {#if error && stage !== 'review'}
     <section class="mp-state error global-error" bind:this={heading} tabindex="-1" aria-live="assertive"><strong>{error.code || 'Modpack setup error'}</strong><p>{error.message}</p><button class="mp-button" type="button" on:click={() => { error = null; }}>Dismiss</button></section>
@@ -711,6 +700,21 @@
     {#key selectionContext}<ModpackJobProgress {job} {selectionContext} on:terminal={completeSetup} on:action={handleOutcomeAction} on:return={() => { job = null; navigateStage('source'); }} />{/key}
   {/if}
 
+  {#if ['method', 'source'].includes(stage)}
+    <details class="previous-setups mp-panel">
+      <summary>Previous server setups</summary>
+      <section class="mp-stack" aria-label="Previous server setups">
+        <p class="mp-muted">Refresh, then explicitly choose the exact setup to inspect. Nothing is selected automatically.</p>
+        <button class="mp-button" type="button" on:click={() => refreshLaunches(false)}>Refresh previous setups</button>
+        {#if discoveryBusy}<p role="status">Reading previous setup identities…</p>{/if}
+        {#if discoveryError}<p role="alert">{discoveryError}</p>{/if}
+        {#if discoveryNotice}<p role="status">{discoveryNotice}</p>{/if}
+        {#each launchCandidates as candidate (candidate.planId)}<button class="mp-button" type="button" on:click={() => selectLaunch(candidate)}>{candidate.displayName || 'Unresolved setup'} · {candidate.status} · {candidate.planId}</button>{/each}
+        {#if launchCursor}<button class="mp-button" type="button" disabled={discoveryBusy} on:click={() => refreshLaunches(true)}>Load more previous setups</button>{/if}
+      </section>
+    </details>
+  {/if}
+
   {#if busy && inspectionProgress && !['modrinth', 'github-assets', 'review', 'progress'].includes(stage)}
     <ModpackInspectionProgress progress={inspectionProgress} />
   {/if}
@@ -719,6 +723,10 @@
 <style>
   @import '../modpacks/modpack-ui.css';
   .setup-shell { display: grid; gap: 1rem; }
+  .previous-setups { padding: 0.75rem 1rem; }
+  .previous-setups summary { cursor: pointer; font-weight: 600; }
+  .previous-setups summary:focus-visible { outline: 2px solid rgba(196, 199, 255, 0.72); outline-offset: 4px; }
+  .previous-setups section { margin-top: 0.75rem; }
   .modrinth-inspection-status { position: sticky; top: 4rem; z-index: 2; align-self: start; min-height: 7rem; border-radius: 8px; background: var(--mp-panel); }
   .stepper { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.35rem; padding: 0.55rem; border: 1px solid var(--mp-border); border-radius: 10px; background: rgba(0, 0, 0, 0.16); }
   .stepper span { display: flex; align-items: center; justify-content: center; gap: 0.4rem; min-height: 38px; padding: 0.25rem; color: var(--mp-muted); font-size: 0.8rem; text-align: center; border-radius: 7px; }

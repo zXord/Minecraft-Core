@@ -248,8 +248,11 @@ function managementFixture(t, kind, {
   };
   const safetyReference = {
     id: 'restore-safety', sha256: 'e'.repeat(64), serverPath: targetPath,
+    name: 'restore-point-2026-08-02T00-00-00.000Z-00000000-0000-4000-8000-000000000017.zip',
+    size: 123, totalBytes: '12', operationId: 'job-management',
+    createdAt: '2026-08-02T00:00:00.000Z',
     sourceRevision: currentCoordinatorRevision, sourceRuntime: currentState.state.runtime,
-    ...(safetyScopeSha256 === null ? {} : { scopeSha256: safetyScopeSha256 })
+    scopeSha256: safetyScopeSha256 ?? 'a'.repeat(64)
   };
   const restoreCalls = [];
   const writtenStates = [];
@@ -441,11 +444,11 @@ function managementFixture(t, kind, {
           schemaVersion: 1,
           kind: 'minecraft-core-lifecycle-restore-creation',
           operationId: request.operationId,
-          name: 'restore-point-2026-08-02T00-00-00.000Z-00000000-0000-4000-8000-000000000017.zip',
-          partName: 'restore-point-2026-08-02T00-00-00.000Z-00000000-0000-4000-8000-000000000017.zip.part',
-          createdAt: '2026-08-02T00:00:00.000Z',
+          name: safetyReference.name,
+          partName: `${safetyReference.name}.part`,
+          createdAt: safetyReference.createdAt,
           sourceRevision: request.sourceRevision,
-          scopeSha256: 'a'.repeat(64),
+          scopeSha256: safetyReference.scopeSha256,
           backupDirectory: { existed: true, identity: { dev: '1', ino: '2', birthtimeNs: '3' } },
           partIdentity: null,
           archiveSha256: null,
@@ -469,7 +472,7 @@ function managementFixture(t, kind, {
         state = {
           ...state,
           archiveSha256: safetyReference.sha256,
-          archiveSize: 123,
+          archiveSize: safetyReference.size,
           metadataSha256: 'f'.repeat(64),
           state: 'verified'
         };

@@ -153,6 +153,7 @@ function runnerFixture({ loader = 'vanilla', listenerEndpoints, pid = 4200, plan
   };
   const runner = createServerProcessRunner({
     eventBus,
+    randomUUID: () => 'b09956c1-1daa-4fb9-a8fe-bf6d401c04bc',
     getListeningEndpoints: async () => listenerEndpoints || [{ host: '127.0.0.1', port: 25565, pid }],
     resolveLaunchPlan() {
       return plan;
@@ -462,7 +463,7 @@ test('shared process runner binds every loader marker and emits only operation-s
     assert.deepEqual(handle.fatalMarkers, plan.fatalMarkers);
     assert.deepEqual(spawnCalls, [{
       file: 'C:\\Java\\bin\\java.exe',
-      args: [`-Dminecraft.core.server.id=health-${loader}`, ...plan.args],
+      args: [`-Dminecraft.core.server.id=health-${loader}`, '-Dminecraft.core.server.launch=b09956c1-1daa-4fb9-a8fe-bf6d401c04bc', ...plan.args],
       options: {
         cwd: plan.cwd,
         detached: false,
@@ -529,6 +530,7 @@ test('Forge registry confirmation is injected only for an explicitly transaction
   }));
   assert.deepEqual(protectedForge.spawnCalls[0].args, [
     `-Dminecraft.core.server.id=${candidateHealthOperationId(jobId)}`,
+    '-Dminecraft.core.server.launch=b09956c1-1daa-4fb9-a8fe-bf6d401c04bc',
     '-Xmx4G',
     '-Dfml.queryResult=confirm',
     '-jar',

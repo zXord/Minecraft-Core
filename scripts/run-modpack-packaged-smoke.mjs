@@ -391,8 +391,9 @@ async function createArchiveCase({ caseRoot, resourcesRoot, parts, groupingSchem
   const cache = {
     retain() {},
     release() {},
-    async materializeSet(value, destination) {
+    async materializeSet(value, destination, { onDestinationCreated = null } = {}) {
       await fs.mkdir(destination);
+      onDestinationCreated?.();
       for (const part of value.artifactSet.parts) await fs.writeFile(path.join(destination, part.fileName), bytesByPart.get(part.partId));
       const primary = value.artifactSet.parts.find(part => part.partId === value.artifactSet.primaryPartId);
       return path.join(destination, primary.fileName);
@@ -434,7 +435,7 @@ async function runAcceptedArchive({ probeRoot, resourcesRoot, fixtureRoot, archi
   const expectedInspectionFamily = archiveFamily === 'zip64' ? 'zip' : archiveFamily;
   if (inspected.archiveFamily !== expectedInspectionFamily ||
       (engineFamily === 'zip' ? inspected.engineEvidence.family !== 'zip' : inspected.engineEvidence.concreteFamily !== engineFamily) ||
-      inspected.integrity !== 'tested') throw smokeFailure();
+      inspected.integrity !== 'deferred-to-extraction' || inspected.engineEvidence.tested !== false) throw smokeFailure();
   const destinationId = current.registry.createStagingOutput({ ownerId: inspected.inspectionId });
   const extracted = await current.extractor.extractArchive({ inspectionId: inspected.inspectionId, destinationId });
   if (extracted.type !== 'verified-extraction' || extracted.measured.entryCount < 1) throw smokeFailure();

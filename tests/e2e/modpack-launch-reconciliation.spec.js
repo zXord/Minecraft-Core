@@ -9,6 +9,34 @@ import { compile } from 'svelte/compiler';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 let bundle;
 let componentCss = '';
+
+async function refreshPreviousSetups(page) {
+  const refresh = page.getByRole('button', { name: 'Refresh previous setups' });
+  if (!(await refresh.isVisible())) await page.locator('summary').filter({ hasText: 'Previous server setups' }).click();
+  await refresh.click();
+}
+
+test('Method keeps primary choices in view and previous setups remain explicitly discoverable', async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  const method = page.locator('.method-panel');
+  const summary = page.locator('summary').filter({ hasText: 'Previous server setups' });
+  await expect(summary).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Refresh previous setups' })).toBeHidden();
+  const bounds = await method.boundingBox();
+  expect(bounds.y).toBeGreaterThanOrEqual(0);
+  expect(bounds.y + bounds.height).toBeLessThanOrEqual(601);
+  expect((await summary.boundingBox()).y).toBeGreaterThanOrEqual(bounds.y + bounds.height);
+  await summary.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('button', { name: 'Refresh previous setups' })).toBeVisible();
+  expect(await page.evaluate(() => window.launchTest.requests.filter(value =>
+    ['modpacks:list-new-server-launches', 'modpacks:reconcile-new-server-launch', 'modpacks:start-operation'].includes(value.channel)))).toEqual([]);
+  await refreshPreviousSetups(page);
+  expect(await page.evaluate(() => window.launchTest.requests.filter(value => value.channel === 'modpacks:list-new-server-launches').length)).toBe(1);
+  await expect(page.getByRole('heading', { name: 'How do you want to set it up?' })).toBeVisible();
+  expect(await starts(page)).toBe(0);
+});
+
 // Browser plugin not available. Real parent/child validation only, without a server.
 test.beforeAll(async () => {
   const styles = [];
@@ -157,7 +185,7 @@ test('reload discovery requires explicit exact selection and hydrated completion
     s.items = [{ planId: s.planId, planFingerprint: s.fingerprint, status: 'started', createdAt: s.job.createdAt, serverId: s.job.serverId, operationKind: s.job.operationKind, displayName: 'Prior setup', jobId: s.job.jobId, settlement: s.reconciliation.settlement }];
     window.launchFixture.show(false); window.launchFixture.show(true);
   });
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
+  await refreshPreviousSetups(page);
   await expect(page.getByRole('button', { name: /Prior setup/ })).toBeVisible();
   expect(await page.evaluate(() => window.launchTest.completions)).toEqual([]);
   await page.getByRole('button', { name: /Prior setup/ }).click();
@@ -257,8 +285,8 @@ test('destroying the parent during Start settles bookkeeping without release or 
 
 test('discovery refresh races retain the newest snapshot without automatic adoption', async ({ page }) => {
   await page.evaluate(() => window.launchTest.defer = 'modpacks:list-new-server-launches');
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
+  await refreshPreviousSetups(page);
+  await refreshPreviousSetups(page);
   await page.evaluate(() => {
     const s = window.launchTest;
     const base = { planFingerprint: s.fingerprint, status: 'pending', createdAt: s.job.createdAt };
@@ -280,7 +308,7 @@ test('selected pending reload candidate stays exact across publication without r
     s.items = [{ planId: s.planId, planFingerprint: s.fingerprint, status: 'pending', createdAt: s.job.createdAt }];
     s.reconciliation = { status: 'pending', planId: s.planId, planFingerprint: s.fingerprint };
   });
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
+  await refreshPreviousSetups(page);
   await page.getByRole('button', { name: /Unresolved setup/ }).click();
   await expect(page.getByText(/Start outcome is unknown/)).toBeVisible();
   await page.evaluate(() => { const s = window.launchTest; s.reconciliation = { status: 'started', planId: s.planId, planFingerprint: s.fingerprint, job: s.job, settlement: { status: 'active', destinationDisposition: 'held', recoveryAvailable: false } }; });
@@ -506,7 +534,7 @@ test('Back from unknown Start permits explicit exact discovery, never another de
   });
   await page.getByRole('button', { name: /Local archive/ }).click();
   expect(await page.evaluate(() => window.launchTest.requests.filter(value => value.channel === 'modpacks:reserve-server-destination').length)).toBe(1);
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
+  await refreshPreviousSetups(page);
   await page.getByRole('button', { name: /Unresolved setup/ }).click();
   await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toBeVisible();
   expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(0);
@@ -560,14 +588,14 @@ test('expired pagination requests a fresh snapshot and discovery limits never au
   await page.clock.install({ time: new Date('2026-10-11T00:00:00Z') });
   await page.clock.pauseAt(new Date('2026-10-11T00:00:01Z'));
   await page.evaluate(() => { const s = window.launchTest; s.nextCursor = 'launch-cursor-v1-22222222-2222-4222-8222-222222222222'; });
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
+  await refreshPreviousSetups(page);
   await page.clock.runFor(120000);
   await page.evaluate(() => { const s = window.launchTest; s.nextCursor = null; s.listError = { code: 'LAUNCH_CURSOR_EXPIRED', message: 'The setup list expired. Refresh it to continue.', retryable: true }; s.listErrorOnce = true; });
   await page.getByRole('button', { name: 'Load more previous setups' }).click();
   await expect(page.getByText(/fresh snapshot/)).toBeVisible();
   expect(await page.evaluate(() => window.launchTest.requests.filter(value => value.channel === 'modpacks:list-new-server-launches').map(value => value.request))).toEqual([{ limit: 50 }, { limit: 50, cursor: 'launch-cursor-v1-22222222-2222-4222-8222-222222222222' }, { limit: 50 }]);
   await page.evaluate(() => { const s = window.launchTest; s.listErrorOnce = false; s.listError = { code: 'LAUNCH_LIST_LIMIT_EXCEEDED', message: 'Too many setups are available to list. Use an exact setup reference.', retryable: false }; });
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
+  await refreshPreviousSetups(page);
   await expect(page.getByText(/list is not complete/)).toBeVisible();
   await page.clock.runFor(120000);
   expect(await page.evaluate(() => window.launchTest.requests.filter(value => value.channel === 'modpacks:list-new-server-launches').length)).toBe(4);
@@ -580,7 +608,7 @@ for (const malformed of ['items-object', 'extra-top-level', 'private-summary']) 
     s.listOverride = malformed === 'items-object' ? { items: {}, nextCursor: null } : malformed === 'extra-top-level' ?
       { items: [item], nextCursor: null, snapshot: 'private' } : { items: [{ ...item, recordRevision: 1 }], nextCursor: null };
   }, malformed);
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
+  await refreshPreviousSetups(page);
   await expect(page.getByText(/could not be listed safely/)).toBeVisible();
   await expect(page.getByRole('button', { name: /Unresolved setup/ })).toHaveCount(0);
   await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toHaveCount(0);
@@ -591,7 +619,7 @@ test('bounded launch discovery capacity reports retry guidance without an automa
   await page.clock.install({ time: new Date('2026-10-11T00:00:00Z') });
   await page.clock.pauseAt(new Date('2026-10-11T00:00:01Z'));
   await page.evaluate(() => { window.launchTest.listError = { code: 'LAUNCH_DISCOVERY_CAPACITY', message: 'Discovery is at capacity.', retryable: true }; });
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
+  await refreshPreviousSetups(page);
   await expect(page.getByText(/discovery is at capacity/)).toBeVisible();
   await page.clock.runFor(120000);
   expect(await page.evaluate(() => window.launchTest.requests.filter(value => value.channel === 'modpacks:list-new-server-launches').length)).toBe(1);
@@ -619,7 +647,7 @@ test('reverse candidate hydration selects only the explicit latest identity', as
       { ...base, planId: 'plan-candidate-b', planFingerprint: 'b'.repeat(64), serverId: 'pending-b', jobId: 'job-b', displayName: 'Candidate B' }];
     s.defer = 'modpacks:get-job';
   });
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
+  await refreshPreviousSetups(page);
   await page.getByRole('button', { name: /Candidate A/ }).click();
   await expect.poll(() => page.evaluate(() => window.launchTest.pending.length)).toBe(1);
   await page.evaluate(() => {
@@ -642,7 +670,7 @@ test('reselecting the same completed launch cannot emit completion twice', async
   await expect.poll(() => page.evaluate(() => window.launchTest.completions.length)).toBe(1);
   await page.getByRole('button', { name: 'Return to server' }).click();
   await page.evaluate(() => { const s = window.launchTest; s.items = [{ planId: s.planId, planFingerprint: s.fingerprint, status: 'started', createdAt: s.job.createdAt, serverId: s.job.serverId, operationKind: s.job.operationKind, jobId: s.job.jobId, displayName: 'Same completed setup', settlement: { status: 'settled', destinationDisposition: 'consumed', recoveryAvailable: false } }]; s.reconciliation = { ...s.reconciliation, job: s.job, settlement: s.items[0].settlement }; });
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
+  await refreshPreviousSetups(page);
   await page.getByRole('button', { name: /Same completed setup/ }).click();
   await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toBeVisible();
   expect(await page.evaluate(() => window.launchTest.completions.length)).toBe(1);
@@ -660,11 +688,11 @@ test('unknown Start recovered through explicit selection completes only once acr
     s.items = [{ planId: s.planId, planFingerprint: s.fingerprint, status: 'started', createdAt: s.job.createdAt, serverId: s.job.serverId, operationKind: s.job.operationKind, jobId: s.job.jobId, displayName: 'Recovered completed setup', settlement: { status: 'settled', destinationDisposition: 'consumed', recoveryAvailable: false } }];
     s.reconciliation = { status: 'started', planId: s.planId, planFingerprint: s.fingerprint, job: s.job, settlement: s.items[0].settlement };
   });
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
+  await refreshPreviousSetups(page);
   await page.getByRole('button', { name: /Recovered completed setup/ }).click();
   await expect.poll(() => page.evaluate(() => window.launchTest.completions.length)).toBe(1);
   await page.getByRole('button', { name: 'Return to server' }).click();
-  await page.getByRole('button', { name: 'Refresh previous setups' }).click();
+  await refreshPreviousSetups(page);
   await page.getByRole('button', { name: /Recovered completed setup/ }).click();
   await expect(page.getByRole('region', { name: 'Modpack operation progress' })).toBeVisible();
   expect(await page.evaluate(() => window.launchTest.completions.length)).toBe(1);

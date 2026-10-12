@@ -681,7 +681,7 @@ async function runDeterministicModpackLifecycleEvidence({ fixtureRoot = null } =
     await returnFromCompletedOperation(fixture.page);
 
     await fixture.page.getByRole('button', { name: 'Actions' }).click();
-    await fixture.page.getByRole('button', { name: 'Repair', exact: true }).click();
+    await fixture.page.getByRole('button', { name: 'Review repair', exact: true }).click();
     await fixture.page.getByRole('button', { name: /Browse Modrinth/u }).click();
     await fixture.page.getByRole('button', { name: /Fixture Factory Pack/u }).click();
     await fixture.page.getByRole('button', { name: /^2\.0\.0/u }).click();
@@ -1355,6 +1355,12 @@ function createComposition({ input, scenarioFile }) {
       assertNotBlocked();
       const inspected = inspections.get(request.inspectionId);
       if (!inspected) throw new ModpackError('PLAN_STALE', 'The reviewed inspection has expired.');
+      if (request.operationKind === 'repair' && scenario().refreshFixture?.rejectFirstRepairPreflight === true) {
+        update(value => { value.refreshFixture.rejectFirstRepairPreflight = false; });
+        inspections.delete(request.inspectionId);
+        record('lifecycleCalls', { method: 'createPlanRejected', inspectionId: request.inspectionId, operationKind: 'repair', code: 'PLAN_STALE' });
+        throw new ModpackError('PLAN_STALE', 'The reviewed inspection is no longer current.');
+      }
       if (request.operationKind === 'install-new' || request.operationKind === 'import-files-only-new') {
         const reservation = destinationReservations.get(request.instanceId);
         if (!reservation) throw new ModpackError('PLAN_STALE', 'The reserved server destination has expired.');
@@ -1479,7 +1485,7 @@ function createComposition({ input, scenarioFile }) {
         serverId: plan.instanceId, planFingerprint: FINGERPRINT, swapStep: null,
         createdAt: FIXED_TIME, updatedAt: FIXED_TIME, terminalAt: crash || deferred || heldRepair ? null : FIXED_TIME, events: [],
         jobId,
-        operationKind: plan.operationKind,
+        operationKind: plan.operationKind === 'uninstall' ? 'uninstall-managed' : plan.operationKind,
         phase: heldRepair ? 'snapshotting' : crash ? 'committing' : deferred ? 'downloading' : 'completed',
         progress: {
           percent: heldRepair ? 20 : crash ? 82 : deferred ? 35 : 100,
@@ -1594,11 +1600,17 @@ function createComposition({ input, scenarioFile }) {
         if (reply?.fail) throw new ModpackError('COMMIT_FAILED', 'Held parent Retry read rejected');
         return clone(reply?.value || stored.job);
       }
+      if (stored.holdBeforeCommit && stored.job.jobId === 'job-1' && scenario().releaseFirstJobBeforeCommit === true) {
+        stored.holdBeforeCommit = false;
+        update(value => { value.releaseFirstJobBeforeCommit = false; });
+        record('lifecycleCalls', { method: 'releaseHeldFirstJob', jobId });
+      }
       if (stored.job.phase === 'downloading' && stored.reads >= 1 && !stored.holdBeforeCommit) {
+        stored.job.terminalAt = FIXED_TIME;
         const destinationRecovery = scenario().destinationRecoveryOnFirstJob === true;
         if ((scenario().retainedDownloadOnFirstJob === true || destinationRecovery) && stored.job.jobId === 'job-1') {
           stored.job.phase = 'failed';
-          stored.job.progress = { percent: 35, message: 'Downloaded archive retained for manual use' };
+          stored.job.progress = { percent: 35, message: 'Downloaded archive retained for manual use', currentItem: null };
           stored.job.outcome = {
             status: 'failed',
             kind: 'retained-download',
@@ -1617,11 +1629,15 @@ function createComposition({ input, scenarioFile }) {
           };
         } else {
           stored.job.phase = 'completed';
-          stored.job.progress = { percent: 100, message: 'Final server state validated' };
+          stored.job.progress = { percent: 100, message: 'Final server state validated', currentItem: null };
           stored.job.outcome = completeOperation(stored.plan);
         }
       }
       return clone(stored.job);
+    },
+
+    async releaseServerDestination(instanceId) {
+      return destinationReservationService.release(instanceId);
     },
 
     async getActiveJobs(serverId) {

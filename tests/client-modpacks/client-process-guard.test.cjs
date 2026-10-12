@@ -14,6 +14,112 @@ const owner = { pid: process.pid, parentPid: process.ppid, creationTime: '2026-1
 const launchId = 'b09956c1-1daa-4fb9-a8fe-bf6d401c04bc';
 const blocked = error => error.code === 'CLIENT_RUNNING' || error.code === 'RECOVERY_REQUIRED';
 
+for (const recordState of ['missing', 'settled']) {
+  for (const [name, command] of [
+    ['all arguments file', () => 'javaw.exe @C:\\launch\\client-args.txt'],
+    ['quoted arguments file', () => 'javaw.exe "@C:\\launch with spaces\\client-args.txt"'],
+    ['Prism wrapper', () => 'javaw.exe org.prismlauncher.EntryPoint'],
+    ['MultiMC wrapper', () => 'javaw.exe org.multimc.EntryPoint'],
+    ['hidden root plus visible unrelated root', other => `javaw.exe @hidden.txt --gameDir "${other}"`],
+    ['wrapper plus visible unrelated root', other => `javaw.exe org.prismlauncher.EntryPoint --gameDir "${other}"`]
+  ]) test(`indirect ${recordState} ${name} refuses mutation and launch`, async t => {
+    const f = fixture(t);
+    if (recordState === 'settled') await (await f.makeGuard().beginLaunch(f.client)).abortBeforeSpawn();
+    const other = path.join(f.root, 'unrelated'); fs.mkdirSync(other);
+    f.setSnapshot({ complete: true, processes: [owner, { ...owner, pid: 9984, name: 'javaw.exe', commandLine: command(other) }] });
+    const guard = f.makeGuard(); let entered = false;
+    assert.equal(await guard.status(f.client), 'uncertain');
+    await assert.rejects(guard.withMutation(f.client, () => { entered = true; }), { code: 'RECOVERY_REQUIRED' });
+    await assert.rejects(guard.beginLaunch(f.client), { code: 'RECOVERY_REQUIRED' });
+    assert.equal(entered, false);
+  });
+}
+
+test('indirect server proof cannot override same-root conflicting roots or client markers', async t => {
+  const f = fixture(t); const guard = f.makeGuard({ isCurrentUnrelatedServer: () => true });
+  for (const commandLine of [`java @args --gameDir "${f.client.clientPath}"`,
+    `java @args --gameDir "${f.client.clientPath}" --gameDir "${f.root}"`]) {
+    f.setSnapshot({ complete: true, processes: [{ ...owner, pid: 9985, name: 'java.exe', commandLine }] });
+    await assert.rejects(guard.withMutation(f.client, () => assert.fail('root authority overridden')), blocked);
+  }
+  f.setSnapshot({ complete: true, processes: [owner] });
+  const launch = await guard.beginLaunch(f.client); await f.leases.at(-1).close();
+  f.setSnapshot({ complete: true, processes: [{ ...owner, pid: 9986, name: 'java.exe', commandLine: `java @args ${launch.jvmArgument}` }] });
+  assert.equal(await f.makeGuard({ isCurrentUnrelatedServer: () => true }).status(f.client), 'running');
+});
+
+test('indirect failed provider and copied server-looking marker never prove unrelated', async t => {
+  const f = fixture(t);
+  f.setSnapshot({ complete: true, processes: [{ ...owner, pid: 9987, name: 'java.exe',
+    commandLine: 'java -Dminecraft.core.server.launch=b09956c1-1daa-4fb9-a8fe-bf6d401c04bc @win_args.txt nogui' }] });
+  for (const isCurrentUnrelatedServer of [undefined, () => false, () => { throw new Error('unavailable'); }, async () => { throw new Error('unavailable'); }]) {
+    assert.equal(await f.makeGuard({ ...(isCurrentUnrelatedServer ? { isCurrentUnrelatedServer } : {}) }).status(f.client), 'uncertain');
+  }
+});
+
+test('indirect uncertainty gives actionable close-and-retry guidance', async t => {
+  const f = fixture(t);
+  f.setSnapshot({ complete: true, processes: [{ ...owner, pid: 9988, name: 'javaw.exe', commandLine: 'javaw @unknown.txt' }] });
+  await assert.rejects(f.makeGuard().withMutation(f.client, () => assert.fail('unknown client admitted')), error => {
+    assert.equal(error.code, 'RECOVERY_REQUIRED'); assert.match(error.message, /close.+retry/iu); return true;
+  });
+});
+
+test('indirect unreadable identity cannot be overridden by a positive provider', async t => {
+  const f = fixture(t);
+  f.setSnapshot({ complete: true, processes: [{ ...owner, pid: 9989, name: 'java.exe', commandLine: 'java @args.txt', creationTime: null }] });
+  const guard = f.makeGuard({ isCurrentUnrelatedServer: () => true });
+  assert.equal(await guard.status(f.client), 'uncertain');
+  await assert.rejects(guard.withMutation(f.client, () => assert.fail('incomplete identity admitted')), { code: 'RECOVERY_REQUIRED' });
+});
+
+for (const recordState of ['missing', 'settled', 'stale']) {
+  for (const form of ['separate', 'equals']) test(`${recordState} record does not admit an unowned same-root game with ${form} gameDir`, async t => {
+    const f = fixture(t);
+    const spacedPath = path.join(f.root, 'client with spaces'); fs.renameSync(f.client.clientPath, spacedPath); f.client.clientPath = spacedPath;
+    if (recordState !== 'missing') {
+      const launch = await f.makeGuard().beginLaunch(f.client);
+      if (recordState === 'settled') await launch.abortBeforeSpawn();
+      else await f.leases[0].close();
+    }
+    const game = { ...owner, pid: 9981, name: 'javaw.exe', executablePath: 'C:\\Java\\javaw.exe',
+      commandLine: `java net.minecraft.client.main.Main --gameDir${form === 'equals' ? '=' : ' '}"${f.client.clientPath}"` };
+    f.setSnapshot({ complete: true, processes: [game] });
+    assert.equal(await f.makeGuard().status(f.client), 'running');
+    await assert.rejects(f.makeGuard().withMutation(f.client, () => assert.fail('unowned game admitted')), { code: 'CLIENT_RUNNING' });
+  });
+}
+
+for (const recordState of ['missing', 'settled']) test(`${recordState} record fails closed on unreadable relevant Java details but allows a canonical unrelated root`, async t => {
+  const f = fixture(t);
+  if (recordState === 'settled') await (await f.makeGuard().beginLaunch(f.client)).abortBeforeSpawn();
+  const other = path.join(f.root, 'unrelated game'); fs.mkdirSync(other);
+  const java = { ...owner, pid: 9982, name: 'java.exe', executablePath: 'C:\\Java\\java.exe' };
+  for (const commandLine of [null, 'java net.minecraft.client.main.Main', 'java net.minecraft.client.main.Main --gameDir relative', 'java --gameDir "unterminated',
+    `java --gameDir "${f.client.clientPath}" --gameDir "${other}"`, `java --gameDir "${path.join(f.root, 'unreadable-or-missing')}"`]) {
+    f.setSnapshot({ complete: true, processes: [{ ...java, commandLine }] });
+    assert.equal(await f.makeGuard().status(f.client), 'uncertain');
+    await assert.rejects(f.makeGuard().withMutation(f.client, () => assert.fail('uncertain Java admitted')), { code: 'RECOVERY_REQUIRED' });
+  }
+  f.setSnapshot({ complete: true, processes: [{ ...java, creationTime: null, commandLine: `java --gameDir "${f.client.clientPath}"` }] });
+  assert.equal(await f.makeGuard().status(f.client), 'uncertain');
+  f.setSnapshot({ complete: true, processes: [{ ...java, commandLine: `java net.minecraft.client.main.Main --gameDir "${other}"` }] });
+  assert.equal(await f.makeGuard().withMutation(f.client, () => 'unrelated root allowed'), 'unrelated root allowed');
+  f.setSnapshot({ complete: true, processes: [{ ...java, creationTime: null, commandLine: `java --gameDir "${other}"` }] });
+  assert.equal(await f.makeGuard().status(f.client), 'stopped'); // Visibility irrelevant to this proven different root.
+  f.setSnapshot({ complete: true, processes: [{ ...java, commandLine: 'java -jar unrelated-server.jar' }] });
+  assert.equal(await f.makeGuard().status(f.client), 'stopped');
+});
+
+test('canonical process root aliases cannot hide an unowned game behind a different path spelling', async t => {
+  const f = fixture(t);
+  for (const gameDir of [f.client.clientPath + '/', `${f.client.clientPath}${path.sep}..${path.sep}client`,
+    ...(process.platform === 'win32' ? [f.client.clientPath.toUpperCase()] : [])]) {
+    f.setSnapshot({ complete: true, processes: [{ ...owner, pid: 9983, name: 'javaw.exe', commandLine: `java --gameDir "${gameDir}"` }] });
+    assert.equal(await f.makeGuard().status(f.client), 'running', gameDir);
+  }
+});
+
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-client-guard-'));
   const clientPath = path.join(root, 'client');

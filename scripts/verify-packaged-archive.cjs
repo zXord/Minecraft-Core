@@ -22,7 +22,7 @@ const MANIFEST_IDENTITIES = deepFreeze({
   },
   'archive-worker-x64.json': {
     size: 365,
-    sha256: 'b4c72d9e40448d581b31266b4c9ebcef5f075a342d7f3faa3e3348af28638882'
+    sha256: '2a7677cc7f27ab6e1b5c66243ee57551b85e29e627fec50069f4e0dec22a4b83'
   }
 });
 

@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
-const { captureServerDirectoryCopySource } = require('../../electron/services/modpack-lifecycle/server-directory-identity.cjs');
+const { captureServerDirectoryCopySource, identifyServerDirectory } = require('../../electron/services/modpack-lifecycle/server-directory-identity.cjs');
 const { ClientPackStateStore } = require('../../electron/services/client-modpacks/client-pack-state.cjs');
 const { ClientPackTransaction } = require('../../electron/services/client-modpacks/client-pack-transaction.cjs');
 const reparseInspector = { async isReparsePoint() { return false; } };
@@ -37,6 +37,97 @@ function fixture(t) {
 async function stage(f, overrides = {}) {
   return f.tx.stage({ target: f.target, baseline: await captureServerDirectoryCopySource(f.live, { reparseInspector }), oldManifest: await f.stateStore.read(f.live), prepared: f.prepared, descriptor, optionalFileIds: [], conflictChoices: {}, ...overrides });
 }
+
+// Durable fixtures model abrupt exit, not stage()'s same-process catch/abandon.
+async function interruptedIntent(f, boundary) {
+  const operationId = '99999999-9999-4999-8999-999999999999';
+  const baseline = await captureServerDirectoryCopySource(f.live, { reparseInspector });
+  const paths = f.tx._paths(f.target, operationId);
+  const record = { schemaVersion: 1, operationId, clientId: f.target.clientId, clientPath: f.live,
+    parentIdentity: await identifyServerDirectory(path.dirname(f.live), { reparseInspector }),
+    oldTree: { directoryIdentity: baseline.directoryIdentity, fingerprint: baseline.fingerprint },
+    candidateIdentity: null, candidateTree: null, phase: 'preparing' };
+  await f.durableFs.writeJsonAtomicAsync(paths.journalPath, record);
+  if (boundary === 'before-proof-completion') write(f.dependencies.journalRoot, 'interrupted-proof.tmp', 'incomplete auxiliary write');
+  if (boundary === 'before-mkdir') {
+    const stat = fs.statSync(f.live, { bigint: true });
+    const root = { path: '', pathKey: '', type: 'directory', size: '0', sha256: null,
+      dev: stat.dev.toString(), ino: stat.ino.toString(), birthtime: stat.birthtimeNs.toString() };
+    await f.durableFs.writeJsonAtomicAsync(f.tx._retainedPaths(f.target, operationId, 'previous').proofPath,
+      { schemaVersion: 1, operationId, clientId: f.target.clientId, clientPath: f.live, role: 'previous',
+        parentIdentity: record.parentIdentity, tree: record.oldTree, entries: [[...baseline.entries, root]] });
+  }
+  return { paths, record, baseline };
+}
+
+for (const boundary of ['after-intent', 'before-proof-completion', 'before-mkdir']) test(`reopened ${boundary} intent settles only proven no-side-effect state and admits next install`, async t => {
+  const f = fixture(t); const { record, baseline, paths } = await interruptedIntent(f, boundary);
+  const reopened = new ClientPackTransaction(f.dependencies);
+  const { ClientProcessGuard } = require('../../electron/services/client-modpacks/client-process-guard.cjs');
+  const { createClientPackIntegration } = require('../../electron/services/client-modpacks/client-pack-integration.cjs');
+  const guardRoot = path.join(f.root, 'guard'); fs.mkdirSync(guardRoot);
+  const guard = new ClientProcessGuard({ root: guardRoot, durableFs: f.durableFs, inspectProcesses: async () => ({ complete: true,
+    processes: [{ pid: process.pid, parentPid: process.ppid, creationTime: 'inert-owner', executablePath: process.execPath, commandLine: 'node inert-owner' }] }) });
+  const integration = createClientPackIntegration({ resolveClient: async () => f.target, resolveClientByPath: async () => f.target,
+    processGuard: guard, transaction: reopened, stateStore: f.stateStore,
+    managementClient: { readRequirement: async () => ({ descriptor: null, binding: null }) } });
+  await assert.rejects(integration.beginManagedLaunch({ clientPath: f.live }), { code: 'RECOVERY_REQUIRED' });
+  await assert.rejects(reopened.assertNoUnsettledAtPath(f.live), { code: 'RECOVERY_REQUIRED' });
+  assert.deepEqual(await reopened.recover(f.target, { quiescent: true }), { phase: 'abandoned', operationId: record.operationId });
+  const after = await captureServerDirectoryCopySource(f.live, { reparseInspector });
+  assert.equal(after.fingerprint, baseline.fingerprint); assert.deepEqual(after.directoryIdentity, baseline.directoryIdentity);
+  assert.equal(fs.existsSync(paths.candidatePath), false); assert.equal(fs.existsSync(paths.previousPath), false);
+  await reopened.assertNoUnsettledAtPath(f.live);
+  const launch = await integration.beginManagedLaunch({ clientPath: f.live }); await launch.abortBeforeSpawn();
+  assert.equal((await new ClientPackTransaction(f.dependencies).recover(f.target)).phase, 'abandoned');
+  f.tx = reopened;
+  const next = await stage(f); await reopened.seal(next); await reopened.publish(next);
+  assert.equal((await reopened.status(f.target)).phase, 'committed');
+});
+
+for (const control of ['unbound-candidate', 'previous', 'changed-live', 'substituted-live', 'substituted-parent', 'inaccessible-path', 'uncertain-runtime']) {
+  test(`reopened null-identity intent refuses ${control} without guessing ownership`, async t => {
+    const f = fixture(t); const { paths } = await interruptedIntent(f, 'after-intent');
+    if (control === 'unbound-candidate') fs.mkdirSync(paths.candidatePath);
+    if (control === 'previous') fs.mkdirSync(paths.previousPath);
+    if (control === 'changed-live') write(f.live, 'options.txt', 'latest personal bytes');
+    if (control === 'substituted-live') { fs.renameSync(f.live, f.live + '-original'); fs.mkdirSync(f.live); }
+    if (control === 'substituted-parent') {
+      const record = JSON.parse(fs.readFileSync(paths.journalPath)); record.parentIdentity.fileId = '0'; fs.writeFileSync(paths.journalPath, JSON.stringify(record));
+    }
+    const inspector = control === 'inaccessible-path' ? { async isReparsePoint() { throw new Error('fixture access denied'); } } : reparseInspector;
+    const reopened = new ClientPackTransaction({ ...f.dependencies, reparseInspector: inspector });
+    const journalBefore = fs.readFileSync(paths.journalPath);
+    await assert.rejects(reopened.recover(f.target, { quiescent: control !== 'uncertain-runtime' }));
+    assert.deepEqual(fs.readFileSync(paths.journalPath), journalBefore);
+    if (control === 'unbound-candidate') assert.equal(fs.existsSync(paths.candidatePath), true);
+    if (control === 'previous') assert.equal(fs.existsSync(paths.previousPath), true);
+  });
+}
+
+for (const phase of ['preparing', 'ready']) test(`${phase} pre-publication abandonment preserves changed personal bytes without relaxing publish`, async t => {
+  const f = fixture(t); const context = await stage(f);
+  if (phase === 'ready') await f.tx.seal(context);
+  write(f.live, 'client-config.json', 'latest personal bytes');
+  if (phase === 'ready') await assert.rejects(f.tx.publish(context));
+  const reopened = new ClientPackTransaction(f.dependencies);
+  await assert.rejects(reopened.recover(f.target, { quiescent: false }));
+  assert.equal((await reopened.recover(f.target, { quiescent: true })).phase, 'abandoned');
+  assert.equal(fs.readFileSync(path.join(f.live, 'client-config.json'), 'utf8'), 'latest personal bytes');
+  assert.equal(fs.existsSync(context.previousPath), false); assert.equal(fs.existsSync(context.candidatePath), true);
+  await reopened.assertNoUnsettledAtPath(f.live);
+});
+
+for (const control of ['previous', 'substituted-live', 'substituted-candidate']) test(`changed-live settlement refuses ${control} evidence`, async t => {
+  const f = fixture(t); const context = await stage(f); await f.tx.seal(context);
+  write(f.live, 'client-config.json', 'latest personal bytes');
+  if (control === 'previous') fs.mkdirSync(context.previousPath);
+  if (control === 'substituted-live') { fs.renameSync(f.live, f.live + '-original'); fs.mkdirSync(f.live); }
+  if (control === 'substituted-candidate') { fs.renameSync(context.candidatePath, context.candidatePath + '-original'); fs.mkdirSync(context.candidatePath); }
+  const bytes = fs.readFileSync(context.journalPath);
+  await assert.rejects(new ClientPackTransaction(f.dependencies).recover(f.target, { quiescent: true }));
+  assert.deepEqual(fs.readFileSync(context.journalPath), bytes);
+});
 const githubDescriptor = { ...descriptor, source: { provider: 'github', repositoryId: '1', githubOwner: 'Example', githubRepo: 'Pack', releaseId: '2', assetId: '3' } };
 const multimcPrepared = (f, lwjglVersion = '3.3.1') => ({ ...f.prepared, optionalFileIds: [], contentFormat: 'multimc', runtimeConstraints: { lwjglVersion } });
 

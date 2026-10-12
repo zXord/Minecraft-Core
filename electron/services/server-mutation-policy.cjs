@@ -142,6 +142,9 @@ const SERVER_WRITER_POLICIES = Object.freeze({
   ...CORE_SERVER_WRITER_POLICIES,
   ...CONTENT_SERVER_WRITER_POLICIES,
   'modpacks:start-operation': internalPolicy('modpack-lifecycle-operation'),
+  // Reconciliation observes an already-issued launch and may drain its owned
+  // terminal settlement; the lifecycle service retains that mutation authority.
+  'modpacks:reconcile-new-server-launch': internalPolicy('modpack-lifecycle-launch-reconciliation'),
   'modpacks:recover': internalPolicy('modpack-lifecycle-recovery'),
   'modpacks:verify': internalPolicy('modpack-lifecycle-verify'),
   'modpacks:perform-safe-action': internalPolicy('modpack-lifecycle-safe-action')
@@ -430,13 +433,14 @@ function createServerMutationPolicy({
           if (clients.length !== 1 || !descriptor.instanceTypes?.includes('client') ||
               !pathIsInside(selector.serverPath, clients[0].path)) throw invalidRequest();
           const client = clients[0];
-          if (channel === 'minecraft-launch' || CLIENT_SAFE_SETTINGS_CHANNELS.has(channel)) result = await perform();
+          if (channel === 'minecraft-launch') result = await perform();
           else {
             const integration = getClientPackIntegration();
-            if (!integration || typeof integration.runLegacyMutation !== 'function') {
+            const method = CLIENT_SAFE_SETTINGS_CHANNELS.has(channel) ? 'runPersonalMutation' : 'runLegacyMutation';
+            if (!integration || typeof integration[method] !== 'function') {
               throw new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client services are not ready');
             }
-            result = await integration.runLegacyMutation({ clientId: client.id, clientPath: client.path }, perform);
+            result = await integration[method]({ clientId: client.id, clientPath: client.path }, perform);
           }
         } else {
           if (getClientPackIntegration && !CLIENT_SAFE_SETTINGS_CHANNELS.has(channel)) {

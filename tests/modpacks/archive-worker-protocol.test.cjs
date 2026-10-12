@@ -2119,6 +2119,7 @@ test('durable client frames a bounded identity-bound directory batch in one nati
   assert.equal(request.directories.every(entry => entry.directoryIdentity.fileType === 'directory'), true);
   assert.equal(Object.isFrozen(client.capabilities), true);
   assert.deepEqual(client.capabilities, {
+    deleteFileExactFlushesParent: true,
     moveWriteThroughFlushesParents: true,
     reconcileMoveWriteThrough: true
   });

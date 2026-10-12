@@ -1485,7 +1485,7 @@ test('verification continuity restored evidence still requires fresh repair insp
   } finally { await fixture.close(); }
 });
 
-test('verification continuity restored evidence cannot bypass stale-plan repair re-review', async () => {
+test('verification continuity post-invocation stale repair rejection remains unknown without a duplicate Start', async () => {
   const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { rejectFirstRepairStart: true } });
   try {
     const { page } = fixture;
@@ -1497,11 +1497,43 @@ test('verification continuity restored evidence cannot bypass stale-plan repair 
     await page.getByRole('button', { name: 'Review repair', exact: true }).click();
     await page.getByRole('button', { name: /Local archive/u }).click();
     await startReviewedArchive(page);
-    await expect(page.getByText('Reviewed plan needs a fresh preflight', { exact: true })).toBeVisible();
+    await expect(page.getByText(/Start outcome is unknown/u).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Start reviewed operation', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Run a fresh preflight review', exact: true })).toHaveCount(0);
+    // Repeated activation cannot convert an invoked error into permission to
+    // retry Start; the renderer has no authoritative no-start evidence.
+    await page.getByRole('button', { name: 'Start reviewed operation', exact: true }).evaluate(button => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
     await expect(page.getByRole('button', { name: 'Start reviewed operation', exact: true })).toBeDisabled();
     const rejected = fixture.readState().lifecycleCalls;
     expect(rejected.filter(call => call.method === 'startOperation')).toEqual([]);
     expect(rejected.filter(call => call.method === 'startOperationRejected')).toEqual([
+      expect.objectContaining({ operationKind: 'repair', code: 'PLAN_STALE' })
+    ]);
+    expect(rejected.filter(call => call.method === 'verify')).toHaveLength(1);
+  } finally { await fixture.close(); }
+});
+
+test('verification continuity pre-invocation stale repair preflight requires fresh review before its only Start', async () => {
+  const fixture = await harness.launchModpackApp({ profile: 'managed', refreshFixture: { rejectFirstRepairPreflight: true } });
+  try {
+    const { page } = fixture;
+    const job = await startFixtureVerification(fixture);
+    await expect(page.getByRole('region', { name: 'Last verification', exact: true })).toContainText(job.jobId);
+    await openDashboard(page);
+    await fixture.openModpack();
+    await page.getByRole('button', { name: 'Actions', exact: true }).click();
+    await page.getByRole('button', { name: 'Review repair', exact: true }).click();
+    await page.getByRole('button', { name: /Local archive/u }).click();
+    await page.getByRole('button', { name: 'Review planned changes', exact: true }).click();
+    await expect(page.getByText('Reviewed plan needs to be refreshed', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Review planned changes', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Start reviewed operation', exact: true })).toHaveCount(0);
+    const rejected = fixture.readState().lifecycleCalls;
+    expect(rejected.filter(call => call.method === 'startOperation')).toEqual([]);
+    expect(rejected.filter(call => call.method === 'createPlanRejected')).toEqual([
       expect.objectContaining({ operationKind: 'repair', code: 'PLAN_STALE' })
     ]);
     await page.getByRole('button', { name: 'Run a fresh preflight review', exact: true }).click();
@@ -1510,7 +1542,7 @@ test('verification continuity restored evidence cannot bypass stale-plan repair 
     await startReviewedArchive(page);
     await expectCompleted(page);
     const calls = fixture.readState().lifecycleCalls;
-    expect(calls.filter(call => call.method === 'createPlan' && call.planId).length).toBeGreaterThan(1);
+    expect(calls.filter(call => call.method === 'createPlan' && call.planId)).toHaveLength(1);
     expect(calls.filter(call => call.method === 'startOperation')).toEqual([expect.objectContaining({ operationKind: 'repair' })]);
     expect(calls.filter(call => call.method === 'verify')).toHaveLength(1);
     expect(calls.filter(call => call.method === 'createManagementPlan')).toEqual([]);

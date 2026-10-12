@@ -11,7 +11,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
 const MARKER = '-Dminecraft.core.clientLaunchId=';
 
 function failure(code = 'RECOVERY_REQUIRED', cause) {
-  return Object.assign(new Error(code === 'CLIENT_RUNNING' ? 'The client is running or preparing to launch' : 'Client process state could not be proven stopped'), { code, cause });
+  return Object.assign(new Error(code === 'CLIENT_RUNNING' ? 'The client is running, launching, or busy installing a pack. Wait for it to finish, then retry.' : 'Client process state could not be proven stopped. Close the game or launcher, then retry. If an app-owned server cannot be verified, stop and start that server normally.'), { code, cause });
 }
 
 function durableIdentity(snapshotIdentity) {
@@ -39,17 +39,70 @@ function hasMarker(commandLine, launchId) {
   return typeof commandLine === 'string' && commandLine.split(/\s+/u).some(token => token.replace(/^"|"$/gu, '') === `${MARKER}${launchId}`);
 }
 
+// Windows argv quoting, bounded by the snapshot's 32 KiB command-line limit.
+// Do not split quoted game directories on whitespace or guess relative roots.
+function commandArguments(commandLine) {
+  if (typeof commandLine !== 'string' || !commandLine.trim()) throw failure();
+  const args = []; let token = ''; let quoted = false; let started = false;
+  for (let index = 0; index < commandLine.length; index++) {
+    const char = commandLine[index];
+    if (char === '\\') {
+      let end = index; while (commandLine[end] === '\\') end++;
+      const count = end - index;
+      if (commandLine[end] === '"') {
+        token += '\\'.repeat(Math.floor(count / 2));
+        if (count % 2) token += '"'; else quoted = !quoted;
+        index = end;
+      } else { token += '\\'.repeat(count); index = end - 1; }
+      started = true;
+    } else if (char === '"') { quoted = !quoted; started = true; }
+    else if (/\s/u.test(char) && !quoted) {
+      if (started) args.push(token);
+      token = ''; started = false;
+    } else { token += char; started = true; }
+  }
+  if (quoted) throw failure();
+  if (started) args.push(token);
+  return args;
+}
+
+async function unownedGameStatus(item, target, isCurrentUnrelatedServer) {
+  if (!/^javaw?(?:\.exe)?$/iu.test(item.name)) return 'stopped';
+  const args = commandArguments(item.commandLine);
+  const directories = [];
+  const indirect = args.some(argument => argument.startsWith('@') || /^org\.(?:prismlauncher|multimc)\.EntryPoint$/iu.test(argument));
+  if (indirect && !validIdentity(item)) return 'uncertain';
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === '--gameDir') directories.push(args[++index]);
+    else if (args[index].startsWith('--gameDir=')) directories.push(args[index].slice(10));
+  }
+  if (!directories.length) {
+    if (indirect) return await isCurrentUnrelatedServer({ process: item, clientPath: target.clientPath }) === true ? 'stopped' : 'uncertain';
+    // A recognisable game without an absolute root cannot establish non-use.
+    return /net\.minecraft\.(?:client|launchwrapper)|net\.fabricmc|org\.quiltmc|cpw\.mods\.(?:bootstraplauncher|modlauncher)/iu.test(item.commandLine) ? 'uncertain' : 'stopped';
+  }
+  if (directories.length !== 1 || typeof directories[0] !== 'string' || !path.isAbsolute(directories[0])) return 'uncertain';
+  const canonical = fs.realpathSync.native(directories[0]);
+  const normalized = process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+  if (normalized === target.clientPath) return validIdentity(item) ? 'running' : 'uncertain';
+  if (indirect) return await isCurrentUnrelatedServer({ process: item, clientPath: target.clientPath }) === true ? 'stopped' : 'uncertain';
+  return 'stopped';
+}
+
 class ClientProcessGuard {
   constructor({ root, durableFs, inspectProcesses = createClientProcessInspector(),
-    acquireEndpointLease = acquireProcessBoundLocalEndpointLease, randomUUID = crypto.randomUUID } = {}) {
+    acquireEndpointLease = acquireProcessBoundLocalEndpointLease, randomUUID = crypto.randomUUID,
+    isCurrentUnrelatedServer = () => false } = {}) {
     if (typeof root !== 'string' || !path.isAbsolute(root) || !durableFs ||
         typeof durableFs.readFileBoundedAsync !== 'function' || typeof durableFs.writeJsonAtomicAsync !== 'function' ||
-        typeof inspectProcesses !== 'function' || typeof acquireEndpointLease !== 'function' || typeof randomUUID !== 'function') throw failure();
+        typeof inspectProcesses !== 'function' || typeof acquireEndpointLease !== 'function' || typeof randomUUID !== 'function' ||
+        typeof isCurrentUnrelatedServer !== 'function') throw failure();
     this.root = fs.realpathSync.native(root);
     this.durableFs = durableFs;
     this.inspectProcesses = inspectProcesses;
     this.acquireEndpointLease = acquireEndpointLease;
     this.randomUUID = randomUUID;
+    this.isCurrentUnrelatedServer = isCurrentUnrelatedServer;
     this.active = new Map();
   }
 
@@ -109,15 +162,22 @@ class ClientProcessGuard {
   async _status(target) {
     try {
       const record = await this._read(target);
-      if (!record || record.phase === 'settled') return 'stopped';
       const { processes } = await this._snapshot();
-      if (processes.some(item => hasMarker(item.commandLine, record.launchId))) return 'running';
-      if (record.child && processes.some(item => sameIdentity(item, record.child))) return 'running';
-      if (processes.some(item => (item.pid === record.owner.pid || item.pid === record.child?.pid ||
-          /^javaw?(?:\.exe)?$/iu.test(item.name)) && !validIdentity(item))) return 'uncertain';
-      // A still-preparing owner can spawn immediately after this snapshot.
-      if (processes.some(item => sameIdentity(item, record.owner))) return 'uncertain';
-      return 'stopped';
+      if (record && record.phase !== 'settled') {
+        if (processes.some(item => hasMarker(item.commandLine, record.launchId))) return 'running';
+        if (record.child && processes.some(item => sameIdentity(item, record.child))) return 'running';
+        if (processes.some(item => (item.pid === record.owner.pid || item.pid === record.child?.pid) && !validIdentity(item))) return 'uncertain';
+        // A still-preparing owner can spawn immediately after this snapshot.
+        if (processes.some(item => sameIdentity(item, record.owner))) return 'uncertain';
+      }
+      let uncertain = false;
+      for (const item of processes) {
+        let status;
+        try { status = await unownedGameStatus(item, target, this.isCurrentUnrelatedServer); } catch { status = 'uncertain'; }
+        if (status === 'running') return 'running';
+        if (status === 'uncertain') uncertain = true;
+      }
+      return uncertain ? 'uncertain' : 'stopped';
     } catch { return 'uncertain'; }
   }
 

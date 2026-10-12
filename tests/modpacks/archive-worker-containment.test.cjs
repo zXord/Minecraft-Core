@@ -937,7 +937,11 @@ test('handle-bound publication has preventive substitution pins and one crash-at
   assert.ok(moveStart >= 0 && sourceValidation > moveStart && destinationValidation > sourceValidation);
   assert.ok(rename > destinationValidation && oldObjectValidation > rename && parentFlush > oldObjectValidation);
   assert.equal((durability.match(/HandleBoundRename\.Move\(/g) || []).length, 1);
-  assert.equal((durability.match(/NativeMethods\.SetFileInformationByHandle\(/g) || []).length, 1);
+  // The separate exact-file deletion primitive also uses this Windows API.
+  // Publication still has exactly one rename, not a rename/delete fallback.
+  assert.equal((durability.match(/NativeMethods\.SetFileInformationByHandle\(/g) || []).length, 2);
+  assert.equal((durability.match(/NativeMethods\.SetFileInformationByHandle\(source, NativeMethods\.FileRenameInfoEx/g) || []).length, 1);
+  assert.equal((durability.match(/NativeMethods\.SetFileInformationByHandle\(leaf\.Handle, NativeMethods\.FileDispositionInfo/g) || []).length, 1);
   assert.match(durability, /FileShareRead\s*\|\s*\(pinWrite \? 0u : NativeMethods\.FileShareWrite\)/);
   assert.doesNotMatch(durability, /ReplaceFile|MoveFileEx|backupFile|recoveryBackup/);
 });

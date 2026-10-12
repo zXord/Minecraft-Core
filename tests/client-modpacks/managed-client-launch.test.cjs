@@ -289,6 +289,7 @@ test('renderer-shaped launch options cannot supply a managed hook to an unmanage
 
 test('failed post-spawn identity publication retains exact child and reservation until close', async t => {
   const f = fixture(t);
+  const visibleProcesses = f.guard.inspectProcesses;
   const launcher = new ProperMinecraftLauncher({ beginManagedLaunch: f.hook, isProcessAlive: () => true,
     spawn(command, args) { const child = f.spawn(command, args); f.guard.inspectProcesses = async () => { throw new Error('query denied after spawn'); }; return child; }
   });
@@ -299,6 +300,8 @@ test('failed post-spawn identity publication retains exact child and reservation
   assert.equal(launcher.isLaunching, true);
   await assert.rejects(f.guard.withMutation(f.client, () => assert.fail('failed attach released child')), blocked);
   f.child.emit('close', 0); await f.reservation.close();
+  await assert.rejects(f.guard.withMutation(f.client, () => assert.fail('denied inspection became stopped')), error => error.code === 'RECOVERY_REQUIRED');
+  f.guard.inspectProcesses = visibleProcesses;
   assert.equal(await f.guard.withMutation(f.client, () => 'safe'), 'safe');
 });
 

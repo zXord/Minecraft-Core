@@ -91,7 +91,9 @@ function createClientPackComposition(input) {
     sourceResolver, artifactAcquisition, archiveInspector, clientCandidatePreparer, clock: () => clock.now() });
   const stateStore = new ClientPackStateStore({ durableFs });
   const transaction = new ClientPackTransaction({ journalRoot, durableFs, stateStore, reparseInspector });
-  const processGuard = new ClientProcessGuard({ root: processRoot, durableFs: authorityFs, randomUUID });
+  const processGuard = new ClientProcessGuard({ root: processRoot, durableFs: authorityFs, randomUUID,
+    ...(input.clientProcessInspector === undefined ? {} : { inspectProcesses: input.clientProcessInspector }),
+    isCurrentUnrelatedServer: input.isCurrentUnrelatedServer ?? require('../services/server-process-runner.cjs').sharedServerProcessRunner.isCurrentUnrelatedServer });
   const ownership = new ClientRuntimeOwnership({ root: runtimeRoot, durableFs: authorityFs, workerDurableConfig: clientWorkerDurableConfig });
   const runtimeInstaller = new ClientRuntimeInstaller({ ownership });
   const sessionClock = () => { const value = clock.now(); return value instanceof Date ? value.getTime() : value; };

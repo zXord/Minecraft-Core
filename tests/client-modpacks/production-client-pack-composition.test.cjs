@@ -4,16 +4,26 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { EventEmitter } = require('node:events');
+const { PassThrough } = require('node:stream');
+// A missing production injection must fail inertly even during RED, never start CIM.
+const inspectorModule = require('../../electron/services/client-modpacks/client-process-inspector.cjs');
+const originalInspectorFactory = inspectorModule.createClientProcessInspector;
+let deniedSystemProbes = 0;
+inspectorModule.createClientProcessInspector = () => async () => { deniedSystemProbes++; throw new Error('fixture forbids system process inspection'); };
 const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
 const { ModpackStateRepository } = require('../../electron/services/modpacks/state/modpack-state-repository.cjs');
 const { createClientPackComposition } = require('../../electron/bootstrap/create-client-pack-composition.cjs');
+const { createServerProcessRunner } = require('../../electron/services/server-process-runner.cjs');
+inspectorModule.createClientProcessInspector = originalInspectorFactory;
 
 // Independently hashed, hand-specified canonical identity for the fixture below;
 // never derive the expected fingerprint with serverPackFingerprint.
 const fingerprint = 'a483152d67a62ce78f4bfb9fd2ee9846469060a21b9dc02a4111d31b88067585';
 const unexpected = () => assert.fail('Status and asset listing must not acquire or prepare artifacts');
 
-async function fixture(t, { managed = true, missing = false, managedJar = false, client = false, readClientConfig } = {}) {
+async function fixture(t, { managed = true, missing = false, managedJar = false, client = false, readClientConfig,
+  processEvidenceFactory, managementSessionRequestJson } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-client-composition-'));
   const serverPath = path.join(root, 'registered-server');
   fs.mkdirSync(serverPath);
@@ -50,10 +60,14 @@ async function fixture(t, { managed = true, missing = false, managedJar = false,
   const instances = [{ id: 'server-one', type: 'server', path: serverPath }];
   const clientPath = path.join(root, 'registered-client');
   if (client) { fs.mkdirSync(clientPath); instances.push({ id: 'local-client', type: 'client', path: clientPath }); }
+  const evidence = processEvidenceFactory ? await processEvidenceFactory({ root, serverPath, clientPath }) : {};
   composition = createClientPackComposition({
     userDataPath: path.join(root, 'app-data'),
     store: { get(key) { assert.equal(key, 'instances'); return instances; } },
     readClientConfig,
+    managementSessionRequestJson,
+    clientProcessInspector: async () => ({ complete: true, processes: [] }),
+    ...evidence,
     clientDurableFsFactory: durableFsFactory,
     clientWorkerDurableConfig: { workerPath: path.join(root, 'ArchiveWorker.exe'), workerManifestPath: path.join(root, 'manifest.json'), appOwnedRoot: root },
     stateRepository: repository,
@@ -81,8 +95,50 @@ async function fixture(t, { managed = true, missing = false, managedJar = false,
     reparseInspector: { async isReparsePoint() { return false; } }, randomUUID: crypto.randomUUID, clock: { now: () => 0 }
   });
   await composition.initialize();
-  return { service: composition.companionService, composition, instances, clientPath, repositoryFs, serverPath };
+  return { service: composition.companionService, composition, instances, clientPath, repositoryFs, serverPath, evidence };
 }
+
+for (const provider of ['exact', 'absent', 'failed']) test(`evidence composition ${provider} server proof controls matching-client guarded launch`, async t => {
+  const initialDeniedProbes = deniedSystemProbes;
+  const config = { serverProtocol: 'http', serverIp: 'inert.invalid', serverPort: '8443', clientId: 'fixture-remote',
+    clientName: 'Inert fixture', inviteSecret: 'fixture-only', sessionToken: 'fixture-only' };
+  const f = await fixture(t, { client: true, readClientConfig: async () => config,
+    managementSessionRequestJson: async () => ({ statusCode: 200, body: { clientModpack: null } }),
+    async processEvidenceFactory({ root, serverPath }) {
+      const owner = { pid: process.pid, parentPid: process.ppid, name: 'node.exe', creationTime: 'fixture-main', executablePath: process.execPath, commandLine: 'node inert-composition' };
+      let row;
+      const child = new EventEmitter(); child.pid = 5700; child.exitCode = null; child.signalCode = null; child.killed = false;
+      child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough();
+      child.kill = () => assert.fail('composition proof must not kill a healthy server');
+      const eventBus = new EventEmitter(); eventBus.on('server-process-owned', value => value.acknowledge({ ...value, ready: Promise.resolve() }));
+      const runtime = { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.3.12', javaMajor: 17, os: 'win32', architecture: 'x64' };
+      const runner = createServerProcessRunner({ eventBus, supervisionRequired: () => true,
+        captureLaunchRoot: value => Object.freeze({ canonicalPath: value, identity: 'fixture-server-object' }),
+        inspectProcesses: async () => ({ complete: true, processes: [owner, row] }),
+        resolveLaunchPlan: () => ({ type: 'forge', loader: 'forge', runtime, jar: null, cwd: serverPath,
+          args: ['@user_jvm_args.txt', '@libraries/win_args.txt', 'nogui'], readyMarkers: ['READY'], fatalMarkers: ['FATAL'] }),
+        spawnProcess(file, args) { row = { pid: child.pid, parentPid: process.pid, name: 'java.exe', creationTime: 'fixture-server-start',
+          executablePath: file, commandLine: `"${file}" ${args.join(' ')}` }; return child; }
+      });
+      const handle = runner.launchServerProcess({ instanceId: 'server-one', operationId: 'composition-fixture', javaPath: path.join(root, 'java.exe'),
+        serverPath, runtime, maxRam: 4, publishEvents: false, onLine() {} });
+      t.after(() => child.emit('close', 0, null)); await new Promise(resolve => setImmediate(resolve));
+      return { clientProcessInspector: async () => ({ complete: true, processes: [owner, row] }),
+        isCurrentUnrelatedServer: provider === 'exact' ? runner.isCurrentUnrelatedServer : provider === 'failed' ? () => { throw new Error('evidence unavailable'); } : undefined,
+        handle };
+    }
+  });
+  const integration = f.composition.clientPackIntegration;
+  if (provider === 'exact') {
+    assert.equal(await integration.runPersonalMutation({ clientId: 'local-client', clientPath: f.clientPath }, () => 'personal admitted'), 'personal admitted');
+    const launch = await integration.beginManagedLaunch({ clientPath: f.clientPath }); await launch.abortBeforeSpawn();
+    assert.equal(f.evidence.handle.isLive(), true);
+  } else {
+    await assert.rejects(integration.runPersonalMutation({ clientId: 'local-client', clientPath: f.clientPath }, () => assert.fail('unproven server admitted')), { code: 'RECOVERY_REQUIRED' });
+    await assert.rejects(integration.beginManagedLaunch({ clientPath: f.clientPath }), { code: 'RECOVERY_REQUIRED' });
+  }
+  assert.equal(deniedSystemProbes, initialDeniedProbes, 'composition must consume the inert inspector injection');
+});
 
 test('legacy composition hook resolves only the registered path and refuses replacement before dispatch', async t => {
   const config = { serverProtocol: 'https', serverIp: 'saved.test', serverPort: '8443', managementCertFingerprint: 'a'.repeat(64),

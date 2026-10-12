@@ -2216,6 +2216,7 @@
 
   .main-content {
     flex: 1;
+    min-width: 0;
     padding: 0;
     margin-left: 0;
     box-sizing: border-box; /* Match other containers */
@@ -2371,6 +2372,7 @@
   .content-panel {
     /* RESPONSIVE WIDTH FOR ALL TAB CONTENT */
     width: var(--content-area-width) !important;
+    max-width: 100%;
     margin: 0 auto;
     box-sizing: border-box !important;
     padding: 0 !important; /* Consistent padding */

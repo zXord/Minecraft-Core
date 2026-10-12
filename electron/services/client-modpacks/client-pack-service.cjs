@@ -197,11 +197,12 @@ class ClientPackService {
               try { releasedReservation = await this.runtimeInstaller.releaseReservedOperation(operation.operationId) === true; } catch { /* Unknown reservation remains recovery evidence. */ }
               if (!releasedReservation) throw fail('RECOVERY_REQUIRED', cause);
             }
-            if (context && !publicationStarted) {
+            if (context && (!publicationStarted || (cause.code === 'PLAN_STALE' && (await this.transaction.status(target))?.phase === 'ready'))) {
               let quiescent = !runtimeStarted;
               if (runtimeStarted) { try { quiescent = await this.runtimeInstaller.awaitQuiescence(operation.operationId) === true; } catch { quiescent = false; } }
               await this.transaction.abandon(context, { quiescent });
               if (operation.signal.aborted) throw fail('CANCELLED', cause);
+              if (publicationStarted) throw fail('PLAN_STALE', cause);
             } else if (!context) {
               const status = stageStatus;
               // No intent for this reserved operation means stage never owned a
@@ -283,7 +284,7 @@ class ClientPackService {
     return this.processGuard.withMutation(target, async () => {
       const status = await this.transaction.status(target);
       let quiescent = false;
-      if (status?.phase === 'preparing') {
+      if (status && ['preparing', 'ready'].includes(status.phase)) {
         try { quiescent = await this.runtimeInstaller.awaitQuiescence(status.operationId) === true; } catch { /* Unknown writer remains blocked. */ }
       }
       const recovered = await this.transaction.recover(target, { quiescent });

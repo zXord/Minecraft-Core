@@ -118,8 +118,8 @@ test('packaged verifier proves exact runtime, worker, notices, manifests, and co
     worker: {
       runtimeIdentifier: 'win-x64',
       runtimeMode: 'in-memory-single-file',
-      size: 67756659,
-      sha256: '7ed28b3f9be9b9a34875b5f42aef2bda1c2017b1b55567aafcbfe10a7a914ea3'
+      size: 67764851,
+      sha256: '279e3beb4c2b7e9425b7768be27764661eb53ff6e8d7b6da8823c3bfaff58083'
     },
     containment: 'passed',
     fallbacksUsed: []

@@ -16,6 +16,118 @@ const { createClientPackIntegration } = require('../../electron/services/client-
 const runtime = { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.3.12', javaMajor: 17, os: 'win32', architecture: 'x64' };
 const descriptor = { schemaVersion: 1, status: 'ready', serverFingerprint: 'a'.repeat(64), serverVersion: 'v1', source: { provider: 'modrinth', projectId: 'p', versionId: 'v' }, artifactSha256: 'b'.repeat(64), runtime };
 const reparseInspector = { async isReparsePoint() { return false; } };
+
+async function withPersonalHandlers(f, work) {
+  const Module = require('node:module'); const { EventEmitter } = require('node:events');
+  const originalLoad = Module._load;
+  const instances = [{ id: 'one', type: 'client', path: f.live }];
+  const store = new Map([['instances', instances]]);
+  const logger = { debug() {}, info() {}, warn() {}, error() {} };
+  const launcher = new EventEmitter(); launcher.getStatus = () => ({});
+  // External authentication is inert. Only token-free temp-fixture bytes exist.
+  launcher.authenticateWithMicrosoft = async () => ({ success: true });
+  launcher.checkAndRefreshAuth = async () => ({ success: true, refreshed: true });
+  launcher.clearAuthData = () => {};
+  launcher.saveAuthData = async root => { await fs.promises.writeFile(path.join(root, 'xmcl-auth.json'), '{"name":"fixture-only"}'); return { success: true }; };
+  const configManager = {
+    readClientConfig: root => { try { return JSON.parse(fs.readFileSync(path.join(root, 'client-config.json'), 'utf8')); } catch { return null; } },
+    getDefaultServerConfig: value => value, readServerConfig: () => null, updateServerConfig: () => true,
+    async setInstanceConfig(id, key, value) {
+      assert.equal(id, 'one'); const file = path.join(f.live, 'client-config.json');
+      await fs.promises.writeFile(file, JSON.stringify({ ...(this.readClientConfig(f.live) || {}), [key]: value }));
+    }
+  };
+  const modulePaths = ['../../electron/ipc/settings-handlers.cjs', '../../electron/ipc/minecraft-launcher-handlers.cjs'].map(require.resolve);
+  const savedCache = modulePaths.map(p => require.cache[p]);
+  Module._load = function(request, parent, isMain) {
+    if (request === 'electron') return { app: { getPath: () => path.dirname(f.live), getVersion: () => 'fixture' }, net: null, session: { defaultSession: null } };
+    if (request.endsWith('logger-handlers.cjs')) return { getLoggerHandlers: () => logger };
+    if (request.endsWith('services/minecraft-launcher/index.cjs')) return { getMinecraftLauncher: () => launcher };
+    if (request.endsWith('app-store.cjs')) return { get: key => store.get(key), set: (key, value) => store.set(key, value), delete: key => store.delete(key) };
+    if (request.endsWith('config-manager.cjs')) return configManager;
+    if (request.endsWith('secure-store.cjs')) return { ensureEncryptionAvailable() {}, packSecret: value => value, unpackSecret: value => value };
+    if (request.endsWith('instance-context.cjs')) return { updateInstances() {} };
+    if (request.endsWith('port-validator.cjs')) return { validateServerPorts: () => ({ valid: true }) };
+    if (request.endsWith('services/server-manager.cjs')) return { shutdownMinecraftServer: async () => ({ success: true }) };
+    if (request.endsWith('services/management-server.cjs')) return { stopAndDisposeManagementServers: async () => ({ success: true }) };
+    if (request.endsWith('servers-dat.cjs')) return { ensureServersDat: async () => assert.fail('personal config must not seed servers.dat') };
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  for (const p of modulePaths) delete require.cache[p];
+  try {
+    f.dependencies.managementClient.getLaunchConnection = async () => ({ serverIp: 'fixture.example', serverPort: 25565 });
+    const integration = createClientPackIntegration({ ...f.dependencies,
+      resolveClientByPath: async value => value === f.live ? f.target : null, clientPackService: f.service });
+    const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
+    const { createServerMutationPolicy } = require('../../electron/services/server-mutation-policy.cjs');
+    const coordinator = new ServerMutationCoordinator({ readContentRevision: () => 0, bumpContentRevision: () => 1 });
+    coordinator.completeStartupRecovery([]);
+    const policy = createServerMutationPolicy({ coordinator, getInstances: () => instances, getClientPackIntegration: () => integration });
+    const settings = require(modulePaths[0]).createSettingsHandlers();
+    const auth = require(modulePaths[1]).createMinecraftLauncherHandlers({ isDestroyed: () => false, webContents: { send() {} } });
+    await work({ handlers: policy.wrapHandlers({ ...settings, ...auth }), integration });
+  } finally {
+    Module._load = originalLoad;
+    modulePaths.forEach((p, index) => { delete require.cache[p]; if (savedCache[index]) require.cache[p] = savedCache[index]; });
+  }
+}
+
+test('actual personal handlers refuse held runtime preparation then preserve latest bytes across install and reopen', async t => {
+  const f = fixture(t); const event = { sender: { id: 1 } };
+  await withPersonalHandlers(f, async ({ handlers, integration }) => {
+    assert.equal((await handlers['save-client-config'](event, { path: f.live, serverIp: 'initial.example' })).success, true);
+    assert.equal((await handlers['minecraft-save-auth'](event, { clientPath: f.live })).success, true);
+    const before = ['xmcl-auth.json', 'client-config.json'].map(name => fs.readFileSync(path.join(f.live, name)));
+    let entered; let release; const ready = new Promise(resolve => { entered = resolve; }); const gate = new Promise(resolve => { release = resolve; });
+    f.external.prepare = async () => { entered(); await gate; return f.external.runtimeResult; };
+    const preview = await f.service.preview({ clientId: 'one' });
+    const installing = f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} });
+    installing.catch(() => {});
+    await ready;
+    try {
+      for (const channel of ['minecraft-auth', 'minecraft-save-auth', 'minecraft-import-auth-from-instance', 'minecraft-check-refresh-auth', 'minecraft-clear-auth', 'set-download-preferences', 'save-client-config']) {
+        const payload = { clientPath: f.live, targetClientPath: f.live, path: f.live, instanceId: 'one', serverIp: 'latest.example', primarySource: 'modrinth', fallbackSource: 'server' };
+        await assert.rejects(handlers[channel](event, payload), error => error.code === 'CLIENT_RUNNING' && /wait|retry|busy/iu.test(error.message));
+        ['xmcl-auth.json', 'client-config.json'].forEach((name, index) => assert.deepEqual(fs.readFileSync(path.join(f.live, name)), before[index]));
+      }
+    } finally { release(); await installing.catch(() => {}); }
+    assert.equal((await installing).verified, true);
+    ['xmcl-auth.json', 'client-config.json'].forEach((name, index) => assert.deepEqual(fs.readFileSync(path.join(f.live, name)), before[index]));
+    assert.equal((await handlers['save-client-config'](event, { path: f.live, serverIp: 'latest.example' })).success, true);
+    assert.equal((await handlers['minecraft-check-refresh-auth'](event, { clientPath: f.live })).success, true);
+    const latest = ['xmcl-auth.json', 'client-config.json'].map(name => fs.readFileSync(path.join(f.live, name)));
+    delete f.external.prepare;
+    const next = await f.service.preview({ clientId: 'one' });
+    assert.equal((await f.service.install({ clientId: 'one', planId: next.planId, conflictChoices: {} })).verified, true);
+    ['xmcl-auth.json', 'client-config.json'].forEach((name, index) => assert.deepEqual(fs.readFileSync(path.join(f.live, name)), latest[index]));
+    const reopened = new ClientPackService({ ...f.dependencies, transaction: new ClientPackTransaction({
+      journalRoot: f.transaction.journalRoot, durableFs: f.transaction.durableFs, stateStore: f.dependencies.stateStore, reparseInspector }) });
+    t.after(() => reopened.dispose());
+    assert.equal((await reopened.recover({ clientId: 'one' })).phase, 'committed');
+    assert.equal((await reopened.verify({ clientId: 'one' })).verified, true);
+    const reservation = await integration.beginManagedLaunch({ clientPath: f.live }); await reservation.abortBeforeSpawn();
+    assert.equal(fs.existsSync(path.join(f.live, 'servers.dat')), false);
+  });
+});
+
+for (const mode of ['in-process', 'reopened']) test(`${mode} service settles proven pre-publication live edits with runtime quiescence`, async t => {
+  const f = fixture(t); const seal = f.transaction.seal.bind(f.transaction);
+  f.transaction.seal = async context => { await seal(context); fs.writeFileSync(path.join(f.live, 'options.txt'), 'latest edit'); };
+  const preview = await f.service.preview({ clientId: 'one' });
+  if (mode === 'reopened') f.transaction.abandon = async () => { throw Object.assign(new Error('model interrupted before settlement'), { code: 'RECOVERY_REQUIRED' }); };
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }));
+  const reopened = new ClientPackService({ ...f.dependencies, transaction: new ClientPackTransaction({
+    journalRoot: f.transaction.journalRoot, durableFs: f.transaction.durableFs, stateStore: f.dependencies.stateStore, reparseInspector }) });
+  t.after(() => reopened.dispose());
+  if (mode === 'reopened') {
+    f.external.quiescent = false;
+    await assert.rejects(reopened.recover({ clientId: 'one' }), { code: 'RECOVERY_REQUIRED' });
+    f.external.quiescent = true;
+    assert.equal((await reopened.recover({ clientId: 'one' })).phase, 'abandoned');
+  } else assert.equal((await f.transaction.status(f.target)).phase, 'abandoned');
+  assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'latest edit');
+  assert.equal(typeof (await reopened.preview({ clientId: 'one' })).planId, 'string');
+});
 const sha = text => crypto.createHash('sha256').update(text).digest('hex');
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-client-service-'));
@@ -354,9 +466,15 @@ for (const patch of [{ serverIp: 'replacement.example' }, { managementCertFinger
 }
 test('same descriptor authority change during runtime refuses before seal without publication', async t => {
   const f = sessionFixture(t); const preview = await f.service.preview({ clientId: 'one' });
-  f.external.prepare = async () => { f.edit({ serverIp: 'replacement.example' }); return f.external.runtimeResult; };
-  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'RECOVERY_REQUIRED' });
+  let latestBytes;
+  f.external.prepare = async () => { f.edit({ serverIp: 'replacement.example' }); latestBytes = fs.readFileSync(path.join(f.live, 'client-config.json')); return f.external.runtimeResult; };
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'PLAN_STALE' });
   assert.equal(f.state.sealed, false); assert.equal(f.state.requests.some(r => r.origin.includes('replacement')), false);
+  assert.equal((await f.transaction.status(f.target)).phase, 'abandoned');
+  assert.deepEqual(fs.readFileSync(path.join(f.live, 'client-config.json')), latestBytes);
+  assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'settings');
+  assert.equal(fs.existsSync(path.join(f.live, 'mods/pack.jar')), false);
+  assert.equal(typeof (await f.service.preview({ clientId: 'one' })).planId, 'string');
 });
 test('changed registered client path cannot reuse a retained review', async t => {
   const f = sessionFixture(t); const preview = await f.service.preview({ clientId: 'one' }); const before = f.state.requests.length;
@@ -732,13 +850,13 @@ test('settled abandoned recovery still rejects substituted live directory', asyn
   await assert.rejects(f.service.recover({ clientId: 'one' }), { code: 'RECOVERY_REQUIRED' });
   assert.equal(fs.readFileSync(path.join(f.live + '-retained', 'options.txt'), 'utf8'), 'settings');
 });
-test('preparing recovery still rejects changed live content after writer quiescence is proven', async t => {
+test('preparing recovery preserves changed live content after exact no-swap and writer quiescence proof', async t => {
   const f = fixture(t); const preview = await f.service.preview({ clientId: 'one' });
   f.external.prepare = async () => { throw new Error('uncertain writer'); }; f.external.quiescent = false;
   await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'RECOVERY_REQUIRED' });
   fs.writeFileSync(path.join(f.live, 'options.txt'), 'unreviewed change'); f.external.quiescent = true;
-  await assert.rejects(f.service.recover({ clientId: 'one' }), { code: 'RECOVERY_REQUIRED' });
-  assert.equal((await f.transaction.status(f.target)).phase, 'preparing');
+  assert.equal((await f.service.recover({ clientId: 'one' })).phase, 'abandoned');
+  assert.equal((await f.transaction.status(f.target)).phase, 'abandoned');
   assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'unreviewed change');
 });
 test('runtime reservation exists before candidate assembly and completed cleanup forgets proof', async t => {
@@ -941,12 +1059,12 @@ for (const boundary of ['candidate-manifest', 'runtime-preparation']) test(`conc
     const writeManifest = f.dependencies.stateStore.write.bind(f.dependencies.stateStore);
     f.dependencies.stateStore.write = async (...args) => { await writeManifest(...args); editPreferences(); };
   } else f.external.prepare = async () => { editPreferences(); return { runtime, quiescent: true }; };
-  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'RECOVERY_REQUIRED' });
+  await assert.rejects(f.service.install({ clientId: 'one', planId: preview.planId, conflictChoices: {} }), { code: 'PLAN_STALE' });
   assert.equal(fs.readFileSync(path.join(f.live, 'options.txt'), 'utf8'), 'new user preferences');
   assert.equal(fs.readFileSync(path.join(f.live, 'client-config.json'), 'utf8'), 'new authentication');
   assert.equal(fs.existsSync(path.join(f.live, 'mods/pack.jar')), false);
-  assert.equal((await f.transaction.status(f.target)).phase, 'ready');
-  assert.equal(f.forgottenOperations.length, 0);
+  assert.equal((await f.transaction.status(f.target)).phase, 'abandoned');
+  assert.equal(f.forgottenOperations.length, 1);
 });
 test('optional re-preview replaces inactive same-client plans and invalidates old IDs', async t => {
   const f = fixture(t); const first = await f.service.preview({ clientId: 'one', optionalFileIds: [] });

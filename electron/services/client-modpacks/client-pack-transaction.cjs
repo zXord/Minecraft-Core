@@ -292,6 +292,8 @@ class ClientPackTransaction {
     const record = internal.record;
     await assertServerDirectoryIdentity(path.dirname(context.clientPath), record.parentIdentity, this._options());
     let [live, candidate, previous] = await Promise.all([this._tree(context.clientPath), this._tree(context.candidatePath), this._tree(context.previousPath)]);
+    if (record.phase === 'ready' && live && equal(live.directoryIdentity, record.oldTree.directoryIdentity) &&
+        !sameTree(live, record.oldTree) && sameTree(candidate, record.candidateTree) && previous === null) throw fail('PLAN_STALE');
     if (sameTree(live, record.oldTree) && sameTree(candidate, record.candidateTree) && previous === null && record.phase === 'ready') {
       await this.durableFs.renameDurableAsync(context.clientPath, context.previousPath);
       live = null; previous = record.oldTree;
@@ -315,23 +317,32 @@ class ClientPackTransaction {
     const context = Object.freeze({ ...this._paths(target, record.operationId), operationId: record.operationId, target });
     this.contexts.set(context, { record, sha256 });
     if (record.phase === 'preparing') {
-      if (record.candidateIdentity === null) throw fail();
-      await assertServerDirectoryIdentity(path.dirname(context.clientPath), record.parentIdentity, this._options());
-      await assertServerDirectoryIdentity(context.candidatePath, record.candidateIdentity, this._options());
-      if (await this._tree(context.previousPath) !== null) throw fail();
       return this.abandon(context, { quiescent: true });
+    }
+    const live = await this._tree(context.clientPath);
+    if (live && equal(live.directoryIdentity, record.oldTree.directoryIdentity) && !sameTree(live, record.oldTree)) {
+      // A ready marker is not evidence of a swap. Keep the latest original bytes
+      // when exact identities and absence establish publication never began.
+      return this.abandon(context, { quiescent });
     }
     return this.publish(context);
   }
   async abandon(context, { quiescent } = {}) {
     const internal = this.contexts.get(context);
-    if (!internal || quiescent !== true || internal.record.phase !== 'preparing' ||
-        !sameTree(await this._tree(context.clientPath), internal.record.oldTree)) throw fail();
+    if (!internal || quiescent !== true || !['preparing', 'ready'].includes(internal.record.phase)) throw fail();
+    const record = internal.record;
+    await assertServerDirectoryIdentity(path.dirname(context.clientPath), record.parentIdentity, this._options());
+    const live = await this._tree(context.clientPath);
+    if (!live || !equal(live.directoryIdentity, record.oldTree.directoryIdentity) || await this._tree(context.previousPath) !== null) throw fail();
+    // An interrupted pre-candidate intent needs the full unchanged live proof
+    // and positive absence; never bind an unrecorded candidate by inspection.
+    if (record.candidateIdentity === null && (!sameTree(live, record.oldTree) || await this._tree(context.candidatePath) !== null)) throw fail();
     let candidateTree = null;
     if (internal.record.candidateIdentity !== null) {
       await assertServerDirectoryIdentity(context.candidatePath, internal.record.candidateIdentity, this._options());
       const inspected = await captureServerDirectoryCopySource(context.candidatePath, this._options());
       candidateTree = { directoryIdentity: inspected.directoryIdentity, fingerprint: inspected.fingerprint };
+      if (record.phase === 'ready' && !sameTree(candidateTree, record.candidateTree)) throw fail();
       const proofPath = this._retainedPaths(context.target, context.operationId, 'candidate').proofPath;
       const existingProof = await this.durableFs.readFileBoundedAsync(proofPath, { maxBytes: MAX_CLEANUP_BYTES, allowMissing: true });
       if (existingProof === null) await this._retainProof(context, 'candidate', inspected);
