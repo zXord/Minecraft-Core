@@ -336,6 +336,26 @@
 
   // Management server state
   let managementServerStatus = 'unknown'; // stopped, starting, running, stopping, unknown
+  let managementStartError = '';
+  let managementMessageScope = '';
+  let managementMinecraftStatusScope = '';
+  let serverStatusSequence = 0;
+  let serverStatusReading = false;
+  $: if (managementMessageScope !== recoveryScopeKey) {
+    managementMessageScope = recoveryScopeKey;
+    managementStartError = '';
+    managementMinecraftStatusScope = '';
+    serverStatusSequence += 1;
+    serverStatusReading = false;
+    if (recoveryMounted) {
+      applyManagementStatus('unknown');
+      void refreshManagementStartupStatus(recoveryScopeKey);
+    }
+  }
+  $: managementStartOrderingBlocked = modpackManaged === true &&
+    (managementMinecraftStatusScope !== recoveryScopeKey || status !== 'Stopped');
+  $: managementStartupStatusUnavailable = managementMinecraftStatusScope !== recoveryScopeKey ||
+    !['Starting', 'Running', 'Stopping', 'Stopped'].includes(status);
   let managementPort = 8080;
   let managementSettingsLoaded = false;
   let connectedClients = 0;
@@ -369,6 +389,7 @@
     if (managementServerStatus !== normalized) {
       managementServerStatus = normalized;
     }
+    if (normalized === 'running') managementStartError = '';
     if (currentStoreStatus !== normalized) {
       managementStatusSyncLock = true;
       setManagementServerStatus(normalized);
@@ -473,10 +494,15 @@
   }
 
   function applyServerStatus(nextStatus, options = {}) {
+    // Every event/local transition supersedes pending reads, but only backend status confirms ownership.
+    serverStatusSequence += 1;
+    serverStatusReading = false;
+    managementMinecraftStatusScope = '';
     const normalizedStatus = normalizeServerStatus(nextStatus);
     if (!normalizedStatus) {
       return;
     }
+    if (options.backendConfirmed === true) managementMinecraftStatusScope = currentRecoveryScopeKey();
 
     serverState.update(state => ({
       ...state,
@@ -819,15 +845,22 @@
 
   // Function to check server status
   async function checkServerStatus() {
+    const requestedScope = currentRecoveryScopeKey();
+    const sequence = ++serverStatusSequence;
+    serverStatusReading = true;
+    managementMinecraftStatusScope = '';
+    const isCurrent = () => recoveryMounted && requestedScope === currentRecoveryScopeKey() && sequence === serverStatusSequence;
     try {
       const statusResult = await window.electron.invoke('get-server-status', {
         instanceId: currentInstanceId,
         targetPath: serverPath
       });
+      if (!isCurrent()) return;
       if (statusResult) {
+        if (statusResult.instanceId && statusResult.instanceId !== currentInstanceId) return;
         const normalizedStatus = normalizeServerStatus(statusResult);
         if (normalizedStatus) {
-          applyServerStatus(normalizedStatus, { clearPlayers: normalizedStatus === 'Stopped' });
+          applyServerStatus(normalizedStatus, { clearPlayers: normalizedStatus === 'Stopped', backendConfirmed: true });
         }
         
         if (normalizedStatus === 'Running' && statusResult.playersInfo?.names) {
@@ -837,10 +870,29 @@
         }
       }
     } catch (err) {
+      if (!isCurrent()) return;
       if (!isServerBusy) {
         applyServerStatus('Stopped');
       }
+      // The Minecraft display fallback is not authoritative stopped evidence for management writes.
+      managementMinecraftStatusScope = '';
+    } finally {
+      if (isCurrent()) serverStatusReading = false;
     }
+  }
+
+  async function refreshManagementStartupStatus(scopeKey) {
+    void checkServerStatus();
+    try {
+      const result = await window.electron.invoke('get-management-server-status', {
+        instanceId: currentInstanceId,
+        serverPath
+      });
+      if (!recoveryMounted || scopeKey !== currentRecoveryScopeKey()) return;
+      if (result?.success && result.status) {
+        applyManagementStatus(result.status.isRunning ? 'running' : 'stopped');
+      }
+    } catch { /* Unknown management status remains available for a stopped-server retry. */ }
   }
 
   // Function to check management server status and update client count
@@ -1227,6 +1279,7 @@
             instanceId: currentInstanceId,
             serverPath
           });
+          if (!recoveryMounted || currentRecoveryScopeKey() !== mountRecoveryScope) return;
           if (result.success && result.status) {
             applyManagementStatus(result.status.isRunning ? 'running' : 'stopped');
             if (result.status.isRunning) {
@@ -1260,7 +1313,7 @@
       if (status?.instanceId && currentInstanceId && status.instanceId !== currentInstanceId) {
         return;
       }
-      applyServerStatus(status);
+      applyServerStatus(status, { backendConfirmed: true });
     };
 
     // Listen for metrics updates
@@ -1477,8 +1530,12 @@
   // Management server functions
   async function startManagementServer(options = {}) {
     const intention = options?.autoStartIntention;
-    const isCurrent = () => !intention || autoStartIntentionIsCurrent(intention);
+    const requestedScope = currentRecoveryScopeKey();
+    const isCurrent = () => recoveryMounted && requestedScope === currentRecoveryScopeKey() &&
+      (!intention || autoStartIntentionIsCurrent(intention));
     if (!isCurrent() || !canStartAfterRecoveryCheck()) return;
+    // Metadata/TLS preparation remains a stopped-only backend writer; never bypass admission.
+    if (modpackManaged === true && (managementMinecraftStatusScope !== requestedScope || get(serverState).status !== 'Stopped')) return;
     if (!validateServerPath(serverPath)) {
       logger.warn('Cannot start management server - invalid server path', {
         category: 'ui',
@@ -1501,6 +1558,7 @@
       }
     });
     
+    managementStartError = '';
     applyManagementStatus('starting');
     try {
       const result = await window.electron.invoke('start-management-server', {
@@ -1538,8 +1596,7 @@
             error: result.error
           }
         });
-        errorMessage.set(`Failed to start management server: ${result.error}`);
-        setTimeout(() => errorMessage.set(''), 5000);
+        managementStartError = `Failed to start management server: ${result.error || 'Unknown error. Please retry.'}`;
       }
     } catch (error) {
       if (!isCurrent()) return;
@@ -1552,8 +1609,7 @@
           errorMessage: error.message
         }
       });
-      errorMessage.set(`Error starting management server: ${error.message}`);
-      setTimeout(() => errorMessage.set(''), 5000);
+      managementStartError = `Error starting management server: ${error.message || 'Unknown error. Please retry.'}`;
     }
   }
 
@@ -1900,7 +1956,7 @@
           <button 
             class="btn-compact start-button" 
             on:click={startManagementServer}
-            disabled={managementServerStatus === 'running' || managementServerStatus === 'starting' || !serverPath || recoveryStartBlocked}
+            disabled={managementServerStatus === 'running' || managementServerStatus === 'starting' || managementServerStatus === 'stopping' || !serverPath || recoveryStartBlocked || managementStartOrderingBlocked}
           >
             {managementServerStatus === 'starting' ? 'Starting...' : 'Start'}
           </button>
@@ -1914,6 +1970,21 @@
         </div>
       </div>
       
+      {#if managementStartOrderingBlocked && managementServerStatus !== 'running' && managementServerStatus !== 'starting'}
+        <div class="management-help-compact" role="status" aria-label="Management startup order">
+          <span>
+            {#if managementStartupStatusUnavailable}Minecraft status is unavailable. Refresh status to confirm Minecraft is stopped before starting management. {/if}
+            Stop Minecraft, start the management server, then restart Minecraft. Management startup prepares server metadata and requires Minecraft to be stopped.
+          </span>
+          {#if managementStartupStatusUnavailable}
+            <button class="btn-compact" type="button" on:click={() => checkServerStatus()} disabled={serverStatusReading}>Refresh status</button>
+          {/if}
+        </div>
+      {/if}
+      {#if managementStartError}
+        <div class="invite-error" role="alert">{managementStartError}</div>
+      {/if}
+
       <!-- Help text - compact -->
       {#if !helpTextDismissed}
         <div class="management-help-compact">

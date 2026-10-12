@@ -104,6 +104,8 @@ test.beforeEach(async ({ page }) => {
     state.autoStart = false;
     state.holdManagementStart = false;
     state.pendingManagementStarts = [];
+    state.pendingServerStatuses = [];
+    state.pendingMinecraftStarts = [];
     window.fetch = async url => {
       if (url !== 'https://meta.fabricmc.net/v2/versions/game') throw new Error(`Unexpected fetch: ${url}`);
       state.fetches.push(url);
@@ -132,11 +134,18 @@ test.beforeEach(async ({ page }) => {
           if (reply.error) throw new Error('recovery unavailable');
           return { ok: true, value: reply.value };
         }
-        if (channel === 'start-management-server' && state.holdManagementStart) {
-          await new Promise(resolve => state.pendingManagementStarts.push(resolve));
-          return { success: true };
+        if (channel === 'start-management-server') {
+          const error = state.managementStartError;
+          const result = state.managementStartResult || { success: true };
+          if (state.holdManagementStart) await new Promise(resolve => state.pendingManagementStarts.push(resolve));
+          if (error) throw new Error(error);
+          return result;
         }
-        if (channel === 'start-server' || channel === 'start-management-server') return { success: true };
+        if (channel === 'start-server') {
+          if (state.holdMinecraftStart) await new Promise(resolve => state.pendingMinecraftStarts.push(resolve));
+          if (state.minecraftStartError) throw new Error(state.minecraftStartError);
+          return state.minecraftStartResult || { success: true };
+        }
         if (channel === 'read-config') {
           const config = state.configs[request] || null;
           if (request === state.holdConfigPath) await new Promise(resolve => state.pendingConfigs.push(resolve));
@@ -144,7 +153,16 @@ test.beforeEach(async ({ page }) => {
           return config;
         }
         if (channel === 'get-settings') return { success: true, settings: { port: 25565, maxRam: 4, managementPort: 8080, autoStartMinecraft: state.autoStart, autoStartManagement: state.autoStart } };
-        if (channel === 'get-server-status') return { status: state.serverStatus || 'Stopped', instanceId: request.instanceId, playersInfo: { names: [] } };
+        if (channel === 'get-server-status') {
+          const error = state.serverStatusError;
+          const result = { status: state.serverStatus || 'Stopped', instanceId: request.instanceId, playersInfo: { names: [] } };
+          if (state.holdNextServerStatus) {
+            state.holdNextServerStatus = false;
+            await new Promise(resolve => state.pendingServerStatuses.push(resolve));
+          }
+          if (error) throw new Error('status unavailable');
+          return result;
+        }
         if (channel === 'get-management-server-status') return { success: true, status: { isRunning: Boolean(state.managementRunning), clientCount: 0 } };
         if (channel === 'get-management-invite-info') return { success: true, configured: false, requiresSetup: true };
         if (channel === 'server-java-check-requirements') return { success: true, isAvailable: true, requiredJavaVersion: 17 };
@@ -174,6 +192,167 @@ const header = page => page.locator('.server-controls .compact-header');
 const starts = page => page.locator('.server-controls').getByRole('button', { name: 'Start', exact: true });
 const recoveryStatus = page => page.getByRole('status', { name: 'Server recovery status' });
 const startCalls = page => page.evaluate(() => window.controlsTest.requests.filter(value => ['start-server', 'start-management-server'].includes(value.channel)));
+
+const management = page => page.locator('.management-compact');
+const managementStart = page => management(page).getByRole('button', { name: 'Start', exact: true });
+
+for (const newerStatus of ['Starting', 'Running', 'read']) {
+  test(`management status confirmation ignores an old Stopped read after newer ${newerStatus}`, async ({ page }) => {
+    await page.clock.install();
+    await show(page, 'alpha', true);
+    await expect(managementStart(page)).toBeEnabled();
+    await page.evaluate(() => { window.controlsTest.holdNextServerStatus = true; });
+    await page.clock.fastForward(120000);
+    await expect.poll(() => page.evaluate(() => window.controlsTest.pendingServerStatuses.length)).toBe(1);
+    await page.evaluate(value => {
+      window.controlsTest.serverStatus = value === 'read' ? 'Running' : value;
+      if (value !== 'read') window.controlsTest.listeners['server-status'].forEach(handler => handler({ instanceId: 'alpha', status: value }));
+    }, newerStatus);
+    if (newerStatus === 'read') await page.clock.fastForward(120000);
+    await expect(page.locator('.minecraft-server-section .status-compact')).toContainText(newerStatus === 'read' ? 'Running' : newerStatus);
+    await page.evaluate(() => window.controlsTest.pendingServerStatuses[0]());
+    await expect(managementStart(page)).toBeDisabled();
+    await expect(page.locator('.minecraft-server-section .status-compact')).toContainText(newerStatus === 'read' ? 'Running' : newerStatus);
+    await managementStart(page).evaluate(button => { button.disabled = false; button.click(); });
+    expect(await startCalls(page)).toEqual([]);
+  });
+}
+
+for (const failure of ['response', 'rejection']) {
+  test(`management status confirmation does not treat a local Minecraft start ${failure} fallback as stopped evidence`, async ({ page }) => {
+    await show(page, 'alpha', true);
+    await expect(managementStart(page)).toBeEnabled();
+    await page.evaluate(value => {
+      if (value === 'response') window.controlsTest.minecraftStartResult = { success: false, error: 'fixture start refused' };
+      else window.controlsTest.minecraftStartError = 'fixture start uncertain';
+    }, failure);
+    await starts(page).nth(0).click();
+    await expect(page.locator('.minecraft-server-section .status-compact')).toContainText('Stopped');
+    await expect(managementStart(page)).toBeDisabled();
+    await expect(management(page).getByRole('button', { name: 'Refresh status', exact: true })).toBeEnabled();
+    await management(page).getByRole('button', { name: 'Refresh status', exact: true }).click();
+    await expect(managementStart(page)).toBeEnabled();
+    expect((await startCalls(page)).map(call => call.channel)).toEqual(['start-server']);
+  });
+}
+
+test('management status confirmation ignores old Stopped read during local optimistic Minecraft Starting', async ({ page }) => {
+  await page.clock.install();
+  await show(page, 'alpha', true);
+  await expect(managementStart(page)).toBeEnabled();
+  await page.evaluate(() => {
+    window.controlsTest.holdNextServerStatus = true;
+    window.controlsTest.holdMinecraftStart = true;
+  });
+  await page.clock.fastForward(120000);
+  await expect.poll(() => page.evaluate(() => window.controlsTest.pendingServerStatuses.length)).toBe(1);
+  await starts(page).nth(0).click();
+  await expect.poll(() => page.evaluate(() => window.controlsTest.pendingMinecraftStarts.length)).toBe(1);
+  await page.evaluate(() => window.controlsTest.pendingServerStatuses[0]());
+  await expect(page.locator('.minecraft-server-section .status-compact')).toContainText('Starting');
+  await expect(managementStart(page)).toBeDisabled();
+  expect((await startCalls(page)).map(call => call.channel)).toEqual(['start-server']);
+});
+
+test('management status refresh recovers failed confirmation read-only without retrying a writer', async ({ page }) => {
+  await page.evaluate(() => { window.controlsTest.serverStatusError = true; });
+  await show(page, 'alpha', true);
+  await expect(managementStart(page)).toBeDisabled();
+  await page.evaluate(() => { window.controlsTest.serverStatusError = false; });
+  await management(page).getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await expect(managementStart(page)).toBeEnabled();
+  await expect(management(page).getByRole('status', { name: 'Management startup order' })).toHaveCount(0);
+  expect(await startCalls(page)).toEqual([]);
+});
+
+for (const minecraftStatus of ['Starting', 'Running', 'Stopping', 'Unknown', 'Error']) {
+  test(`management startup ordering blocks managed Minecraft ${minecraftStatus} without IPC`, async ({ page }) => {
+    await page.evaluate(value => { window.controlsTest.serverStatus = value; }, minecraftStatus);
+    await show(page, 'alpha', true);
+    await expect(recoveryStatus(page)).toHaveCount(0);
+    await expect(managementStart(page)).toBeDisabled();
+    await expect(management(page).getByRole('status', { name: 'Management startup order' })).toContainText('Stop Minecraft, start the management server, then restart Minecraft');
+    await managementStart(page).evaluate(button => { button.disabled = false; button.click(); });
+    expect(await startCalls(page)).toEqual([]);
+    await page.evaluate(() => {
+      window.controlsTest.serverStatus = 'Stopped';
+      window.controlsTest.listeners['server-status'].forEach(handler => handler({ instanceId: 'alpha', status: 'Stopped' }));
+    });
+    await expect(managementStart(page)).toBeEnabled();
+    await expect(management(page).getByRole('status', { name: 'Management startup order' })).toHaveCount(0);
+    await managementStart(page).click();
+    await expect(management(page).locator('.status-value')).toHaveText('Running');
+    expect((await startCalls(page)).map(call => call.channel)).toEqual(['start-management-server']);
+  });
+}
+
+test('management startup ordering fails closed after status read failure and leaves existing service Stop usable', async ({ page }) => {
+  await page.evaluate(() => { window.controlsTest.serverStatusError = true; });
+  await show(page, 'alpha', true);
+  await expect(recoveryStatus(page)).toHaveCount(0);
+  await expect(managementStart(page)).toBeDisabled();
+  await expect(management(page).getByRole('status', { name: 'Management startup order' })).toContainText('status is unavailable');
+  await page.evaluate(() => window.controlsTest.listeners['management-server-status'].forEach(handler => handler({ instanceId: 'alpha', isRunning: true })));
+  await expect(management(page).getByRole('button', { name: 'Stop', exact: true })).toBeEnabled();
+  await expect(management(page).getByRole('status', { name: 'Management startup order' })).toHaveCount(0);
+});
+
+test('management startup ordering loses stopped confirmation when a later status read fails', async ({ page }) => {
+  await page.clock.install();
+  await show(page, 'alpha', true);
+  await expect(managementStart(page)).toBeEnabled();
+  await page.evaluate(() => { window.controlsTest.serverStatusError = true; });
+  await page.clock.fastForward(120000);
+  await expect(managementStart(page)).toBeDisabled();
+  await expect(management(page).getByRole('status', { name: 'Management startup order' })).toContainText('status is unavailable');
+  await managementStart(page).evaluate(button => { button.disabled = false; button.click(); });
+  expect(await startCalls(page)).toEqual([]);
+});
+
+for (const failure of ['response', 'rejection']) {
+  test(`management startup failure remains local and persistent with stopped retry and success clearing: ${failure}`, async ({ page }) => {
+    await show(page, 'alpha', true);
+    await expect(managementStart(page)).toBeEnabled();
+    await page.clock.install();
+    await page.evaluate(failure => {
+      if (failure === 'response') window.controlsTest.managementStartResult = { success: false, error: 'Port fixture unavailable' };
+      else window.controlsTest.managementStartError = 'Port fixture unavailable';
+    }, failure);
+    await managementStart(page).click();
+    await expect(management(page).getByRole('alert')).toContainText('Port fixture unavailable');
+    await expect(managementStart(page)).toBeEnabled();
+    await page.clock.fastForward(6000);
+    await expect(management(page).getByRole('alert')).toContainText('Port fixture unavailable');
+    await page.evaluate(() => {
+      window.controlsTest.managementStartResult = null;
+      window.controlsTest.managementStartError = null;
+      window.controlsTest.holdManagementStart = true;
+    });
+    await managementStart(page).click();
+    await expect(management(page).getByRole('alert')).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() => window.controlsTest.pendingManagementStarts.length)).toBe(1);
+    await page.evaluate(() => window.controlsTest.pendingManagementStarts[0]());
+    await expect(management(page).locator('.status-value')).toHaveText('Running');
+    await expect(management(page).getByRole('alert')).toHaveCount(0);
+    expect((await startCalls(page)).length).toBe(2);
+  });
+}
+
+test('management startup failure after server switch cannot leak into the new server', async ({ page }) => {
+  await show(page, 'alpha', true);
+  await expect(managementStart(page)).toBeEnabled();
+  await page.evaluate(() => {
+    window.controlsTest.managementStartError = 'Old alpha failure';
+    window.controlsTest.holdManagementStart = true;
+  });
+  await managementStart(page).click();
+  await expect.poll(() => page.evaluate(() => window.controlsTest.pendingManagementStarts.length)).toBe(1);
+  await update(page, 'beta', true);
+  await page.evaluate(() => window.controlsTest.pendingManagementStarts[0]());
+  await expect(management(page)).not.toContainText('Old alpha failure');
+  await expect(managementStart(page)).toBeEnabled();
+  expect((await startCalls(page)).map(call => call.request.instanceId)).toEqual(['alpha']);
+});
 
 async function forceStartHandlers(page) {
   await starts(page).evaluateAll(buttons => buttons.forEach(button => {
@@ -215,9 +394,9 @@ for (const managed of [true, false]) {
     await show(page, 'alpha', managed);
     await expect(starts(page).nth(0)).toBeEnabled();
     await expect(starts(page).nth(1)).toBeEnabled();
-    await starts(page).nth(0).click();
     await starts(page).nth(1).click();
-    expect((await startCalls(page)).map(value => value.channel)).toEqual(['start-server', 'start-management-server']);
+    await starts(page).nth(0).click();
+    expect((await startCalls(page)).map(value => value.channel)).toEqual(['start-management-server', 'start-server']);
   });
 }
 
