@@ -98,6 +98,8 @@ test.beforeEach(async ({ page }) => {
     state.recovery = [];
     state.active = [];
     state.activeError = false;
+    state.holdActivity = false;
+    state.pendingActivity = [];
     state.recoveryReplies = [];
     state.pendingRecovery = [];
     state.listeners = {};
@@ -125,8 +127,10 @@ test.beforeEach(async ({ page }) => {
       async invoke(channel, request) {
         state.requests.push({ channel, request });
         if (channel === 'modpacks:get-active-jobs') {
+          const active = state.active;
+          if (state.holdActivity) await new Promise(resolve => state.pendingActivity.push(resolve));
           if (state.activeError) throw new Error('activity unavailable');
-          return { ok: true, value: { serverId: request.serverId, items: state.active } };
+          return { ok: true, value: { serverId: request.serverId, items: active } };
         }
         if (channel === 'modpacks:list-recovery') {
           const reply = state.recoveryReplies.shift() || { value: state.recovery };
@@ -364,7 +368,7 @@ async function forceStartHandlers(page) {
 test('Dashboard checks recovery before either ordinary Start handler can change stopped status', async ({ page }) => {
   await page.evaluate(() => window.controlsTest.recoveryReplies.push({ hold: true, value: [] }));
   await show(page, 'alpha', true, true);
-  await expect(recoveryStatus(page)).toHaveText('Checking recovery status…');
+  await expect(recoveryStatus(page).locator('p')).toHaveText('Checking recovery status…');
   await expect(starts(page).nth(0)).toBeDisabled();
   await expect(starts(page).nth(1)).toBeDisabled();
   await forceStartHandlers(page);
@@ -430,7 +434,7 @@ for (const scope of ['server', 'generation', 'path']) {
         if (result === 'rejection') pending.reject(new Error('stale')); else pending.resolve();
       }, staleResult);
       await page.waitForTimeout(20);
-      await expect(recoveryStatus(page)).toHaveText('Checking recovery status…');
+      await expect(recoveryStatus(page).locator('p')).toHaveText('Checking recovery status…');
       await expect(starts(page).nth(0)).toBeDisabled();
       await page.evaluate(() => window.controlsTest.pendingRecovery[1].resolve());
       await expect(recoveryStatus(page)).toContainText('Recovery is pending for this server.');
@@ -524,6 +528,37 @@ test('pending recovery keeps existing running-server Stop and Kill available', a
   await expect(page.locator('.minecraft-server-section').getByRole('button', { name: 'Kill', exact: true })).toBeEnabled();
   await expect(page.locator('.management-compact').getByRole('button', { name: 'Stop', exact: true })).toBeEnabled();
 });
+
+for (const refresh of ['activity poll', 'activity and recovery event']) {
+  test(`banner navigation remains attached and works during pending ${refresh}`, async ({ page }) => {
+    await page.evaluate(() => {
+      window.controlsTest.active = [{ ownership: 'running', job: { jobId: 'owned-job', serverId: 'alpha' } }];
+    });
+    await show(page, 'alpha', true);
+    const navigation = await recoveryStatus(page).getByRole('button', { name: 'View operation' }).elementHandle();
+    await page.evaluate(refresh => {
+      const state = window.controlsTest;
+      state.holdActivity = true;
+      if (refresh === 'activity and recovery event') {
+        state.recoveryReplies.push({ hold: true, value: [] });
+        state.listeners['modpacks:job-progress'].forEach(handler => handler({
+          serverId: 'alpha', jobId: 'owned-job', sequence: 1, phase: 'staging'
+        }));
+      }
+    }, refresh);
+    await expect.poll(() => page.evaluate(() => window.controlsTest.pendingActivity.length)).toBe(1);
+    await expect(recoveryStatus(page)).toContainText('Checking recovery status');
+    expect(await navigation.evaluate(element => element.isConnected)).toBe(true);
+    await expect(starts(page).nth(0)).toBeDisabled();
+    await expect(starts(page).nth(1)).toBeDisabled();
+    await forceStartHandlers(page);
+    expect(await startCalls(page)).toEqual([]);
+    await navigation.click();
+    await expect(page).toHaveURL('https://controls.test/#/modpack');
+    expect(await page.evaluate(() => window.controlsTest.pendingActivity.length)).toBe(1);
+    expect(await page.evaluate(() => window.controlsTest.pendingRecovery.length)).toBe(refresh === 'activity poll' ? 0 : 1);
+  });
+}
 
 test('active-job navigation polls owner settlement independently of a held recovery read', async ({ page }) => {
   await page.evaluate(() => {

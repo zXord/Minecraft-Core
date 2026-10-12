@@ -51,6 +51,10 @@ test('review identifies the selected server and exact release before accepting f
   assert.match(html, /forge 47\.4\.13/);
   assert.match(html, /Java 17/);
   assert.match(html, /496/);
+  assert.match(html, /aria-label="Planned file diff"/);
+  for (const [label, count] of [['Added', 50], ['Changed', 121], ['Removed', 496], ['Preserved', 8564]]) {
+    assert.match(html, new RegExp(`>${label}<\\/span><strong[^>]*>${count}<\\/strong>`));
+  }
   assert.match(html, /disabled[^>]*>Start reviewed operation/);
 });
 
@@ -94,6 +98,48 @@ test('rollback distinguishes the current release from the selected restore point
   assert.match(html, /<dt[^>]*>Restored runtime<\/dt><dd[^>]*>Minecraft 1\.20\.1.*forge 47\.4\.10/);
   assert.doesNotMatch(html, /Selected release/);
 });
+
+test('rollback explains snapshot replacement without presenting placeholder file counts as a diff', () => {
+  // Routing rollback through the ordinary diff branch recreates the native false no-op summary.
+  const html = renderReview({ ...props({
+    changes: { added: 0, changed: 0, removed: 0, preserved: 9188 },
+    rollback: { id: 'restore-previous', sourceRevision: 23, worldIncluded: true }
+  }), operationKind: 'rollback-restore-point' });
+  assert.match(html, /Restore selected server snapshot/);
+  assert.match(html, /changes.*after.*snapshot.*replaced or removed/i);
+  assert.match(html, /per-file.*comparison.*not available/i);
+  assert.match(html, /Current backups and operation history are retained/);
+  assert.match(html, /safety restore point.*current server.*before changes/i);
+  assert.match(html, /validated on loopback/);
+  assert.match(html, /original is restored if final-path health fails/);
+  assert.doesNotMatch(html, /Planned file diff|>Added<|>Changed<|>Removed<|>Preserved<|9188/);
+});
+
+test('rollback shows the supplied snapshot revision including zero without inventing a missing revision', () => {
+  for (const sourceRevision of [0, 23]) {
+    const html = renderReview({ ...props({ rollback: { id: 'restore-previous', sourceRevision } }),
+      operationKind: 'rollback-restore-point' });
+    assert.match(html, new RegExp(`<dt[^>]*>Snapshot revision<\\/dt><dd[^>]*>${sourceRevision}<\\/dd>`));
+  }
+  const unknown = renderReview({ ...props({ rollback: { id: 'restore-previous' } }),
+    operationKind: 'rollback-restore-point' });
+  assert.doesNotMatch(unknown, /Snapshot revision|undefined|null/);
+});
+
+for (const [description, worldIncluded, expected] of [
+  ['included', true, 'Included in snapshot'],
+  ['excluded', false, 'Not included in snapshot'],
+  ['unknown', undefined, 'Unknown — not reported by restore point']
+]) {
+  test(`rollback identifies ${description} world inclusion without assuming preservation`, () => {
+    // Coercing absent metadata to false or claiming all worlds are kept is misleading.
+    const rollback = { id: 'restore-previous', sourceRevision: 23 };
+    if (worldIncluded !== undefined) rollback.worldIncluded = worldIncluded;
+    const html = renderReview({ ...props({ rollback }), operationKind: 'rollback-restore-point' });
+    assert.match(html, new RegExp(`<dt[^>]*>World data<\\/dt><dd[^>]*>${expected}<\\/dd>`));
+    assert.doesNotMatch(html, /Worlds and user additions stay|worlds are preserved|world is deleted/);
+  });
+}
 
 test('detach and uninstall identify the current release without suggesting another release was selected', () => {
   for (const operationKind of ['detach', 'uninstall-managed']) {

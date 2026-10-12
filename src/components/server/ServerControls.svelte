@@ -1728,21 +1728,18 @@
     <div class="server-warning-banner" role="status" aria-label="Server recovery status">
       {#if activityStatus === 'ready' && activeOperationCount > 0}
         <p>Operation in progress. Starts remain blocked until the owned operation settles.</p>
-        <button on:click={() => navigate('/modpack')}>View operation</button>
       {:else if activityStatus === 'error'}
         <p>Operation status unavailable</p>
         <button on:click={() => refreshRecovery()}>Retry check</button>
-        <button on:click={() => navigate('/modpack')}>View operation</button>
       {:else if recoveryStatus === 'ready' && recoveryPendingCount > 0}
         <p>Recovery is pending for this server. Review Modpack recovery before starting.</p>
-        <button on:click={() => navigate('/modpack')}>Review Modpack</button>
       {:else if recoveryStatus === 'error'}
         <p>Recovery status could not be checked</p>
         <button on:click={() => refreshRecovery()}>Retry check</button>
-        <button on:click={() => navigate('/modpack')}>Review Modpack</button>
       {:else}
         <p>Checking recovery status…</p>
       {/if}
+      <button type="button" on:click={() => navigate('/modpack')}>{activeOperationCount > 0 || activityStatus === 'error' ? 'View operation' : 'Review Modpack'}</button>
     </div>
   {/if}
   <div class="minecraft-server-section">

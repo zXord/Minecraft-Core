@@ -85,6 +85,10 @@
     {#if targetLabel}<div><dt>Server</dt><dd>{targetLabel}</dd></div>{/if}
     {#if providerLabel || plan.source?.version}<div><dt>{isRollback || destructive ? 'Current release' : 'Selected release'}</dt><dd>{providerLabel}{providerLabel && plan.source?.version ? ' · ' : ''}{plan.source?.version || ''}</dd></div>{/if}
     {#if isRollback && plan.rollback?.id}<div><dt>Restore point</dt><dd>{plan.rollback.id}</dd></div>{/if}
+    {#if isRollback}
+      {#if plan.rollback?.sourceRevision != null}<div><dt>Snapshot revision</dt><dd>{plan.rollback.sourceRevision}</dd></div>{/if}
+      <div><dt>World data</dt><dd>{plan.rollback?.worldIncluded === true ? 'Included in snapshot' : plan.rollback?.worldIncluded === false ? 'Not included in snapshot' : 'Unknown — not reported by restore point'}</dd></div>
+    {/if}
     {#if plan.runtime}<div><dt>{isRollback ? 'Restored runtime' : 'Runtime'}</dt><dd>Minecraft {plan.runtime.minecraft} · {plan.runtime.loader} {plan.runtime.loaderVersion}{#if plan.runtime.java} · Java {plan.runtime.java}{/if}</dd></div>
     {:else if ['files-only', 'import-files-only-new'].includes(operationKind)}<div><dt>Runtime</dt><dd>Files only — no managed runtime</dd></div>{/if}
   </dl>
@@ -99,6 +103,9 @@
       <article class="mp-card behavior-card" class:selected={isUninstall}><span class="mp-badge {isUninstall ? 'warn' : ''}">{isUninstall ? 'Selected' : 'Alternative'}</span><h3>Remove managed pack files</h3><p>Remove exactly {confirmation.unchangedManagedRemovalCount || changes.removed || '0'} unchanged managed files while preserving worlds, user additions, protected configuration, and modified files.</p><ul><li>A verified restore point is created</li><li>Modified managed files remain flagged as orphans</li><li>It may leave a non-runnable files-only instance</li></ul></article>
     </div>
     <div class="mp-state warning"><strong>The server is not deleted</strong><p>Neither the instance nor its world is deleted. Uninstall removes only exact unchanged files owned by the managed pack/runtime after review.</p></div>
+  {:else if isRollback}
+    <div class="mp-state warning"><strong>Restore selected server snapshot</strong><p>Server files and any world data included in this restore point return to the saved snapshot. Changes made after that snapshot within the restored scope will be replaced or removed. Current backups and operation history are retained.</p><p>A per-file added/changed/removed comparison is not available for this review.</p></div>
+    <div class="mp-state"><strong>Transaction protection</strong><p>A new safety restore point of the current server is created before changes. The complete sibling candidate is validated on loopback, and the original is restored if final-path health fails.</p></div>
   {:else}
     <div class="mp-grid" aria-label="Planned file diff">
       <div class="mp-card mp-metric"><span class="mp-muted">Added</span><strong>{changes.added || 0}</strong></div><div class="mp-card mp-metric"><span class="mp-muted">Changed</span><strong>{changes.changed || 0}</strong></div><div class="mp-card mp-metric"><span class="mp-muted">Removed</span><strong>{changes.removed || 0}</strong></div><div class="mp-card mp-metric"><span class="mp-muted">Preserved</span><strong>{changes.preserved || 0}</strong></div>

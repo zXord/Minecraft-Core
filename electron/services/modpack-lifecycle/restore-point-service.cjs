@@ -1182,7 +1182,7 @@ class RestorePointService {
         expectedArchiveSha256: currentArchive.sha256,
         expectedArchiveSize: currentArchive.size,
         expectedArchiveIdentity: currentArchive.identity,
-        expectedScope: Object.freeze(strictJsonClone(currentMetadata.metadata.scope)),
+        expectedScope: Object.freeze(normalizeScope(currentMetadata.metadata.scope)),
         operationId: currentMetadata.metadata.operationId,
         signal: operation.signal,
         onProgress: value => {

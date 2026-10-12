@@ -1617,6 +1617,85 @@ test('restore binds the secure extractor to the already reviewed archive digest 
   assert.equal(path.dirname(received.stagingPath), path.dirname(destination));
 });
 
+test('restore roundtrips an inventory above the generic JSON limit through a detached validated scope', async t => {
+  // A generic strictJsonClone at the extraction boundary rejects otherwise-valid pack inventories.
+  const { createVerifiedRestoreExtractor } = require('../../electron/services/modpack-lifecycle/verified-restore-extractor.cjs');
+  let extract;
+  let verifiedScope;
+  let receivedScope;
+  const environment = fixture(t, {
+    async zipStreamVerifier(archivePath, scope, options) {
+      verifiedScope = scope;
+      return verifyZipScopeStreaming(archivePath, scope, options);
+    },
+    async extractVerifiedArchiveFn(options) {
+      receivedScope = options.expectedScope;
+      assert.notEqual(receivedScope, verifiedScope);
+      assert.notEqual(receivedScope.entries, verifiedScope.entries);
+      assert.notEqual(receivedScope.entries[0], verifiedScope.entries[0]);
+      return extract(options);
+    }
+  });
+  extract = createVerifiedRestoreExtractor({
+    durableFs: environment.durableFs,
+    reparseInspector: { async isReparsePoint() { return false; } }
+  });
+  const inventory = path.join(environment.serverPath, 'inventory');
+  fs.mkdirSync(inventory);
+  for (let index = 0; index < 2000; index++) {
+    fs.writeFileSync(path.join(inventory, `${String(index).padStart(4, '0')}.txt`), `payload-${index}`);
+  }
+  const reference = await environment.service.createVerifiedRestorePoint(request(environment.serverPath));
+  const operationId = `op2-${'b'.repeat(32)}`;
+  const candidateRoot = path.join(environment.root, `.${operationId}.c`);
+  const workspace = path.join(candidateRoot, '.minecraft-core-state', 'operations', operationId);
+  const destination = path.join(workspace, 'selected-restore');
+  fs.mkdirSync(workspace, { recursive: true });
+  const restored = await environment.service.restoreToOwnedCandidate(reference, destination, candidateRoot);
+  assert.equal(restored.ok, true);
+  assert.equal(receivedScope.fileCount, 2003);
+  assert.equal(fs.readdirSync(path.join(destination, 'inventory')).length, 2000);
+  assert.equal(fs.readFileSync(path.join(destination, 'inventory', '1999.txt'), 'utf8'), 'payload-1999');
+  assert.deepEqual(enumerateArchiveScope(topLevelServerItems(destination)), receivedScope);
+  assert.equal(fs.readdirSync(workspace).some(name => name.startsWith('restore-staging-')), false);
+});
+
+for (const scenario of ['malformed', 'oversized']) {
+  test(`restore rejects a ${scenario} scope before archive extraction`, async t => {
+    // Reusing the inventory policy must not bypass schema or collection bounds.
+    let extracted = false;
+    let verified = false;
+    const environment = fixture(t, {
+      async zipStreamVerifier(archivePath, scope, options) {
+        verified = true;
+        return verifyZipScopeStreaming(archivePath, scope, options);
+      },
+      async extractVerifiedArchiveFn() { extracted = true; throw new Error('invalid scope reached extraction'); }
+    });
+    const reference = await environment.service.createVerifiedRestorePoint(request(environment.serverPath));
+    const metadata = JSON.parse(fs.readFileSync(reference.metadataPath, 'utf8'));
+    if (scenario === 'malformed') metadata.scope.entries[0].path = '../outside/';
+    else {
+      metadata.scope.entries = Array.from({ length: 40_000 }, (_, index) => ({
+        path: `inventory-${String(index).padStart(5, '0')}/`, type: 'directory', size: 0, sha256: null
+      }));
+      metadata.scope.totalBytes = 0;
+      metadata.scope.fileCount = 0;
+    }
+    metadata.scopeSha256 = metadata.scope.scopeSha256 = crypto.createHash('sha256')
+      .update(JSON.stringify(metadata.scope.entries), 'utf8').digest('hex');
+    fs.writeFileSync(reference.metadataPath, `${JSON.stringify(metadata)}\n`);
+    const destination = path.join(environment.root, 'rejected-candidate');
+    const matchingReference = { ...reference, scopeSha256: metadata.scopeSha256, totalBytes: String(metadata.scope.totalBytes) };
+    verified = false;
+    await assert.rejects(environment.service.restoreToFreshCandidate(matchingReference, destination), { code: 'BACKUP_FAILED' });
+    assert.equal(verified, false);
+    assert.equal(extracted, false);
+    assert.equal(fs.existsSync(destination), false);
+    assert.equal(fs.readdirSync(environment.root).some(name => name.startsWith('restore-staging-')), false);
+  });
+}
+
 test('restore adopts an exact identity-matching destination after durable rename uncertainty', async (t) => {
   const environment = fixture(t, { uncertainRenameNumber: 3 });
   const reference = await environment.service.createVerifiedRestorePoint(request(environment.serverPath));
