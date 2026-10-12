@@ -9,6 +9,7 @@
   let generation = 0;
   let operation = 0;
   let controller;
+  let lifecycleController;
   let state = null;
   let plan = null;
   let choices = {};
@@ -23,6 +24,7 @@
     'runtime-incomplete':'Matching runtime incomplete', 'recovery-required':'Matching pack recovery required'
   };
   const phaseLabels = {
+    'checking-requirement':'Checking the server’s matching pack requirement',
     preparing:'Preparing matching client pack', 'downloading-archive':'Downloading client archive',
     'recovering-installation':'Checking and recovering the interrupted installation…',
     materialize:'Preparing verified archive', list:'Reading archive contents', validate:'Checking archive paths and limits', classify:'Identifying archive format',
@@ -39,6 +41,8 @@
     java:'Preparing Java', minecraft:'Preparing Minecraft', loader:'Preparing loader', libraries:'Preparing runtime libraries', verify:'Checking runtime files'
   };
   const fileLabels = {
+    'checking-client-files': {verb:'Checked', noun:'existing client files', meter:'Existing client files checked'},
+    'verifying-runtime': {verb:'Checked', noun:'runtime files', meter:'Runtime files checked'},
     'copying-pack-files': {verb:'Copied', noun:'pack files', meter:'Pack files copied'},
     'copying-client-files': {verb:'Copied', noun:'existing client files', meter:'Existing client files copied'},
     'checking-bundled-files': {verb:'Checked', noun:'bundled files', meter:'Bundled files checked'},
@@ -72,17 +76,30 @@
     currentId = clientId;
     generation += 1;
     operation += 1;
-    controller?.abort(); controller = null;
+    lifecycleController?.abort(); controller = null; lifecycleController = null;
     state = null; plan = null; choices = {}; progress = null; error = null; cleanupNotice = null; busy = false;
     dispatch('state', {clientId, status:'loading'});
     if (clientId) refresh();
   }
   async function run(action, apply, cancellable = false, refreshOnError = false, initialPhase = cancellable ? 'preparing' : null) {
     const id = clientId, epoch = generation, token = ++operation;
-    controller?.abort();
-    const ownedController = cancellable ? new AbortController() : null;
-    controller = ownedController;
+    lifecycleController?.abort();
+    // Even a non-cancellable recovery writer may be followed by a read-only
+    // classification. Own that read's lifetime without advertising writer abort.
+    let ownedController = new AbortController();
+    lifecycleController = ownedController;
+    controller = cancellable ? ownedController : null;
     const current = () => mounted && clientId === id && epoch === generation && token === operation;
+    const readErrorState = () => {
+      // A cancelled writer can still report uncertain recovery. Its settled
+      // refusal needs a new owned read, not reuse of the writer's aborted signal.
+      if (ownedController.signal.aborted) {
+        ownedController = new AbortController();
+        lifecycleController = ownedController;
+        controller = cancellable ? ownedController : null;
+      }
+      return clientPackApi.getState(id, {signal:ownedController.signal});
+    };
     busy = true; error = null; progress = initialPhase ? {phase:initialPhase} : null;
     try {
       const result = await action(id, {signal:ownedController?.signal,onProgress:event => {if (current()) progress=event;}});
@@ -95,7 +112,7 @@
         state = {...state,status:'update-required',verified:false};
         dispatch('state', state);
         try {
-          const fresh = await clientPackApi.getState(id);
+          const fresh = await readErrorState();
           if (current()) applyState(fresh);
         } catch {
           if (current()) applyState({clientId:id,status:'unavailable',verified:false});
@@ -106,7 +123,7 @@
         if (caught.code === 'RECOVERY_REQUIRED' || refreshOnError) {
           plan=null; choices={};
           try {
-            const fresh=await clientPackApi.getState(id);
+            const fresh=await readErrorState();
             if(current()) applyState(fresh);
           } catch {
             if(current()) applyState({clientId:id,status:'unavailable',verified:false});
@@ -114,7 +131,7 @@
         }
       }
     } finally {
-      if (current()) {busy=false; progress=null; controller=null;}
+      if (current()) {busy=false; progress=null; controller=null; lifecycleController=null;}
     }
   }
   function applyState(value) {
@@ -124,7 +141,7 @@
   export function refresh() {
     plan=null; choices={}; state=null;
     dispatch('state',{clientId,status:'loading'});
-    return run(id => clientPackApi.getState(id), applyState);
+    return run((id,options) => clientPackApi.getState(id,options), applyState,true,false,'checking-requirement');
   }
   export function checkRequirement() { if (!busy && !plan) return refresh(); }
   function preview(optionalFileIds) {
@@ -145,12 +162,12 @@
       applyState({...state,...value});
     },true);
   }
-  function verify() {return run(id => clientPackApi.verify(id), applyState,false,false,'verifying-installation');}
+  function verify() {return run((id,options) => clientPackApi.verify(id,options), applyState,true,false,'verifying-installation');}
   function recover() {
-    return run(async id => {await clientPackApi.recover(id);return clientPackApi.getState(id);},applyState,false,true,'recovering-installation');
+    return run(async (id,options) => {await clientPackApi.recover(id);return clientPackApi.getState(id,{signal:options.signal});},applyState,false,true,'recovering-installation');
   }
   onMount(() => {mounted=true;});
-  onDestroy(() => {mounted=false;generation+=1;operation+=1;controller?.abort();});
+  onDestroy(() => {mounted=false;generation+=1;operation+=1;lifecycleController?.abort();});
 </script>
 
 {#if state?.status !== 'unmanaged'}

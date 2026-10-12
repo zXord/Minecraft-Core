@@ -2,6 +2,45 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 const modulePromise = import('../../src/utils/clientPacks/clientPackApi.js');
+for (const method of ['getState', 'verify']) test(`read-only check renderer ${method} correlates progress and cancellation settlement`, async () => {
+  const { clientPackApi } = await modulePromise; const controller = new AbortController();
+  const calls = []; const seen = []; let listener, resolveWork, resolveCancel, settled = false;
+  global.window = { electron: { on: (_, fn) => { listener = fn; }, removeListener: () => { listener = null; }, invoke: (channel, input) => {
+    calls.push({ channel, input });
+    if (channel === 'client-packs:cancel') return new Promise(resolve => { resolveCancel = resolve; });
+    return new Promise(resolve => { resolveWork = resolve; });
+  } } };
+  const work = clientPackApi[method]('a', { signal: controller.signal, onProgress: event => seen.push(event) }).finally(() => { settled = true; });
+  work.catch(() => {});
+  try {
+    assert.equal(typeof calls[0].input.requestId, 'string');
+    listener({ ...calls[0].input, phase: 'checking-client-files', completedItems: '64' });
+    assert.equal(seen[0].completedItems, '64');
+    controller.abort(); assert.deepEqual(calls[1].input, { requestId: calls[0].input.requestId });
+    resolveWork({ ok: false, error: { code: 'CANCELLED' } });
+    await new Promise(resolve => setImmediate(resolve)); assert.equal(settled, false);
+    resolveCancel({ ok: true, value: { cancelled: true } });
+    await assert.rejects(work, { code: 'CANCELLED' }); assert.equal(listener, null);
+  } finally { resolveWork?.({ ok: false, error: { code: 'CANCELLED' } }); resolveCancel?.({ ok: true, value: { cancelled: true } }); await work.catch(() => {}); }
+});
+
+test('read-only check busy refusal gives an actionable retry without implying readiness', async () => {
+  const { clientPackApi } = await modulePromise;
+  global.window = { electron: { invoke: async () => ({ ok: false, error: { code: 'OPERATION_IN_PROGRESS' } }) } };
+  await assert.rejects(clientPackApi.getState('a'), error => error.code === 'OPERATION_IN_PROGRESS' && error.retryable && /Refresh requirement/.test(error.message));
+});
+
+test('read-only check overlap guidance preserves the actual IPC running-client refusal', async () => {
+  const { clientPackApi } = await modulePromise;
+  const { createClientPackHandlers } = require('../../electron/ipc/client-pack-handlers.cjs');
+  const failure = async () => { throw Object.assign(new Error('private'), { code: 'CLIENT_RUNNING' }); };
+  const boundary = createClientPackHandlers({ clientPackService: Object.fromEntries(['getState','verify','preview','install','recover','cancel'].map(name => [name, failure])),
+    companionService: Object.fromEntries(['getStatus','listAssets','inspect','accept'].map(name => [name, failure])) });
+  const sender = new (require('node:events').EventEmitter)(); sender.id = 1; sender.isDestroyed = () => false; sender.send = () => {};
+  global.window = { electron: { invoke: (channel, input) => boundary.handlers[channel]({ sender }, input) } };
+  try { await assert.rejects(clientPackApi.getState('a'), error => error.code === 'OPERATION_IN_PROGRESS' && /Close the running Minecraft client/.test(error.message) && !/Refresh requirement/.test(error.message)); }
+  finally { await boundary.dispose(); }
+});
 test('client requests unwrap failures and never authorize legacy on unknown states', async () => {
   const { clientPackApi, allowsLegacyClient } = await modulePromise;
   global.window = { electron: { invoke: async () => ({ ok: false, error: { code: 'CLIENT_PACK_UNAVAILABLE', message: 'Unavailable' } }) } };

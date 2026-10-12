@@ -28,11 +28,12 @@ test.beforeAll(async () => {
   bundle = result.outputFiles[0].text;
 });
 
-async function start(page, status = 'install-required', kind = 'client') {
+async function start(page, status = 'install-required', kind = 'client', holdInitialCheck = false) {
   await page.route('**/*', route => route.abort());
   await page.setContent('<style>body{background:#15151c;color:#eee;font:15px Arial;padding:20px}</style><div id="fixture"></div>');
-  await page.evaluate(({status}) => {
+  await page.evaluate(({status, holdInitialCheck}) => {
     window.calls = []; window.listeners = new Set(); window.pending = {};
+    if (holdInitialCheck) window.pending['client-packs:get-state'] = [];
     window.runtime = {minecraftVersion:'1.20.1',loaderFamily:'forge',loaderVersion:'47.3.12',javaMajor:17,architecture:'x64',os:'win32'};
     window.descriptor = {schemaVersion:1,status:'ready',serverFingerprint:'f'.repeat(64),serverVersion:'0.13.4',source:{provider:'github',repositoryId:'1',githubOwner:'team',githubRepo:'pack',releaseId:'2',assetId:'3'},runtime:window.runtime,artifactSha256:'a'.repeat(64)};
     window.currentStatus = status;
@@ -59,7 +60,7 @@ async function start(page, status = 'install-required', kind = 'client') {
         return {ok:true,value};
       }
     };
-  }, {status});
+  }, {status, holdInitialCheck});
   await page.addScriptTag({content:bundle});
   if (kind !== 'client') await page.evaluate(kind => window.show(kind,'a'),kind);
 }
@@ -81,6 +82,57 @@ test('missing required published file stays a review failure with actionable saf
   expect(await page.evaluate(() => window.calls.filter(call => call.channel === 'client-packs:install'))).toEqual([]);
 });
 
+test('read-only check initial refresh shows observed files and cancels on panel destroy', async ({page}) => {
+  await start(page, 'ready', 'client', true);
+  await expect(page.getByRole('button', { name: 'Cancel request' })).toBeEnabled();
+  await page.evaluate(() => { const { input } = window.pending['client-packs:get-state'][0];
+    for (const listener of window.listeners) listener({ ...input, phase: 'checking-client-files', completedItems: '128' }); });
+  await expect(page.getByText('Checked 128 existing client files', { exact: true })).toBeVisible();
+  await expect(page.getByRole('progressbar')).not.toHaveAttribute('value', /.*/);
+  await page.evaluate(() => window.show('companion', 'b'));
+  expect(await page.evaluate(() => {
+    const input = window.pending['client-packs:get-state'][0].input;
+    return window.calls.some(call => call.channel === 'client-packs:cancel' && call.input.requestId === input.requestId);
+  })).toBe(true);
+  await page.evaluate(() => window.pending['client-packs:get-state'][0].resolve({ ok: false, error: { code: 'CANCELLED' } }));
+  await expect.poll(() => page.evaluate(() => window.listeners.size)).toBe(0);
+  await expect(page.getByText('Matching pack ready', { exact: true })).toHaveCount(0);
+});
+
+test('read-only check remount overlap refusal is actionable and explicit refresh can retry', async ({page}) => {
+  await start(page, 'ready', 'client', true);
+  await page.evaluate(() => window.show('companion', 'b'));
+  await page.evaluate(() => {
+    window.oldCheck = window.pending['client-packs:get-state'][0];
+    delete window.pending['client-packs:get-state'];
+    window.fail = { 'client-packs:get-state': { code: 'OPERATION_IN_PROGRESS' } };
+    window.show('client', 'a');
+  });
+  await expect(page.getByRole('alert')).toContainText('Refresh requirement');
+  await expect(page.getByRole('button', { name: 'Refresh requirement' })).toBeEnabled();
+  await expect(page.getByText('Matching pack ready', { exact: true })).toHaveCount(0);
+  await page.evaluate(() => { window.oldCheck.resolve({ ok: false, error: { code: 'CANCELLED' } }); delete window.fail; });
+  await page.getByRole('button', { name: 'Refresh requirement' }).click();
+  await expect(page.getByText('Matching pack ready', { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.listeners.size)).toBe(0);
+});
+
+test('read-only check cancellation uncertainty still reads authoritative recovery state with a fresh owned signal', async ({page}) => {
+  await start(page);
+  await page.getByRole('button', { name: 'Review matching pack' }).click();
+  await page.getByLabel('Preserve config/user.toml').check(); await page.getByLabel('Preserve mods/personal.jar').check();
+  await page.evaluate(() => { window.pending['client-packs:install'] = []; window.currentStatus = 'recovery-required'; window.recoveryReason = 'restart-required'; });
+  await page.getByRole('button', { name: 'Install reviewed pack' }).click();
+  await page.getByRole('button', { name: 'Cancel request' }).click();
+  await page.evaluate(() => window.pending['client-packs:install'][0].resolve({ ok: false, error: { code: 'RECOVERY_REQUIRED', message: 'Writer still uncertain' } }));
+  await expect(page.getByRole('button', { name: 'Retry recovery' })).toBeEnabled();
+  await expect(page.getByText(/Save your work, restart Windows/)).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('Writer still uncertain');
+  await expect(page.getByText('Matching pack ready', { exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() => window.calls.filter(call => call.channel === 'client-packs:get-state').length)).toBe(2);
+});
+
 test('Verify shows indeterminate activity until success settles without changing readiness', async ({page}) => {
   await start(page,'ready');
   await page.evaluate(() => window.pending['client-packs:verify']=[]);
@@ -92,7 +144,7 @@ test('Verify shows indeterminate activity until success settles without changing
   await expect(activity.locator('progress')).not.toHaveAttribute('value',/.*/);
   await expect(page.getByRole('button',{name:'Verify matching pack'})).toBeDisabled();
   await expect(page.getByRole('button',{name:'Refresh requirement'})).toBeDisabled();
-  await expect(page.getByRole('button',{name:'Cancel request'})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Cancel request'})).toBeEnabled();
   expect(await page.evaluate(()=>window.calls.filter(call=>call.channel.startsWith('client-packs:')))).toHaveLength(2); // initial state and one verify
   expect(await page.evaluate(()=>window.calls.filter(call=>/client-packs:(verify|install|preview|recover)$/.test(call.channel)).map(call=>call.channel))).toEqual(['client-packs:verify']);
 
@@ -127,6 +179,7 @@ test('switching client fences a held Verify indicator and its late result', asyn
   const activity=page.getByRole('status').filter({hasText:'Verifying installed client pack'});
   await expect(activity).toBeVisible();
   await page.evaluate(()=>window.show('client','b'));
+  expect(await page.evaluate(() => window.calls.some(call => call.channel === 'client-packs:cancel' && call.input.requestId === window.pending['client-packs:verify'][0].input.requestId))).toBe(true);
   await expect(page.getByRole('heading',{name:'Checking matching pack…'})).toHaveCount(0);
   await expect(page.getByText('Matching pack ready',{exact:true})).toBeVisible();
   await expect(activity).toHaveCount(0);
@@ -135,6 +188,7 @@ test('switching client fences a held Verify indicator and its late result', asyn
   await expect(page.getByRole('heading',{name:'Matching pack modified'})).toHaveCount(0);
   await expect(activity).toHaveCount(0);
   expect(await page.evaluate(()=>window.classified)).toMatchObject({clientId:'b',status:'ready'});
+  await expect.poll(() => page.evaluate(() => window.listeners.size)).toBe(0);
 });
 
 async function companionEvidence(page, label, errors) {
@@ -686,7 +740,8 @@ for (const outcome of ['success','error']) test(`task8: stale recovery ${outcome
   await expect(page.getByRole('status')).toContainText(/checking.*recovering.*interrupted installation/i);
   await page.evaluate(() => window.show('client','b'));
   await expect.poll(() => page.evaluate(() => window.pending['client-packs:get-state'].length)).toBe(2);
-  await expect(page.getByRole('status')).toHaveCount(0);
+  await expect(page.getByRole('status')).toContainText('Checking the server’s matching pack requirement');
+  await expect(page.getByRole('status')).not.toContainText(/recovering.*interrupted installation/i);
   await page.evaluate(() => window.pending['client-packs:get-state'][1].resolve({ok:true,value:{clientId:'b',status:'recovery-required',verified:false,descriptor:window.descriptor}}));
   await page.getByRole('button',{name:'Retry recovery'}).click();
   await expect.poll(() => page.evaluate(() => window.pending['client-packs:recover'].length)).toBe(2);

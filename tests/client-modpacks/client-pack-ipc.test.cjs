@@ -35,6 +35,18 @@ function fixture(overrides={}) {
   return {...api,owner,other,call:(name,input,from=owner)=>api.handlers[`client-packs:${name}`]({sender:from},input)};
 }
 
+for (const method of ['get-state', 'verify']) test(`read-only check IPC ${method} owns progress and sender destruction until settlement`, async () => {
+  const pending = deferred(); pending.promise.catch(() => {}); let options;
+  const f = fixture({ client: { [method === 'get-state' ? 'getState' : 'verify']: async (_, opts) => { options = opts; opts.onProgress({ phase: 'checking-client-files', completedItems: '64' }); return pending.promise; } } });
+  const run = f.call(method, { clientId: 'c', requestId: 'r' }); await tick();
+  try {
+    assert.ok(options?.signal);
+    assert.deepEqual(f.owner.messages[0].payload, { requestId: 'r', clientId: 'c', phase: 'checking-client-files', completedItems: '64' });
+    f.owner.dead = true; f.owner.emit('destroyed'); await tick(); assert.equal(options.signal.aborted, true);
+  } finally { pending.reject(new ModpackError('CANCELLED', 'Cancelled')); await run; await f.dispose(); }
+  assert.equal((await run).error.code, 'CANCELLED'); assert.equal(f.owner.listenerCount('destroyed'), 0);
+});
+
 test('IPC returns bounded trusted server drift refusal without unmanaged success', async () => {
   const message = "The server's managed mod files differ from the installed pack. Use Modpack Verify and Repair before installing or launching its matching client pack.";
   const fail = async () => { throw new ModpackError('CLIENT_PACK_SERVER_CHANGED', message, { details: { path: 'C:\\private', token: 'secret' } }); };

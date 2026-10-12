@@ -30,7 +30,8 @@ function descriptor(value) { return normalizeCompanionDescriptor(value); }
 function validateRequest(name, input) {
   const byServer = ['get-companion', 'list-companion-assets'];
   if (byServer.includes(name)) { exact(input, ['serverId']); id(input.serverId); }
-  else if (['get-state','verify','recover'].includes(name)) { exact(input,['clientId']); id(input.clientId); }
+  else if (['get-state','verify'].includes(name)) { exact(input,['clientId','requestId'],['clientId']); id(input.clientId); if (input.requestId !== undefined) id(input.requestId); }
+  else if (name === 'recover') { exact(input,['clientId']); id(input.clientId); }
   else if (name === 'inspect-companion') {
     exact(input,['serverId','expectedServerFingerprint','assetId','requestId'],['serverId','expectedServerFingerprint','requestId']);
     id(input.serverId); digest(input.expectedServerFingerprint); id(input.requestId); if (input.assetId !== undefined) id(input.assetId);

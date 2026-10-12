@@ -188,7 +188,7 @@ function dependencies(options = {}) {
   if (!options || typeof options !== 'object' || Array.isArray(options) || Object.getPrototypeOf(options) !== Object.prototype ||
       Object.keys(options).some(key => ![
         'authorizeSourceSnapshot', 'durableFs', 'expectedSourceSnapshot', 'fsApi', 'fsPromises',
-        'mutableRelativePaths', 'reparseInspector', 'signal', 'yieldControl', 'onCopyProgress'
+        'mutableRelativePaths', 'reparseInspector', 'signal', 'yieldControl', 'onCopyProgress', 'onInspectionProgress'
       ].includes(key))) throw invalid();
   const fsApi = options.fsApi || fs;
   const fsPromises = options.fsPromises || fsApi.promises || fsp;
@@ -200,6 +200,7 @@ function dependencies(options = {}) {
       !reparseInspector || typeof reparseInspector.isReparsePoint !== 'function' || typeof yieldControl !== 'function' ||
       (options.authorizeSourceSnapshot !== undefined && typeof options.authorizeSourceSnapshot !== 'function') ||
       (options.onCopyProgress !== undefined && typeof options.onCopyProgress !== 'function') ||
+      (options.onInspectionProgress !== undefined && typeof options.onInspectionProgress !== 'function') ||
       (options.expectedSourceSnapshot !== undefined && !copySourceSnapshots.has(options.expectedSourceSnapshot))) throw invalid();
   const mutableRelativePaths = options.mutableRelativePaths || [];
   if (!Array.isArray(mutableRelativePaths) || mutableRelativePaths.some(value => typeof value !== 'string' || value.length === 0 ||
@@ -219,6 +220,7 @@ function dependencies(options = {}) {
     fsPromises,
     mutablePaths,
     onCopyProgress: options.onCopyProgress,
+    onInspectionProgress: options.onInspectionProgress,
     reparseInspector,
     signal: options.signal,
     yieldControl
@@ -399,6 +401,15 @@ async function inspectServerDirectoryTreeEvidence(directoryPath, options = {}, f
   const stableEntries = new Map();
   let totalBytes = 0n;
   let visitedEntries = 0;
+  let checkedFiles = 0;
+  let reportedFiles = 0;
+  function reportFiles() {
+    if (!deps.onInspectionProgress || checkedFiles === reportedFiles) return;
+    reportedFiles = checkedFiles;
+    // Counts describe completed file fingerprints, never a readiness verdict.
+    // Batch observers; neither exceptions nor their promises are authority.
+    try { Promise.resolve(deps.onInspectionProgress(deepFreeze({ phase: 'checking-client-files', completedItems: String(checkedFiles) }))).catch(() => {}); } catch { /* observer only */ }
+  }
 
   async function yieldAfterEntry() {
     visitedEntries += 1;
@@ -448,6 +459,8 @@ async function inspectServerDirectoryTreeEvidence(directoryPath, options = {}, f
           entryEvidence.set(relativeKey, Object.freeze({ ...entry, statEvidence }));
         }
         stableEntries.set(absolute, Object.freeze({ type: 'file', statEvidence }));
+        checkedFiles += 1;
+        if (checkedFiles % 64 === 0) reportFiles();
       } else {
         throw unsafe();
       }
@@ -494,7 +507,10 @@ async function inspectServerDirectoryTreeEvidence(directoryPath, options = {}, f
   const rootAfter = await captureDirectory(normalized, options);
   if (!sameIdentity(rootBefore.identity, rootAfter.identity) ||
       JSON.stringify(rootBefore.statIdentity) !== JSON.stringify(rootAfter.statIdentity)) throw recoveryRequired();
+  reportFiles();
+  cancelled(deps.signal);
   await assertTreeEvidenceStable();
+  cancelled(deps.signal);
   const fingerprint = crypto.createHash('sha256').update(JSON.stringify(entries), 'utf8').digest('hex');
   const inspection = deepFreeze({
     directoryIdentity: rootBefore.identity,

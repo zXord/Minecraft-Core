@@ -20,6 +20,34 @@ function rejectingSyncContentFs() {
   return fsApi;
 }
 
+test('read-only check snapshot batches observed completed files without altering authority', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-observed-snapshot-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (let index = 0; index < 130; index++) fs.writeFileSync(path.join(root, `${index}.txt`), 'x');
+  const events = [];
+  const snapshot = await captureServerDirectoryCopySource(root, { reparseInspector: { async isReparsePoint() { return false; } },
+    onInspectionProgress: event => { events.push(event); throw new Error('observer only'); } });
+  assert.equal(snapshot.entries.length, 130);
+  assert.deepEqual(events.map(event => event.completedItems), ['64', '128', '130']);
+  assert.ok(events.every(event => event.phase === 'checking-client-files' && event.totalItems === undefined && !('path' in event)));
+});
+
+test('read-only check snapshot cancellation still refuses a verdict after observed files', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-observed-snapshot-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'one'), 'x'); const controller = new AbortController();
+  await assert.rejects(captureServerDirectoryCopySource(root, { signal: controller.signal, reparseInspector: { async isReparsePoint() { return false; } },
+    onInspectionProgress: () => controller.abort() }), { code: 'CANCELLED' });
+});
+
+test('read-only check snapshot observer cannot bypass final freshness revalidation', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-observed-snapshot-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, 'one'); fs.writeFileSync(file, 'x');
+  await assert.rejects(captureServerDirectoryCopySource(root, { reparseInspector: { async isReparsePoint() { return false; } },
+    onInspectionProgress: () => fs.writeFileSync(file, 'changed') }), { code: 'RECOVERY_REQUIRED' });
+});
+
 function asyncDirectoryDurability() {
   return {
     flushDirectory() { throw new Error('synchronous directory durability must not run'); },

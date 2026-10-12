@@ -31,6 +31,37 @@ function libraryFixture(f, name, extra = {}) {
   return { name, downloads: { artifact: { path: location, url: 'https://example.invalid/library', size: Buffer.byteLength(bytes),
     sha1: crypto.createHash('sha1').update(bytes).digest('hex') } }, ...extra };
 }
+
+test('read-only check runtime abort is preserved before filesystem work', async t => {
+  const f = fixture(t); const controller = new AbortController(); controller.abort();
+  await assert.rejects(require(modulePath).verifyClientRuntime({ clientPath: f.root, runtime, signal: controller.signal }), { code: 'CANCELLED' });
+});
+
+test('read-only check runtime aborts during file hashing and closes its stream before settling', async t => {
+  const f = fixture(t); const controller = new AbortController();
+  const bytes = 'x'.repeat(2 * 1024 * 1024);
+  f.put('versions/1.20.1/1.20.1.jar', bytes);
+  f.base.downloads.client = { size: bytes.length, sha1: crypto.createHash('sha1').update(bytes).digest('hex') }; saveProfiles(f);
+  const original = fs.createReadStream; let closed = false, chunks = 0;
+  t.mock.method(fs, 'createReadStream', (...args) => {
+    const stream = original(...args);
+    stream.once('close', () => { closed = true; });
+    stream.once('data', () => { chunks++; controller.abort(); });
+    return stream;
+  });
+  await assert.rejects(require(modulePath).verifyClientRuntime({ clientPath: f.root, runtime, signal: controller.signal }), { code: 'CANCELLED' });
+  assert.equal(chunks, 1); assert.equal(closed, true);
+});
+
+test('read-only check runtime reports completed files without guessed totals and aborts between files', async t => {
+  const f = fixture(t); const controller = new AbortController(); const events = [];
+  await assert.rejects(require(modulePath).verifyClientRuntime({ clientPath: f.root, runtime, signal: controller.signal,
+    onProgress: event => { events.push(event); if (event.completedItems === '1') controller.abort(); } }), { code: 'CANCELLED' });
+  assert.deepEqual(events, [{ phase: 'verifying-runtime', completedItems: '1' }]);
+  const complete = [];
+  assert.equal((await require(modulePath).verifyClientRuntime({ clientPath: f.root, runtime, onProgress: event => { complete.push(event); throw new Error('observer'); } })).verified, true);
+  assert.equal(complete.at(-1).completedItems, '3');
+});
 function nativeFixture(f, name) {
   const native = libraryFixture(f, `${name}:natives-windows`);
   return { name, natives: { windows: 'natives-windows' }, downloads: { classifiers: { 'natives-windows': native.downloads.artifact } } };

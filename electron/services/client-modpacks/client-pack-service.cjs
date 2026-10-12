@@ -226,54 +226,69 @@ class ClientPackService {
       } finally { plan.active = false; await this._release(plan); }
     });
   }
-  async _runtime(clientPath, runtime, runtimeConstraints) {
-    const result = await this.runtimeInstaller.verify({ clientPath, runtime, runtimeConstraints });
+  async _runtime(clientPath, runtime, runtimeConstraints, options = {}) {
+    cancelled(options.signal);
+    options.onProgress?.({ phase: 'verifying-runtime' });
+    const result = await this.runtimeInstaller.verify({ clientPath, runtime, runtimeConstraints, signal: options.signal, onProgress: options.onProgress });
+    cancelled(options.signal);
     if (result?.verified !== true || !sameRuntime(result.runtime, runtime) || typeof result.profileId !== 'string' ||
         !/^[A-Za-z0-9][A-Za-z0-9._+-]{0,191}$/.test(result.profileId)) throw fail('RUNTIME_INCOMPLETE');
     return result;
   }
-  async _verify(target, descriptor) {
+  async _verify(target, descriptor, options = {}) {
+    cancelled(options.signal);
     const status = await this.transaction.status(target);
     if (status && !['committed', 'abandoned'].includes(status.phase)) throw fail('RECOVERY_REQUIRED');
     const manifest = await this.stateStore.read(target.clientPath);
     if (!manifest) return { verified: false, status: descriptor?.status === 'ready' ? 'install-required' : descriptor?.status === 'unpaired' ? 'unpaired' : 'unmanaged', manifest: null };
     if (!descriptor || !equal(descriptor, manifest.descriptor)) return { verified: false, status: 'update-required', manifest };
-    const snapshot = await captureServerDirectoryCopySource(target.clientPath, this.reparseInspector ? { reparseInspector: this.reparseInspector } : {});
+    options.onProgress?.({ phase: 'checking-client-files' });
+    const snapshot = await captureServerDirectoryCopySource(target.clientPath, { ...(this.reparseInspector ? { reparseInspector: this.reparseInspector } : {}),
+      signal: options.signal, onInspectionProgress: options.onProgress });
+    cancelled(options.signal);
     const files = new Map(snapshot.entries.map(e => [e.pathKey, e]));
     const modified = manifest.entries.filter(e => (e.preserved === true && /\.jar$/i.test(e.path)) || (e.policy !== 'preserve-after-seed' &&
       (!files.has(e.pathKey) || files.get(e.pathKey).type !== 'file' || files.get(e.pathKey).sha256 !== e.sha256 || files.get(e.pathKey).size !== e.size) &&
       !(e.preserved && !/\.jar$/i.test(e.path) && files.get(e.pathKey)?.type === 'file')));
     if (modified.length) return { verified: false, status: 'modified', manifest };
-    const runtime = await this._runtime(target.clientPath, manifest.descriptor.runtime, manifest.runtimeConstraints);
+    const runtime = await this._runtime(target.clientPath, manifest.descriptor.runtime, manifest.runtimeConstraints, options);
     return { verified: true, status: 'ready', manifest, runtime };
   }
-  async getState(value) {
-    request(value, ['clientId']); const target = await this._target(value.clientId);
-    let descriptor = null; let recoveryReason;
-    try {
-      const status = await this.transaction.status(target);
-      if (status && !['committed', 'abandoned'].includes(status.phase)) {
-        if (status.phase === 'preparing' && typeof this.runtimeInstaller.getRecoveryState === 'function') {
-          try {
-            const recovery = await this.runtimeInstaller.getRecoveryState(status.operationId);
-            if (recovery?.status === 'restart-required' && recovery.quiescent === false) recoveryReason = 'restart-required';
-          } catch { /* Unavailable ownership evidence must not invent recovery instructions. */ }
+  async getState(value, options = {}) {
+    request(value, ['clientId']);
+    return this._run(value.clientId, options, async operation => {
+      const target = await this._target(value.clientId);
+      let descriptor = null; let recoveryReason;
+      try {
+        const status = await this.transaction.status(target);
+        if (status && !['committed', 'abandoned'].includes(status.phase)) {
+          if (status.phase === 'preparing' && typeof this.runtimeInstaller.getRecoveryState === 'function') {
+            try {
+              const recovery = await this.runtimeInstaller.getRecoveryState(status.operationId);
+              if (recovery?.status === 'restart-required' && recovery.quiescent === false) recoveryReason = 'restart-required';
+            } catch { /* Unavailable ownership evidence must not invent recovery instructions. */ }
+          }
+          throw fail('RECOVERY_REQUIRED');
         }
-        throw fail('RECOVERY_REQUIRED');
+        cancelled(operation.signal);
+        operation.onProgress({ phase: 'checking-requirement' });
+        descriptor = (await this._requirement(value.clientId, { signal: operation.signal, deadline: operation.deadline })).descriptor;
+        cancelled(operation.signal);
+        const result = await this._verify(target, descriptor, operation);
+        cancelled(operation.signal);
+        return deepFreeze({ clientId: value.clientId, status: result.status, verified: result.verified, descriptor });
+      } catch (cause) {
+        cancelled(operation.signal);
+        if (!['RECOVERY_REQUIRED', 'RUNTIME_INCOMPLETE'].includes(cause.code)) throw cause;
+        return deepFreeze({ clientId: value.clientId, status: cause.code === 'RECOVERY_REQUIRED' ? 'recovery-required' : 'runtime-incomplete', verified: false, descriptor,
+          ...(recoveryReason ? { recoveryReason } : {}) });
       }
-      descriptor = (await this._requirement(value.clientId)).descriptor;
-      const result = await this._verify(target, descriptor);
-      return deepFreeze({ clientId: value.clientId, status: result.status, verified: result.verified, descriptor });
-    } catch (cause) {
-      if (!['RECOVERY_REQUIRED', 'RUNTIME_INCOMPLETE'].includes(cause.code)) throw cause;
-      return deepFreeze({ clientId: value.clientId, status: cause.code === 'RECOVERY_REQUIRED' ? 'recovery-required' : 'runtime-incomplete', verified: false, descriptor,
-        ...(recoveryReason ? { recoveryReason } : {}) });
-    }
+    });
   }
-  async verify(value) { return this.getState(value); }
+  async verify(value, options = {}) { return this.getState(value, options); }
   async getLaunchAuthority(value, options = {}) {
     request(value, ['clientId']); const target = await this._target(value.clientId);
-    const result = await this._verify(target, (await this._requirement(value.clientId, options)).descriptor);
+    const result = await this._verify(target, (await this._requirement(value.clientId, options)).descriptor, options);
     cancelled(options.signal);
     if (!result.verified) throw fail(result.status === 'update-required' ? 'PLAN_STALE' : 'RUNTIME_INCOMPLETE');
     return deepFreeze({ ...target, runtime: result.manifest.descriptor.runtime, profileId: result.runtime.profileId,

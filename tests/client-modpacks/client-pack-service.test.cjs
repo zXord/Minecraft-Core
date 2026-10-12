@@ -171,6 +171,61 @@ function fixture(t) {
   });
   return { service, dependencies, external, live, target, guard, transaction, runtimeOperations, forgottenOperations };
 }
+for (const method of ['getState', 'verify']) test(`read-only check ${method} owns cancellation through requirement and refuses overlap until settled`, async t => {
+  const f = fixture(t); const controller = new AbortController(); const events = [];
+  let enter, release, signal;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const original = f.dependencies.managementClient.readRequirement;
+  f.dependencies.managementClient.readRequirement = async (_, options) => { signal = options?.signal; enter(); await gate; return original(); };
+  const pending = f.service[method]({ clientId: 'one' }, { signal: controller.signal, onProgress: event => events.push(event) });
+  pending.catch(() => {}); await entered;
+  try {
+    assert.ok(signal, 'the requirement receives the owned signal');
+    controller.abort(); assert.equal(signal.aborted, true);
+    await assert.rejects(f.service.getState({ clientId: 'one' }), { code: 'OPERATION_IN_PROGRESS' });
+    assert.ok(events.some(event => event.phase === 'checking-requirement'));
+  } finally { release(); await pending.catch(() => {}); }
+  await assert.rejects(pending, { code: 'CANCELLED' });
+  f.dependencies.managementClient.readRequirement = original;
+  assert.equal((await f.service.getState({ clientId: 'one' })).status, 'install-required');
+});
+
+for (const boundary of ['snapshot', 'runtime']) test(`read-only check aborts ${boundary} work without a ready verdict and can retry`, async t => {
+  const f = fixture(t); const review = await f.service.preview({ clientId: 'one' });
+  assert.equal((await f.service.install({ clientId: 'one', planId: review.planId, conflictChoices: {} })).verified, true);
+  const controller = new AbortController(); const events = [];
+  let enter, release, signal;
+  const entered = new Promise(resolve => { enter = resolve; }); const gate = new Promise(resolve => { release = resolve; });
+  let restore;
+  if (boundary === 'snapshot') {
+    const inspector = { async isReparsePoint(_, options) { signal = options?.signal; enter(); await gate; return false; } };
+    const original = f.service.reparseInspector; f.service.reparseInspector = inspector; restore = () => { f.service.reparseInspector = original; };
+  } else {
+    const original = f.dependencies.runtimeInstaller.verify;
+    f.dependencies.runtimeInstaller.verify = async request => { signal = request.signal; enter(); await gate; return original(); };
+    restore = () => { f.dependencies.runtimeInstaller.verify = original; };
+  }
+  const pending = f.service.verify({ clientId: 'one' }, { signal: controller.signal, onProgress: event => events.push(event) });
+  pending.catch(() => {}); await entered;
+  try { assert.ok(signal); controller.abort(); assert.equal(signal.aborted, true); }
+  finally { release(); await pending.catch(() => {}); restore(); }
+  await assert.rejects(pending, { code: 'CANCELLED' });
+  assert.ok(events.some(event => event.phase === 'checking-client-files'));
+  assert.equal((await f.service.verify({ clientId: 'one' })).verified, true);
+});
+
+test('read-only check reports measured snapshot files and keeps fresh launch and install authority', async t => {
+  const f = fixture(t); const review = await f.service.preview({ clientId: 'one' });
+  assert.equal((await f.service.install({ clientId: 'one', planId: review.planId, conflictChoices: {} })).verified, true);
+  const events = [];
+  assert.equal((await f.service.getState({ clientId: 'one' }, { onProgress: event => events.push(event) })).verified, true);
+  assert.ok(events.some(event => event.phase === 'checking-client-files' && Number(event.completedItems) >= 2 && event.totalItems === undefined));
+  assert.ok(events.some(event => event.phase === 'verifying-runtime'));
+  fs.writeFileSync(path.join(f.live, 'mods/pack.jar'), 'changed');
+  await assert.rejects(f.service.getLaunchAuthority({ clientId: 'one' }), { code: 'RUNTIME_INCOMPLETE' });
+});
+
 function writeInertRuntime(root, lwjglVersion = '3.3.1') {
   const put = (name, data) => { const file = path.join(root, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof data === 'string' ? data : JSON.stringify(data)); };
   const sha1 = text => crypto.createHash('sha1').update(text).digest('hex');

@@ -40,7 +40,9 @@ function readJson(root, name, maximum = 16 * 1024 * 1024) {
   if (fs.statSync(target).size > maximum) throw failure();
   return JSON.parse(fs.readFileSync(target, 'utf8'));
 }
-async function verifyFile(root, name, download = {}) {
+function cancelled(signal) { if (signal?.aborted) throw failure('CANCELLED'); }
+async function verifyFile(root, name, download = {}, signal) {
+  cancelled(signal);
   const target = safePath(root, name);
   const stat = fs.statSync(target);
   if (stat.size < 1 || (Number.isSafeInteger(download.size) && download.size >= 0 && stat.size !== download.size)) throw failure();
@@ -48,9 +50,16 @@ async function verifyFile(root, name, download = {}) {
   if (download.sha1 !== undefined && download.sha1 !== '') {
     if (!/^[a-f0-9]{40}$/i.test(download.sha1)) throw failure();
     const hash = crypto.createHash('sha1');
-    for await (const chunk of fs.createReadStream(target)) hash.update(chunk);
+    const stream = fs.createReadStream(target, { signal });
+    // Abort must settle only after the read handle closes, so a remount cannot
+    // overlap the cancelled stream with the next owned check.
+    const closed = new Promise(resolve => stream.once('close', resolve));
+    try {
+      for await (const chunk of stream) { cancelled(signal); hash.update(chunk); }
+    } finally { stream.destroy(); await closed; }
     if (hash.digest('hex') !== download.sha1.toLowerCase()) throw failure();
   }
+  cancelled(signal);
   return target;
 }
 function exactLoader(profile, runtime) {
@@ -99,12 +108,13 @@ function validateRawLibraries(profile) {
     for (const artifact of [library.downloads?.artifact, ...Object.values(library.downloads?.classifiers || {})]) if (artifact?.path !== undefined) relative(artifact.path);
   }
 }
-function findJava(root, runtime) {
+function findJava(root, runtime, signal) {
   const javaRoot = `java/java-${runtime.javaMajor}`;
   safePath(root, javaRoot, true);
   const candidates = [];
   let visited = 0;
   function visit(name, depth) {
+    cancelled(signal);
     if (++visited > 512 || depth > 6) throw failure();
     const directory = safePath(root, name, true);
     const entries = fs.readdirSync(directory, { withFileTypes: true });
@@ -131,36 +141,51 @@ function findJava(root, runtime) {
   if (candidates.length !== 1) throw failure();
   return candidates[0];
 }
-async function verifyClientRuntime({ clientPath, runtime: input, runtimeConstraints }) {
+async function verifyClientRuntime({ clientPath, runtime: input, runtimeConstraints, signal, onProgress }) {
   const runtime = normalizeClientRuntime(input);
   try {
+    cancelled(signal);
+    let checkedFiles = 0, reportedFiles = 0;
+    function reportFiles() {
+      if (!onProgress || reportedFiles === checkedFiles) return;
+      reportedFiles = checkedFiles;
+      try { Promise.resolve(onProgress(Object.freeze({ phase: 'verifying-runtime', completedItems: String(checkedFiles) }))).catch(() => {}); } catch { /* observer only */ }
+    }
+    async function checkFile(name, download) {
+      await verifyFile(clientPath, name, download, signal);
+      checkedFiles += 1;
+      if (checkedFiles === 1 || checkedFiles % 64 === 0) reportFiles();
+      cancelled(signal);
+    }
     safePath(clientPath, '', true);
     const { profileId, base, profile } = profileMetadata(clientPath, runtime);
     validateRawLibraries(base); if (profile !== base) validateRawLibraries(profile);
     const { Version } = require('@xmcl/core');
     const resolved = await Version.parse(clientPath, profileId, { name: 'windows', arch: 'x64', version: '' });
+    cancelled(signal);
     if (resolved.minecraftVersion !== runtime.minecraftVersion || resolved.libraries.length > 10000) throw failure();
     assertEffectiveLoader(resolved.libraries, runtime);
     assertRuntimeConstraints(resolved.libraries, runtime, runtimeConstraints);
-    await verifyFile(clientPath, `versions/${runtime.minecraftVersion}/${runtime.minecraftVersion}.jar`, base.downloads?.client);
+    await checkFile(`versions/${runtime.minecraftVersion}/${runtime.minecraftVersion}.jar`, base.downloads?.client);
     for (const library of resolved.libraries) {
       if (relative(library.download.path) !== relative(library.path)) throw failure();
-      await verifyFile(clientPath, `libraries/${library.download.path}`, library.download);
+      await checkFile(`libraries/${library.download.path}`, library.download);
     }
     const indexId = base.assetIndex?.id;
     if (typeof indexId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(indexId)) throw failure();
     const indexName = `assets/indexes/${indexId}.json`;
-    await verifyFile(clientPath, indexName, base.assetIndex);
+    await checkFile(indexName, base.assetIndex);
     const index = readJson(clientPath, indexName);
     if (!index.objects || typeof index.objects !== 'object' || Array.isArray(index.objects) || Object.keys(index.objects).length > 100000) throw failure();
     for (const object of Object.values(index.objects)) {
       if (!/^[a-f0-9]{40}$/.test(object.hash) || !Number.isSafeInteger(object.size) || object.size < 0) throw failure();
-      await verifyFile(clientPath, `assets/objects/${object.hash.slice(0, 2)}/${object.hash}`, { sha1: object.hash, size: object.size });
+      await checkFile(`assets/objects/${object.hash.slice(0, 2)}/${object.hash}`, { sha1: object.hash, size: object.size });
     }
-    if (base.logging?.client?.file) await verifyFile(clientPath, `assets/log_configs/${relative(base.logging.client.file.id)}`, base.logging.client.file);
-    const javaPath = findJava(clientPath, runtime);
+    if (base.logging?.client?.file) await checkFile(`assets/log_configs/${relative(base.logging.client.file.id)}`, base.logging.client.file);
+    const javaPath = findJava(clientPath, runtime, signal);
+    reportFiles(); cancelled(signal);
     return Object.freeze({ verified: true, runtime, profileId, javaPath });
-  } catch { throw failure(); }
+  } catch (cause) { if (signal?.aborted || cause?.code === 'CANCELLED') throw failure('CANCELLED'); throw failure(); }
 }
 
 class ClientRuntimeInstaller {

@@ -11,11 +11,13 @@ export class ClientPackApiError extends Error {
     const message = error.code === 'CLIENT_PACK_SERVER_CHANGED'
       ? "The server's managed mod files differ from the installed pack. Use Modpack Verify and Repair before installing or launching its matching client pack."
       : error.code === 'ARTIFACT_UNAVAILABLE' ? unavailableArtifactMessage(error.details)
+      : error.code === 'OPERATION_IN_PROGRESS' && error.message !== 'Close the running Minecraft client before changing its pack'
+        ? 'A matching pack operation is still running or stopping. Wait for it to settle, then use Refresh requirement to retry.'
       : error.message || 'Matching client pack is unavailable. Refresh and try again.';
     super(message);
     this.name = 'ClientPackApiError';
     this.code = error.code || 'CLIENT_PACK_UNAVAILABLE';
-    this.retryable = error.retryable === true;
+    this.retryable = error.retryable === true || error.code === 'OPERATION_IN_PROGRESS';
   }
 }
 
@@ -70,9 +72,9 @@ export const clientPackApi = Object.freeze({
   listCompanionAssets: serverId => invoke('list-companion-assets', { serverId }),
   inspectCompanion: (input, options) => request('inspect-companion', input, options),
   acceptCompanion: input => invoke('accept-companion', input),
-  getState: clientId => invoke('get-state', { clientId }),
+  getState: (clientId, options) => request('get-state', { clientId }, options),
   preview: (input, options) => request('preview', input, options),
   install: (input, options) => request('install', input, options),
-  verify: clientId => invoke('verify', { clientId }),
+  verify: (clientId, options) => request('verify', { clientId }, options),
   recover: clientId => invoke('recover', { clientId })
 });
