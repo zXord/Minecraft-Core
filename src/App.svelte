@@ -405,10 +405,10 @@
     }
   }
 
-  function getInstanceStatus(instance) {
+  function getInstanceStatus(instance, statuses) {
     if (!instance || instance.type !== "server") return null;
     return (
-      serverStatuses[instance.id] || {
+      statuses[instance.id] || {
         instanceId: instance.id,
         isRunning: false,
         status: "stopped",
@@ -1675,12 +1675,12 @@
               <!-- Display mode -->
               <div class="instance-details">
                 <span class="instance-name" title={instance.name}>{instance.name}</span>
-                {#if instance.type === "server" && getInstanceStatus(instance)}
+                {#if instance.type === "server" && getInstanceStatus(instance, serverStatuses)}
                   <span
                     class="instance-status-badge"
-                    class:running={getInstanceStatus(instance)?.isRunning}
+                    class:running={getInstanceStatus(instance, serverStatuses)?.isRunning}
                   >
-                    {getInstanceStatus(instance)?.isRunning ? "Running" : "Stopped"}
+                    {getInstanceStatus(instance, serverStatuses)?.isRunning ? "Running" : "Stopped"}
                   </span>
                 {/if}
               </div>
