@@ -2,7 +2,21 @@
 
 Updated 13 October 2026, Asia/Riyadh. **Not release ready.** This is the restart checklist for normal, visible app testing. Automated tests support these checks; they do not replace installing the real pack, running Minecraft, and joining the server.
 
-## Latest normal-app checkpoint — 13 October 03:23
+## Latest normal-app checkpoint — 13 October 08:34
+
+The user resumed and fresh native inspection confirmed the Windows Security overlay is gone. Continued with the same final0321 package/profile; no restart, new install, real-instance access, or a1 access.
+
+| New normal-app check | Result |
+| --- | --- |
+| Corrected matching-client cancellation wording | **PASS:** c1 reopened into a real file/runtime check; Cancel request produced “The matching client pack request was cancelled” and immediately re-enabled Refresh requirement. No installation or file removal. |
+| Client reopen and retry readiness | **PASS:** normal Refresh requirement advanced through measured existing-file/runtime checks and returned Matching pack ready for exact `26.5.1+mc26.2.fabric`. Authentication remains required; no game launch/join claimed. |
+| Detach review | **PASS, review only:** exact disposable `Codex QA Modrinth 2026-10-11-c1`, zero removals, all pack/runtime/world/user files retained. Detach has NOT started. Action-time confirmation requested because it ends c1 release notifications. |
+
+Read-only pre-detach baseline: 552 content files / 376,369,017 bytes, including 31 world files and 20 mod JARs; operational `.minecraft-core-state` excluded. Exact per-file hashes are in the ignored native evidence folder (`c1-before-detach-20261013.json`). This is a comparison baseline, not a claim that detach passed.
+
+Current state: final0321 remains on c1 detach review; both games Stopped, b1 management Stopped, c1 management Running on 8081. Pending: confirm c1 detach, inspect settled result/file preservation/unlocked server Mods/client response/release tracking, then normal owned-service/app teardown. The corrected review-download cancellation message and transient lifecycle-cancelling sentence have supporting regression evidence but have not been re-observed natively. Do not reinstall packs solely to repeat those already-settled operations. Authenticated gameplay, actual taskbar icon, naturally eligible seven-day retention, full uninstall execution and post-Start uncertain-destination reuse remain unpassed. **Not release ready.**
+
+## Historical normal-app checkpoint — 13 October 03:23
 
 Normal testing resumed after the user dismissed the previous security overlay. The final rebuilt app is now open on the same isolated control-b1 profile. **A new Windows Security network-permission overlay appeared after final0321 management Start and blocks native continuation.** It was not operated or bypassed. No real instance or a1 was touched.
 
