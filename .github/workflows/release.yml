@@ -133,6 +133,12 @@ jobs:
       - name: Run modpack Electron E2E
         run: npm run test:e2e:modpacks
 
+      - name: Install pinned Playwright Chromium
+        run: node node_modules/playwright/cli.js install chromium
+
+      - name: Run modpack launch reconciliation browser tests
+        run: npm run test:e2e:modpack-launch-reconciliation
+
       - name: Build unpacked Windows app
         run: npm run pack
 

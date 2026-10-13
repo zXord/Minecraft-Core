@@ -18,6 +18,7 @@
     "test:modpacks": "node --test --test-concurrency=4 tests/modpacks/*.test.cjs",
     "test:failure-matrix": "node --test tests/modpacks/lifecycle-failure-matrix.test.cjs",
     "test:e2e:modpacks": "playwright test tests/e2e/modpack-setup.spec.js tests/e2e/modpack-lifecycle.spec.js tests/e2e/modpack-recovery-accessibility.spec.js tests/e2e/startup-auto-start.spec.js --workers=1",
+    "test:e2e:modpack-launch-reconciliation": "playwright test tests/e2e/modpack-launch-reconciliation.spec.js --workers=1",
     "test:e2e:dev-startup": "playwright test tests/e2e/dev-startup-render.spec.js --workers=1",
     "test:e2e:ipc-handoff": "playwright test tests/e2e/main-process-ipc-handoff.spec.js --workers=1",
     "test:e2e:disposable-client-join": "playwright test tests/e2e/disposable-client-join.spec.js --workers=1",

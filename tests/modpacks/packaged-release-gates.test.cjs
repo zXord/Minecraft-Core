@@ -398,6 +398,44 @@ test('packaged smoke waits for every shared-root probe before failure cleanup', 
   assert.equal(archiveRootExistedAtSettlement, true);
 });
 
+test('release browser gates discover launch reconciliation before packaging', () => {
+  const workflow = yaml.load(fs.readFileSync(path.join(repositoryRoot, '.github', 'workflows', 'release.yml'), 'utf8'));
+  const steps = workflow.jobs['build-and-release'].steps;
+  const packagingIndex = steps.findIndex(step => String(step.run || '').trim() === 'npm run pack');
+  assert.ok(packagingIndex >= 0, 'the release must have a packaging boundary');
+  const scriptNames = steps.slice(0, packagingIndex)
+    .filter(step => step.if === undefined && step['continue-on-error'] !== true)
+    .flatMap(step => String(step.run || '').split(/\r?\n/u)
+      .map(line => /^npm run (test:e2e:[a-z0-9:-]+)$/u.exec(line.trim())?.[1])
+      .filter(Boolean));
+  const discovered = new Set();
+  for (const scriptName of scriptNames) {
+    const args = ['--silent', 'run', scriptName, '--', '--list', '--reporter=json'];
+    const result = childProcess.spawnSync(
+      process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : 'npm',
+      process.platform === 'win32' ? ['/d', '/s', '/c', `npm.cmd ${args.join(' ')}`] : args,
+      { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 }
+    );
+    assert.equal(result.status, 0, `${scriptName}: ${result.error || result.stderr || result.stdout}`);
+    const report = JSON.parse(result.stdout);
+    assert.deepEqual(report.errors, [], `${scriptName} must discover without errors`);
+    const collect = suite => {
+      for (const spec of suite.specs || []) discovered.add(`${spec.file}:${spec.title}`);
+      for (const child of suite.suites || []) collect(child);
+    };
+    for (const suite of report.suites) collect(suite);
+  }
+  for (const title of [
+    'transport Start reconciles captured credentials without another Start or release',
+    'Back from unknown Start permits explicit exact discovery, never another destination',
+    'destination-recovery action rehydrates the exact captured outcome before guarded release',
+    'R1 management uninstall accepts only canonical public kind, returned uninstall-managed'
+  ]) {
+    assert.ok(discovered.has(`modpack-launch-reconciliation.spec.js:${title}`),
+      `mandatory pre-packaging gates must discover: ${title}`);
+  }
+});
+
 test('release workflow makes every Windows x64 modpack gate mandatory and ordered before installer publication', () => {
   const workflow = yaml.load(fs.readFileSync(path.join(repositoryRoot, '.github', 'workflows', 'release.yml'), 'utf8'));
   assert.deepEqual(workflow.permissions, { contents: 'read' });

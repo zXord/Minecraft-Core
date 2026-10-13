@@ -4,6 +4,9 @@ const fsPromises = require('node:fs/promises');
 const path = require('node:path');
 
 const CACHE_DIRECTORY_NAME = 'dev-electron-runtime';
+// Branding changes must use a new path, not invalidate a runtime an older
+// development process may still be using under its lease.
+const BRANDING_VERSION = 2;
 const MARKER_FILENAME = '.minecraft-core-runtime.json';
 const RUNTIME_PREFIX = 'runtime-';
 const STAGING_PREFIX = '.staging-';
@@ -45,6 +48,7 @@ async function assertRegularFile(filePath, label) {
 function expectedMarker({ electronVersion, architecture, sourceDigest, iconDigest }) {
   return Object.freeze({
     schemaVersion: 1,
+    brandingVersion: BRANDING_VERSION,
     electronVersion,
     architecture,
     sourceDigest,
@@ -349,7 +353,7 @@ async function defaultEditExecutable({ executablePath, iconPath, electronVersion
     'version-string': {
       CompanyName: 'zXord',
       FileDescription: 'Minecraft Core Development',
-      ProductName: 'Minecraft Core',
+      ProductName: 'Minecraft Core Development',
       InternalName: 'Minecraft Core Development',
       OriginalFilename: 'electron.exe'
     },
@@ -392,7 +396,7 @@ async function prepareBrandedDevElectronRuntime({
   ]);
   const normalizedVersion = safeSegment(electronVersion, 'unknown');
   const normalizedArchitecture = safeSegment(architecture, 'unknown');
-  const cacheKey = `${normalizedVersion}-${normalizedArchitecture}-${sourceDigest.slice(0, 16)}-${iconDigest.slice(0, 16)}`;
+  const cacheKey = `v${BRANDING_VERSION}-${normalizedVersion}-${normalizedArchitecture}-${sourceDigest.slice(0, 16)}-${iconDigest.slice(0, 16)}`;
   const cacheRoot = path.join(cacheBasePath, 'Minecraft Core', CACHE_DIRECTORY_NAME);
   const cacheDirectory = path.join(cacheRoot, `${RUNTIME_PREFIX}${cacheKey}`);
   const executablePath = path.join(cacheDirectory, 'electron.exe');

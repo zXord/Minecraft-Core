@@ -6,7 +6,32 @@ Updated 13 October 2026, Asia/Riyadh. **Not release ready.** This is the restart
 
 The user explicitly cancelled Microsoft sign-in and authenticated gameplay testing. **Do not log in, reuse credentials, ask for sign-in, or run authenticated launch/join/rejoin tests.** These checks are **excluded by user request, not passed and no longer waiting on user input**. Continue only the remaining non-authentication checks on disposable QA instances. Older sign-in handoff instructions below are historical and superseded.
 
-## Latest normal-app checkpoint — 13 October 12:08
+## Latest continuation — 13 October 12:54
+
+The user requested continued non-login work; the earlier decision to stop at a finite pass was premature. Authentication remains excluded. No real instance or interrupted a1 was modified.
+
+Two bounded fixes are independently reviewed and verified:
+
+- **Development shortcut collision:** Electron 42.10.1 names its automatic notification shortcut from the executable ProductName. Development and packaged executables previously both used `Minecraft Core`, allowing them to overwrite the same shortcut despite distinct AppIDs. Development now uses `Minecraft Core Development`. A versioned runtime-cache generation prevents reuse or in-place replacement of old, potentially leased runtimes. Three regressions failed before the correction and passed afterward; actual native resource editing also verified the new ProductName and grass-block icon without altering stock Electron.
+- **Release gate omission:** the 55-test launch/reconciliation browser suite was not selected by the release workflow. It now runs before packaging, with pinned Chromium installation and a regression that executes test discovery for the mandatory pre-packaging scripts. The real browser suite passed **55/55**; this is supporting automation, not native uninstall or uncertain-destination acceptance.
+
+Fresh final Node gate: **5,531 total / 5,523 pass / zero failures or cancellations / eight skips**, exit 0. Production renderer build passed in 11.10 seconds. Normal `npm run dev` on a new empty QA profile showed the grass-block taskbar icon; Vite reported 1,063 ms. The app closed normally and its launcher reported exit 0. This warm result does not certify all cold starts. Generic packaged Start Menu shortcut and the user's three unrelated dirty-file hashes remained unchanged.
+
+**Packaged icon diagnosis remains unresolved.** A controlled A/B changed only the AppID in a disposable diagnostic ASAR, with the same executable/path/profile: normal `com.minecraft-core.app` showed the atom, a fresh diagnostic identity showed the grass block. The original ASAR and stable identity were restored. A narrowly scoped explicit-icon update of the owned generic shortcut did not repair it; the shortcut was restored byte-for-byte. Every shortcut in TaskBar and ImplicitAppShortcuts was inspected read-only, with no matching stable AppID or known app target. Evidence establishes identity-dependent shell behavior, not a proven cache location or safe targeted repair. No global cache purge, Explorer restart, production AppID change, or security setting change was made.
+
+Normal native setup is now at **Review, before Install**, on the unchanged firewall-approved client0842 app/control-b1 profile. A new empty folder was created through the native picker: `C:\Users\s3eed\SynologyDrive\Desktop\ET\Minecraft\Codex QA Modrinth 2026-10-13-d1`. Exact Adrenaline `26.5.1+mc26.2.fabric`, Minecraft 26.2/Fabric 0.19.5/Java 25, 3 GiB, local-only port 25577; reviewed **27 additions / zero changes / zero removals**. Port 25576 was refused, then changing only the port allowed review against the same destination. No installation, EULA acceptance, game startup, cancellation or uninstall has begun on d1. Computer Use action-time installation confirmation was requested; do not mark those tests passed or treat the prepared review as an installed server.
+
+| Remaining check | Honest current state |
+| --- | --- |
+| Full uninstall and post-Start cancellation/reuse | New d1 review prepared; installation confirmation pending. b1/c1 baselines retained. Normal cancellation/reuse would not by itself prove the distinct uncertain/lost-Start case. |
+| Packaged taskbar icon | Failed under stable identity; controlled identity A/B narrowed the cause. Development icon passes separately. |
+| Natural seven-day retained-download cleanup | Earliest eligible outcome 15 October 20:13:40 Riyadh; shared references may retain it longer. No timestamps or clock changed. |
+| Exact transient cancellation/review-download wording | Some corrected messages have regression coverage only; prior normal Verify cancellation and readiness cancellation passed. |
+| Authenticated launch/join/rejoin/world compatibility | Excluded by the user, not passed or awaiting login. |
+
+No release/push/publication. The prepared d1 review is the next native action boundary; all QA game and management services remain stopped. Detailed icon and native evidence remains under `.superpowers/sdd/2026-10-11-ui-acceptance-fixes/`.
+
+## Historical normal-app checkpoint — 13 October 12:08
 
 Continued the existing firewall-approved client0842 app on the isolated control-b1 profile through native mouse/keyboard controls. No Microsoft login, existing-login reuse, or game launch/join was attempted. The b1 client completed its fresh check and showed **Matching pack ready / Server release 0.13.5**.
 

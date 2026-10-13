@@ -1,11 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsPromises = require('node:fs/promises');
+const Module = require('node:module');
 const os = require('node:os');
 const path = require('node:path');
 
 const {
+  createDevElectronRuntimeLease,
   prepareBrandedDevElectronRuntime
 } = require('../scripts/dev-electron-runtime.cjs');
 
@@ -29,6 +32,94 @@ async function makeFixture(t) {
     cacheBasePath,
     iconPath
   };
+}
+
+test('default development branding gives notifications a product name distinct from the installed app', async t => {
+  const fixture = await makeFixture(t);
+  const edits = [];
+  const originalLoad = Module._load;
+  // Keep the real branding payload and cache publication; substitute only the
+  // native resource editor, which cannot edit this small text executable fixture.
+  t.mock.method(Module, '_load', function(request, parent, isMain) {
+    if (request === 'rcedit') return async (executablePath, options) => {
+      edits.push({ executablePath, options });
+      await fsPromises.appendFile(executablePath, '|resource-edited');
+    };
+    return originalLoad.call(this, request, parent, isMain);
+  });
+
+  const prepared = await prepareBrandedDevElectronRuntime({
+    ...fixture, electronVersion: '42.10.1', architecture: 'x64'
+  }, { verifyExecutableIcon: async () => {} });
+
+  assert.equal(edits.length, 1);
+  assert.equal(path.basename(edits[0].executablePath), 'electron.exe');
+  assert.notEqual(edits[0].executablePath, fixture.sourceExecutablePath);
+  assert.deepEqual(edits[0].options, {
+    icon: fixture.iconPath,
+    'version-string': {
+      CompanyName: 'zXord',
+      FileDescription: 'Minecraft Core Development',
+      ProductName: 'Minecraft Core Development',
+      InternalName: 'Minecraft Core Development',
+      OriginalFilename: 'electron.exe'
+    },
+    'file-version': '42.10.1',
+    'product-version': '42.10.1'
+  });
+  assert.equal(await fsPromises.readFile(prepared.executablePath, 'utf8'), 'stock-electron|resource-edited');
+  assert.equal(await fsPromises.readFile(fixture.sourceExecutablePath, 'utf8'), 'stock-electron');
+});
+
+for (const legacyIntegrity of ['valid', 'modified']) {
+  test(`new branding uses a separate cache generation and preserves the leased ${legacyIntegrity} legacy runtime`, async t => {
+    const fixture = await makeFixture(t);
+    const digest = value => crypto.createHash('sha256').update(value).digest('hex');
+    const sourceDigest = digest('stock-electron');
+    const iconDigest = digest('brand-one');
+    // This is the pre-generation cache format already issued to users, not an
+    // expected path derived from the current implementation.
+    const legacyKey = `42.10.1-x64-${sourceDigest.slice(0, 16)}-${iconDigest.slice(0, 16)}`;
+    const legacyDirectory = path.join(fixture.cacheBasePath, 'Minecraft Core', 'dev-electron-runtime', `runtime-${legacyKey}`);
+    const legacyExecutable = path.join(legacyDirectory, 'electron.exe');
+    const legacyMarkerPath = path.join(legacyDirectory, '.minecraft-core-runtime.json');
+    const legacyBytes = `stock-electron|old-product-name${legacyIntegrity === 'modified' ? '|modified' : ''}`;
+    const legacyMarker = JSON.stringify({
+      schemaVersion: 1, electronVersion: '42.10.1', architecture: 'x64', sourceDigest, iconDigest,
+      patchedExecutableDigest: digest('stock-electron|old-product-name')
+    });
+    await fsPromises.mkdir(legacyDirectory, { recursive: true });
+    await fsPromises.writeFile(legacyExecutable, legacyBytes);
+    await fsPromises.writeFile(legacyMarkerPath, legacyMarker);
+    const lease = await createDevElectronRuntimeLease(legacyDirectory, { heartbeatMs: 60 * 60 * 1000 });
+    t.after(() => lease.dispose());
+    const leaseBytes = await fsPromises.readFile(lease.leasePath, 'utf8');
+    const oldTime = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+    await fsPromises.utimes(legacyMarkerPath, oldTime, oldTime);
+    await fsPromises.utimes(lease.leasePath, oldTime, oldTime);
+    let edits = 0;
+    const dependencies = {
+      async editExecutable({ executablePath }) {
+        edits += 1;
+        await fsPromises.appendFile(executablePath, '|development-product-name');
+      },
+      verifyExecutableIcon: async () => {}
+    };
+    const options = { ...fixture, electronVersion: '42.10.1', architecture: 'x64' };
+
+    const prepared = await prepareBrandedDevElectronRuntime(options, dependencies);
+    const reused = await prepareBrandedDevElectronRuntime(options, dependencies);
+
+    assert.equal(await fsPromises.readFile(legacyExecutable, 'utf8'), legacyBytes);
+    assert.equal(await fsPromises.readFile(legacyMarkerPath, 'utf8'), legacyMarker);
+    assert.equal(await fsPromises.readFile(lease.leasePath, 'utf8'), leaseBytes);
+    assert.notEqual(prepared.cacheDirectory, legacyDirectory);
+    assert.equal(prepared.reused, false);
+    assert.equal(reused.reused, true);
+    assert.equal(reused.cacheDirectory, prepared.cacheDirectory);
+    assert.equal(edits, 1);
+    assert.equal(await fsPromises.readFile(prepared.executablePath, 'utf8'), 'stock-electron|development-product-name');
+  });
 }
 
 test('Windows development runtime embeds the icon in a LocalAppData cache and reuses the published copy', async t => {
