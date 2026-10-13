@@ -2,7 +2,26 @@
 
 Updated 13 October 2026, Asia/Riyadh. **Not release ready.** This is the restart checklist for normal, visible app testing. Automated tests support these checks; they do not replace installing the real pack, running Minecraft, and joining the server.
 
-## Latest normal-app checkpoint — 13 October 08:49
+## Latest normal-app checkpoint — 13 October 10:05
+
+Human dismissed the network-permission prompt. Resumed the same client0842 app, exact isolated control-b1 profile, without restarting or repeating any install/detach. The final affected native check **passed**: c1 client shows “No matching client pack available,” explains retained installed files and owner recovery, and has no dead-end Review button. Normal Refresh requirement settles back to the same clear state. The Mods page retains its managed-content guard and exposes no loose-mod editing controls. The Play page still requires Microsoft authentication; that is not evidence of the independent pack launch guard under an authenticated account, and no gameplay was performed.
+
+c1 management was stopped normally; both Minecraft servers and both management services are stopped. Read-only port inspection found no listeners on 8080/8081/25575/25576. The app closed normally and an exact executable-path process check confirmed zero remaining QA processes at 10:05. No force-kill, real-instance access, a1 access, account reuse, or security-settings change.
+
+| Remaining release check | Honest status |
+| --- | --- |
+| Microsoft-authenticated TFG client launch, join, disconnect/rejoin and world compatibility | Not run; requires the user to sign in to the disposable b1 client. |
+| Actual Windows taskbar icon | Still unresolved; earlier native capture showed the Electron atom. Correct file/titlebar icons do not count as a pass. |
+| Seven-day retained-download cleanup | Not observed with naturally eligible data; do not fake timestamps or age the clock. |
+| Full uninstall execution | Only review and final-confirmation Cancel passed; actual removal untested. |
+| Post-Start uncertain-destination reuse | Not naturally exercised. Early failed-preflight/same-folder reuse passed separately. |
+| Corrected review-download cancellation and transient cancelling wording | Regression verified; these exact transient messages were not re-observed natively. Readiness-check cancellation wording did pass natively. |
+
+The finite install/lifecycle/client/detach sequence is complete up to these explicit gaps; **the feature is not release ready**. Do not reopen/reinstall merely to replay passed checks.
+
+Prompt-reduction follow-up: conventional Windows application firewall rules match full executable paths. Timestamped QA package paths likely contributed to repeated first-listen prompts. Keep immutable build evidence, but reuse a dedicated QA launch path for future builds only after normal shutdown and verified deployment; preserve the isolated profile outside that app directory. No automatic prompt approver, firewall/UAC change, or security-changing script was created or run. A user-administered app/port/network-scoped firewall setup is possible but separate from test automation; stable paths do not guarantee suppression of Java/runtime or other security prompts. Reference: [Microsoft firewall rule guidance](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/rules).
+
+## Historical normal-app checkpoint — 13 October 08:49
 
 The approved c1 Detach completed through the normal app: `op2-9cac956fc135e3a64ec58c91272566fb`, terminal 08:44:18.525. Overview shows detached, revision 8; History records detach 1→8. Actions correctly retains restore-point rollback without managed Verify/Repair/Detach/Uninstall controls. Ordinary server Mods lists all 20 JARs with editing controls enabled. No ordinary mod edit was made.
 
