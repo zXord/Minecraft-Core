@@ -2,7 +2,32 @@
 
 Updated 13 October 2026, Asia/Riyadh. **Not release ready.** This is the restart checklist for normal, visible app testing. Automated tests support these checks; they do not replace installing the real pack, running Minecraft, and joining the server.
 
-## Latest normal-app checkpoint — 13 October 10:54
+## Scope update — 13 October 11:58
+
+The user explicitly cancelled Microsoft sign-in and authenticated gameplay testing. **Do not log in, reuse credentials, ask for sign-in, or run authenticated launch/join/rejoin tests.** These checks are **excluded by user request, not passed and no longer waiting on user input**. Continue only the remaining non-authentication checks on disposable QA instances. Older sign-in handoff instructions below are historical and superseded.
+
+## Latest normal-app checkpoint — 13 October 12:08
+
+Continued the existing firewall-approved client0842 app on the isolated control-b1 profile through native mouse/keyboard controls. No Microsoft login, existing-login reuse, or game launch/join was attempted. The b1 client completed its fresh check and showed **Matching pack ready / Server release 0.13.5**.
+
+One read-only server verification was started and cancelled normally: `op2-4e4b7d75efb540582004b3cf89945e66`. The app showed Verifying, then the disabled Cancelling button, then **Cancelled / Stopped before server changes** at 12:06:31 Riyadh. The historical result correctly says this attempt has no successful integrity result. Check for updates, Retry, and the normal Actions controls became available again. The corrected full intermediate cancellation sentence was too brief to capture; it remains **not observed**, not passed. No repeated verification or lifecycle installation was started.
+
+Normal b1 management Stop settled; both test games and both management services were stopped, with no listeners on 8080/8081/25575/25576. The app closed normally; an exact executable-path process check confirmed no remaining client0842 QA processes. No real instance, interrupted a1, pack file, account, firewall rule, or Windows shortcut was modified.
+
+| Remaining item | Current status |
+| --- | --- |
+| Microsoft login, authenticated launch/launch-guard, join/rejoin/world compatibility | **Excluded by user request.** Not passed; not waiting for sign-in. |
+| Packaged Windows taskbar icon | **Unresolved defect.** Development icon passed earlier; packaged icon did not. |
+| Seven-day retained-download cleanup | Deferred until naturally eligible records exist; earliest 15 October 20:13:40 Riyadh, with shared references potentially retaining the archive longer. |
+| Full uninstall execution | Untested; review and final-confirmation Cancel passed. No removal performed in this pass. |
+| Post-Start uncertain-destination reuse | Untested; no natural uncertain destination exists to exercise. Early failed-preflight/same-folder reuse is a separate passed check. |
+| Exact review-download and intermediate lifecycle cancellation wording | Regression evidence only for those exact messages. Normal Verify cancellation, terminal status, and control recovery now passed; corrected readiness-check cancellation wording passed earlier. |
+
+Read-only taskbar evidence: the known generic Start Menu shortcut currently points to the older rollback0143 QA package, with AppUserModelID `com.minecraft-core.app`, default icon location `,0`, and no explicit relaunch metadata. Exact packaged/development AppUserModelID class keys are absent in both registry views. This is a **possible stale shell association, not a proven cause** of the atom icon. No shortcut/cache/registry change or further speculative source patch was made.
+
+The finite non-authentication continuation is complete with the gaps above recorded. **Not release ready.** Do not repeat passed installation/version/detach baselines or resume authentication testing.
+
+## Historical normal-app checkpoint — 13 October 10:54
 
 The user-applied Desktop network helper succeeded. Read-only rule/receipt verification confirms three narrowly scoped QA rules (exact app/Java paths, Private profile, LocalSubnet, app TCP8080/8081 and Java TCP25575/25576). The original Windows-generated Allow rule was left alone; receipt `restoreBlock=false` is correct. No security prompt or setting was operated by the agent. Normal b1 management Start subsequently worked without another permission prompt. The original firewall-approved client0842 executable and ASAR remain byte-identical.
 
