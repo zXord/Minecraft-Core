@@ -233,7 +233,12 @@ test('cancellation does not clean workspaces until the in-flight downloader is q
   assert.equal(settled, false);
   assert.ok([...f.registry.records.values()].some(record => record.kind === 'output'));
   finish();
-  await assert.rejects(pending, { code: 'CANCELLED' });
+  await assert.rejects(pending, error => {
+    const result = error.toPublicResult();
+    assert.equal(result.error.code, 'CANCELLED');
+    assert.match(result.error.message, /\bcancelled\b/i);
+    return true;
+  });
   assert.equal([...f.registry.records.values()].filter(record => record.kind === 'output' && record.ownerId !== f.inspectionId).length, 0);
 });
 

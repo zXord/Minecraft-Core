@@ -210,7 +210,12 @@ for (const boundary of ['snapshot', 'runtime']) test(`read-only check aborts ${b
   pending.catch(() => {}); await entered;
   try { assert.ok(signal); controller.abort(); assert.equal(signal.aborted, true); }
   finally { release(); await pending.catch(() => {}); restore(); }
-  await assert.rejects(pending, { code: 'CANCELLED' });
+  await assert.rejects(pending, error => {
+    const result = error.toPublicResult();
+    assert.equal(result.error.code, 'CANCELLED');
+    assert.match(result.error.message, /\bcancelled\b/i);
+    return true;
+  });
   assert.ok(events.some(event => event.phase === 'checking-client-files'));
   assert.equal((await f.service.verify({ clientId: 'one' })).verified, true);
 });

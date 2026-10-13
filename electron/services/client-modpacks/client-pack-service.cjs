@@ -5,7 +5,8 @@ const { captureServerDirectoryCopySource } = require('../modpack-lifecycle/serve
 const { normalizeCompanionDescriptor } = require('./companion-contracts.cjs');
 const { planOwnership } = require('./client-pack-state.cjs');
 const { singleClientArchive } = require('./client-archive-source.cjs');
-const fail = (code = 'INVALID_REQUEST', cause) => new ModpackError(code, 'The matching client pack operation could not be completed', { cause });
+const fail = (code = 'INVALID_REQUEST', cause) => new ModpackError(code,
+  code === 'CANCELLED' ? 'The matching client pack request was cancelled' : 'The matching client pack operation could not be completed', { cause });
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const RUNTIME_ROOTS = new Set(['versions', 'libraries', 'assets', 'java', 'natives']);
 function nonRuntimeFiles(snapshot) {

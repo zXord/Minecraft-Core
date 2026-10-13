@@ -13,7 +13,8 @@ const { clientPathPolicy } = require('./client-content-policy.cjs');
 const { MULTIMC_MANIFEST_MAX_BYTES, selectClientArchiveFormat, parseMultiMCManifest, buildMultiMCClientPlan } = require('./multimc-client-plan.cjs');
 
 const failure = (code = 'INVALID_REQUEST', cause) => new ModpackError(code,
-  code === 'PLAN_STALE' ? 'The client pack inspection changed' : 'The client pack preparation could not be completed', { cause });
+  code === 'CANCELLED' ? 'The client pack preparation was cancelled'
+    : code === 'PLAN_STALE' ? 'The client pack inspection changed' : 'The client pack preparation could not be completed', { cause });
 function checkCancellation(signal) {
   if (signal?.aborted) throw failure('CANCELLED');
 }
