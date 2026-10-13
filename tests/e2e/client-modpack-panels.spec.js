@@ -781,6 +781,31 @@ test('unknown classification fails closed while unmanaged classification is expl
   await page.evaluate(() => {window.currentStatus='unmanaged';window.show('client','b');});
   await expect.poll(() => page.evaluate(() => window.classified?.status)).toBe('unmanaged');
 });
+for (const missing of ['detached', 'unpaired']) test(`retained client with ${missing} requirement explains blocked state without a dead-end review`, async ({page}) => {
+  await start(page, 'update-required', 'client', true);
+  await page.evaluate(missing => {
+    window.readyDescriptor = window.descriptor;
+    window.descriptor = missing === 'detached' ? null : {...window.descriptor, status:'unpaired', source:null, runtime:null, artifactSha256:null};
+    window.pending['client-packs:get-state'][0].resolve({ok:true,value:{clientId:'a',status:'update-required',verified:false,descriptor:window.descriptor}});
+    delete window.pending['client-packs:get-state'];
+  }, missing);
+  await expect(page.getByRole('heading', {name:'No matching client pack available'})).toBeVisible();
+  await expect(page.getByText(/installed client files are kept/)).toBeVisible();
+  await expect(page.getByText(/Ask the server owner/)).toBeVisible();
+  await expect(page.getByRole('button', {name:'Review matching pack'})).toHaveCount(0);
+  await expect(page.getByRole('button', {name:'Verify matching pack'})).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.classified?.verified)).toBe(false);
+  await expect.poll(() => page.evaluate(() => window.classified?.status)).toBe('update-required');
+  await expect(page.getByRole('button', {name:'Refresh requirement'})).toBeEnabled();
+  await page.evaluate(() => {window.descriptor=window.readyDescriptor;});
+  await page.getByRole('button', {name:'Refresh requirement'}).click();
+  await expect(page.getByRole('heading', {name:'Matching pack update required'})).toBeVisible();
+  await expect(page.getByRole('button', {name:'Review matching pack'})).toBeEnabled();
+  await expect(page.getByText(/installed client files are kept/)).toHaveCount(0);
+  await page.getByRole('button', {name:'Review matching pack'}).click();
+  await expect(page.getByRole('heading', {name:'Review installation'})).toBeVisible();
+});
+
 test('unpaired does not advertise installation or launch', async ({page}) => {
   await start(page,'unpaired');
   await expect(page.getByText('No matching client pack paired')).toBeVisible();

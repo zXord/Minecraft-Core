@@ -71,6 +71,7 @@
   $: progressLabel = Object.hasOwn(phaseLabels, progress?.phase) ? phaseLabels[progress.phase] : 'Working on matching client pack';
   $: progressFiles = Object.hasOwn(fileLabels, progress?.phase) ? fileLabels[progress.phase] : null;
   $: progressMeter = measuredProgress(progress);
+  $: missingMatchingRequirement = state?.status === 'update-required' && state?.descriptor?.status !== 'ready';
   function number(value) { try { return BigInt(value).toLocaleString(); } catch { return 'Unknown'; } }
   function switchClient() {
     currentId = clientId;
@@ -172,14 +173,17 @@
 
 {#if state?.status !== 'unmanaged'}
 <section class="matching-pack" aria-label="Matching client modpack" aria-busy={busy}>
-  <header><p class="eyebrow">Matching client pack</p><h2>{state ? labels[state.status] || 'Matching pack unavailable' : 'Checking matching pack…'}</h2></header>
+  <header><p class="eyebrow">Matching client pack</p><h2>{missingMatchingRequirement ? 'No matching client pack available' : state ? labels[state.status] || 'Matching pack unavailable' : 'Checking matching pack…'}</h2></header>
   {#if error}<p role="alert">{error.message}</p>{/if}
   {#if cleanupNotice}<div role="status" aria-label="Installation cleanup" aria-live="polite">
     <p>Installation cleanup {cleanupNotice}: cleanup is incomplete. Previous transaction directories or cleanup records may remain safely retained. No automatic deletion is promised.</p>
     {#if state?.status === 'ready' && state?.verified}<p>The matching pack remains verified and ready to launch.</p>{:else}<p>This notice does not change the matching pack verification result.</p>{/if}
   </div>{/if}
   {#if state?.descriptor}<p>Server release {state.descriptor.serverVersion}</p>{/if}
-  {#if state?.status === 'unpaired'}
+  {#if missingMatchingRequirement}
+    <p>The server is not offering a matching client pack. Your installed client files are kept, but launching and changing managed content stay blocked.</p>
+    <p>Ask the server owner to enable modpack management and pair a matching client pack, then refresh the requirement.</p>
+  {:else if state?.status === 'unpaired'}
     <p>Ask the server owner to pair the same-release MRPACK or MultiMC ZIP in the server’s Modpack overview. GitHub supports both; Modrinth supports MRPACK only. Loose-mod synchronization is disabled for this managed server.</p>
   {:else if state?.status === 'unavailable'}
     <p>The server requirement could not be classified. Content changes and launch stay blocked until it can be checked.</p>
@@ -222,7 +226,7 @@
     </div>
   {/if}
   <footer>
-    {#if ['install-required','update-required','modified','runtime-incomplete'].includes(state?.status) && !plan}<button class="primary" type="button" disabled={busy} on:click={() => preview()}>Review matching pack</button>{/if}
+    {#if ['install-required','update-required','modified','runtime-incomplete'].includes(state?.status) && state?.descriptor?.status === 'ready' && !plan}<button class="primary" type="button" disabled={busy} on:click={() => preview()}>Review matching pack</button>{/if}
     {#if state?.status === 'recovery-required'}<button class="primary" type="button" disabled={busy} on:click={recover}>Retry recovery</button>{/if}
     {#if state?.status === 'ready' || state?.status === 'modified'}<button type="button" disabled={busy} on:click={verify}>Verify matching pack</button>{/if}
     <button type="button" disabled={busy} on:click={refresh}>Refresh requirement</button>
