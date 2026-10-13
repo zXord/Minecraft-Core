@@ -2,7 +2,27 @@
 
 Updated 13 October 2026, Asia/Riyadh. **Not release ready.** This is the restart checklist for normal, visible app testing. Automated tests support these checks; they do not replace installing the real pack, running Minecraft, and joining the server.
 
-## Latest normal-app checkpoint — 13 October 02:19
+## Latest normal-app checkpoint — 13 October 03:23
+
+Normal testing resumed after the user dismissed the previous security overlay. The final rebuilt app is now open on the same isolated control-b1 profile. **A new Windows Security network-permission overlay appeared after final0321 management Start and blocks native continuation.** It was not operated or bypassed. No real instance or a1 was touched.
+
+| Newly completed through normal native UI | Result |
+| --- | --- |
+| b1 rollback result and client transition | **PASS:** Overview 0.13.5/revision26; History rollback completed25→26; unchanged0.13.5 client returned Matching pack ready after fresh checks. No repeated rollback. |
+| Separate Modrinth matching client | **PASS:** new `Codex QA Client Modrinth 2026-10-13-c1`, client ID `client-1791848830614-2uuyi0r92`; official paired26.5.1+mc26.2.fabric review36additions/0removals/0replacements, Install and independent Verify both reached Ready. No authenticated gameplay. |
+| Matching-client cancellation | Real review-download and readiness-check cancellations both settled/released controls. Their misleading generic failure wording was corrected in committed `d1c351a`; full Node gate passed. Corrected native wording acceptance remains pending. |
+| Missing managed server mod → client → restoration | **PASS:** reversible Explorer rename of only b1 Additional Placements3.0.1.jar to `.jar.disabled` immediately blocked the client with an explicit server-mod-drift warning. Verify4490files identified that missingJAR. Exact original name restored, SHA256 unchanged, disabled path absent. Fresh Verify completed03:13:38; missing-JAR difference cleared; client returned Matching pack ready. Remaining21differences are pack configuration/server.properties changes, not missingmods. No broken-server startup. |
+| Uninstall preview / confirmation Cancel | **PASS, review only:** c1 review357unchangedmanagedremovals with preservation warnings; final confirmation cancelled; no files removed. Full uninstall execution is not passed. |
+| Real lifecycle cancellation | **PASS:** c1 same-version repair job `op2-365fd6ff62c4d8708657ffc9c8bd712d` cancelled during preflight, native Cancelled/no-server-changes, cleanupPending=false03:16:11, controls released. Temporary cancelling-state commit-boundary sentence corrected in `c5081e5`;37/37focused compiled-component/merge checks passed; corrected native transient copy not yet observed. |
+| Final-package reopen / sidebar status | **PASS:** old app/services stopped normally, final0321 opened on isolated profile. Existing c1 Start→Running→normalStop→Stopped, sidebar followed both states without reselecting c1. No gameplay. |
+
+Verification: final backend cancellation full Node5520total/5512pass/0fail/0cancel/8existing skips, exit0; preparer40/40/service104/104. Later renderer-only cancellation delta independently reviewed and root37/37passed. Renderer9.10s, NSIS--publish=never and packaged archive containment verifier all exited0. No full-suite replay after that renderer-only delta. No push, publication or installer execution.
+
+Current immutable package: `C:\Users\s3eed\AppData\Local\Temp\minecraft-core-native-package-20261013-final0321\app\Minecraft Core.exe`; ASAR SHA256 `636D04A2C42989E258A5781FEB1994DA7644E5B4FE3371809C9687F3B0F4D2AC`. Independent read-only audit matched both changed backend modules and all36renderer files including pending-cancel/sidebar fixes. PID163304, nativewindow163124106. Both gamesStopped; b1managementStopped; c1managementRunning8081. Only8081listens among8080/8081/25575/25576. Do not force-close the prompt/app or reopen another package.
+
+**Resume after the human handles the new Windows Security prompt:** refresh the current final0321 window, then normal c1 client reopen/readiness; corrected matching-client cancellation wording; detach c1 last while preserving files and inspect actual client reaction; normal owned-service/app teardown. Do not repeat passed installs/upgrade/downgrade/rollback/drift/server StartStop. Detach has NOT run. Gameplay still requires Microsoft authentication; no authentication/security UI will be automated. Actual taskbar atom remains unresolved; naturally eligible seven-day retention, full uninstall execution, and post-Start uncertain-destination reuse remain unpassed. Older checkpoints below are historical, not instructions to repeat baseline tests.
+
+## Historical normal-app checkpoint — 13 October 02:19
 
 **Current native blocker:** a new Windows Security network-permission overlay for Minecraft Core remains visible after c1 management Start. It was not operated or bypassed; user informed. C1 management is Running on 8081, game Stopped, localhost invite created; dedicated c1 client NOT created. B1 rollback is finished—do not repeat it. The app stays open in the isolated control-b1 profile; no real instance or a1 was touched.
 
