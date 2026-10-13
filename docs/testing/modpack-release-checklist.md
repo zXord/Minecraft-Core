@@ -6,7 +6,24 @@ Updated 13 October 2026, Asia/Riyadh. **Not release ready.** This is the restart
 
 The user explicitly cancelled Microsoft sign-in and authenticated gameplay testing. **Do not log in, reuse credentials, ask for sign-in, or run authenticated launch/join/rejoin tests.** These checks are **excluded by user request, not passed and no longer waiting on user input**. Continue only the remaining non-authentication checks on disposable QA instances. Older sign-in handoff instructions below are historical and superseded.
 
-## Latest continuation — 13 October 12:54
+## Latest native cancellation/review checkpoint — 13 October 13:16
+
+After the user's action-time approval, normal Install started the prepared Adrenaline `26.5.1+mc26.2.fabric` setup on the **new, previously empty d1 destination only**: `C:\Users\s3eed\SynologyDrive\Desktop\ET\Minecraft\Codex QA Modrinth 2026-10-13-d1`. Minecraft 26.2/Fabric 0.19.5/Java 25, 3 GiB and local-only port 25577 were retained; post-install running was not selected. Ordinary Cancel was clicked during staging, before publication. Operation `op2-192c7b884a48e8f09c2649d09cd8c7d6` settled at **13:01:30.886 Asia/Riyadh**. The native result showed **Cancelled / Operation cancelled**, retained-download actions and Choose another asset, with no visible Recovery needed state. This is a cancellation pass, not a successful installation or gameplay pass.
+
+Scoped read-only evidence at 13:05 confirms the exact operation is terminal `cancelled`, sequence 24, with `cleanupPending:false`, `retainedDownload:true` and durable `launchBinding.destinationDisposition:"released"`. Its active recovery record and target envelope are absent; both terminal history files are present. Production pure validators accepted the history schema and envelope checksum/binding, matched the exact launch binding, and classified closure as `abandoned`. The recovery history's `failed`/`none` state records `pre-publication-cleanup`, **not a cleanup failure**: runtime writer authority is `settled` and candidate deletion is authorized. Publication and registration outcomes are absent.
+
+The exact d1 target, candidate `.op2-192c7b884a48e8f09c2649d09cd8c7d6.c`, failed sibling `.op2-192c7b884a48e8f09c2649d09cd8c7d6.f` and recorded candidate journal are absent; rollback path is null. The originally empty destination was legitimately removed during cleanup. No manual reservation release or folder deletion was performed. Exact operation/history evidence remains under `C:\Users\s3eed\AppData\Local\Temp\minecraft-core-native-qa-20261008-control-b1\user-data\modpack-lifecycle\`; history SHA256 is `94557762eeac6811b16a3112a5c3b5a5348f3b7b704751ce250b96fb64f61f64`.
+
+| Remaining native check | Current status |
+| --- | --- |
+| Ordinary same-folder reinstall/reuse after this cancellation | **Fresh review passed; installation pending.** The exact empty d1 folder was recreated through the native picker at 13:13:47 and selected normally. Same exact release, 3 GiB/local-only25577 review succeeds with 27 additions/zero changes/zero removals, no recovery/reservation error. Start-after-install is unchecked; EULA remains unchecked and Install has not been clicked. Computer Use requires fresh action-time confirmation for the second installation. Review success is not completed installation/reuse acceptance. |
+| Full uninstall execution | **Still untested.** Earlier preview/final-confirmation Cancel is not removal acceptance; a successful disposable managed installation and the required action-time confirmation must precede actual uninstall. |
+| Lost/uncertain-Start destination recovery | **Separate and untested.** This known operation's ordinary, settled cancellation does not exercise a lost Start response or uncertain destination. |
+| Authenticated launch/join/rejoin/world compatibility | **Excluded by user request**, not passed or awaiting sign-in. |
+
+Normal Previous server setups → Refresh → explicit d1 selection also restored the same terminal Cancelled result without starting another operation. The same client0842 app/control-b1 profile remains open at the new review. Read-only listener inspection during this checkpoint found none on 8080/8081/25575/25576/25577. Real instances, interrupted a1 and retained b1/c1 baselines were untouched by this d1 operation. No Microsoft authentication, manual journal/state mutation, release, push or publication. Other unresolved release checks from the historical 12:54 checkpoint remain open; **not release ready**.
+
+## Historical continuation — 13 October 12:54
 
 The user requested continued non-login work; the earlier decision to stop at a finite pass was premature. Authentication remains excluded. No real instance or interrupted a1 was modified.
 
