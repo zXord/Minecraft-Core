@@ -149,6 +149,27 @@ test('terminal operation outcomes expose semantic border classes', async () => {
   assert.match(renderPhase('completed'), /class="[^"]*outcome[^"]*good[^"]*"/u);
 });
 
+for (const scenario of [
+  { phase: 'preflight', cancellationRequested: false, canCancel: true, waiting: false, committed: false },
+  { phase: 'preflight', cancellationRequested: true, canCancel: false, waiting: true, committed: false },
+  { phase: 'cancelling', cancellationRequested: true, canCancel: false, waiting: true, committed: false },
+  { phase: 'cancelling', cancellationRequested: false, canCancel: false, waiting: true, committed: false },
+  { phase: 'committing', cancellationRequested: true, canCancel: false, waiting: false, committed: true },
+  { phase: 'cancelled', cancellationRequested: true, canCancel: false, waiting: false, committed: false }
+]) test(`job cancellation guidance distinguishes ${scenario.phase} with request ${scenario.cancellationRequested}`, async () => {
+  const { render } = await import('svelte/server');
+  const Component = await loadServerComponent('src/components/modpacks/ModpackJobProgress.svelte');
+  const html = render(Component, { props: { job: {
+    jobId: 'cancellation-guidance', operationKind: 'repair',
+    phase: scenario.phase, cancellationRequested: scenario.cancellationRequested
+  } } }).body;
+
+  assert.equal(/<button[^>]*>Cancel before commit<\/button>/u.test(html), scenario.canCancel);
+  assert.equal(/Cancellation requested\.[^<]*safe cleanup/u.test(html), scenario.waiting);
+  assert.equal(/The commit boundary has been reached/u.test(html), scenario.committed);
+  assert.equal(/role="progressbar"/u.test(html), scenario.phase !== 'cancelled');
+});
+
 async function renderVerification(result) {
   const { render } = await import('svelte/server');
   const Component = await loadServerComponent('src/components/modpacks/ModpackJobProgress.svelte');

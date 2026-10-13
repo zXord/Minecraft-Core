@@ -426,7 +426,15 @@
       <p class="progress-note">This stage stays active until the current operation finishes.</p>
     {/if}
     {#if job?.progress?.currentItem}<p class="mp-muted">Current item: {job.progress.currentItem}</p>{/if}
-    <div class="mp-actions">{#if canCancel}<button type="button" class="mp-button" disabled={cancelling} on:click={cancel}>{cancelling ? 'Cancelling…' : 'Cancel before commit'}</button>{:else if !terminal.has(phase)}<span class="mp-muted">The commit boundary has been reached; cancellation is replaced by rollback or recovery.</span>{/if}</div>
+    <div class="mp-actions">
+      {#if canCancel}
+        <button type="button" class="mp-button" disabled={cancelling} on:click={cancel}>{cancelling ? 'Cancelling…' : 'Cancel before commit'}</button>
+      {:else if phase === 'cancelling' || (cancellable.has(phase) && job?.cancellationRequested)}
+        <span class="mp-muted">Cancellation requested. Waiting for the operation to stop and safe cleanup to finish.</span>
+      {:else if !terminal.has(phase)}
+        <span class="mp-muted">The commit boundary has been reached; cancellation is replaced by rollback or recovery.</span>
+      {/if}
+    </div>
   </section>
 
   {#if error}<section class="mp-state error" tabindex="-1" aria-live="assertive"><strong>Operation status error</strong><p>{error.message}</p></section>{/if}
