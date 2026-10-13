@@ -40,13 +40,16 @@ function applyWindowsTaskbarDetails(window, {
     return false;
   }
 
+  // Chromium commits AppID first within one setAppDetails call. Windows uses
+  // that commit to refresh the taskbar, so publish relaunch metadata before
+  // the identity notification. Omitted fields are preserved by the binding.
   window.setAppDetails({
-    appId,
     appIconPath: taskbarIconPath,
     appIconIndex: 0,
     relaunchCommand,
     relaunchDisplayName: WINDOWS_RELAUNCH_DISPLAY_NAME
   });
+  window.setAppDetails({ appId });
   return true;
 }
 

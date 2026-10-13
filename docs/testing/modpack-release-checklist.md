@@ -2,7 +2,28 @@
 
 Updated 13 October 2026, Asia/Riyadh. **Not release ready.** This is the restart checklist for normal, visible app testing. Automated tests support these checks; they do not replace installing the real pack, running Minecraft, and joining the server.
 
-## Latest normal-app checkpoint — 13 October 10:05
+## Latest normal-app checkpoint — 13 October 10:54
+
+The user-applied Desktop network helper succeeded. Read-only rule/receipt verification confirms three narrowly scoped QA rules (exact app/Java paths, Private profile, LocalSubnet, app TCP8080/8081 and Java TCP25575/25576). The original Windows-generated Allow rule was left alone; receipt `restoreBlock=false` is correct. No security prompt or setting was operated by the agent. Normal b1 management Start subsequently worked without another permission prompt. The original firewall-approved client0842 executable and ASAR remain byte-identical.
+
+Normal b1 client navigation and a fresh existing-file check settled at **Matching pack ready / Server release 0.13.5**. Gameplay is still blocked by **Microsoft Authentication Required**. A user sign-in handoff is pending; neither Login nor Use Existing Login was automated, and no real-profile credential was reused.
+
+Taskbar follow-up used normal visible launches, not a mock-window pass:
+
+| Check | Result |
+| --- | --- |
+| Normal `npm run dev`, isolated control-b1 profile | **PASS:** visible grass-block taskbar icon; Vite ready in 1,150ms. This single warm run is not a universal startup-time guarantee. |
+| Packaged app with metadata-before-AppID correction | **FAIL:** taskbar still Electron atom, despite branded titlebar. |
+| Same packaged ID with a separate physical ICO | **FAIL:** still atom; the ineffective extra-resource/path experiment was removed from source. No cache, pin, shortcut or ID workaround applied. |
+| Native transitions between builds | Both QA games/management stopped, app closed normally before each launch; no forced process termination or repeated install/lifecycle operation. |
+
+Retained source change is only the documented Windows property-publication order: relaunch/icon metadata first, AppID second before show. Its new regression was RED before implementation; final affected startup/runtime/icon/recovery gate **66/66 pass, exit0**, independently reviewed. Renderer build passed in10.46s. Ordering-only packaged directory build passed; the separate-ICO diagnostic NSIS build also passed but is **not** a release candidate. A full Node suite was not rerun for this two-file ordering correction. Native packaged icon remains unresolved; do not call the whole icon issue fixed. Primary contract: [Microsoft AppUserModel.ID](https://learn.microsoft.com/en-us/windows/win32/properties/props-system-appusermodel-id).
+
+Read-only retained-outcome audit: eight records, none naturally seven days old. Earliest outcome becomes eligible **15 October 20:13:40 Riyadh**; shared artifact references may retain the same archive longer. No timestamps, retention metadata, clock, or downloads were altered.
+
+The firewall-approved client0842 build was reopened at10:54 on the same isolated QA profile for the pending user sign-in. It intentionally does not contain the new ordering-only source correction. The six release gaps in the table below still apply, with **development icon now passed and packaged icon still failed**. Existing real instances and interrupted a1 remain untouched. **Not release ready.**
+
+## Historical normal-app checkpoint — 13 October 10:05
 
 Human dismissed the network-permission prompt. Resumed the same client0842 app, exact isolated control-b1 profile, without restarting or repeating any install/detach. The final affected native check **passed**: c1 client shows “No matching client pack available,” explains retained installed files and owner recovery, and has no dead-end Review button. Normal Refresh requirement settles back to the same clear state. The Mods page retains its managed-content guard and exposes no loose-mod editing controls. The Play page still requires Microsoft authentication; that is not evidence of the independent pack launch guard under an authenticated account, and no gameplay was performed.
 
