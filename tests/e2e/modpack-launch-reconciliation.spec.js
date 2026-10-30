@@ -576,14 +576,18 @@ for (const [status, reason, expected] of [
   expect(await page.evaluate(() => window.launchTest.completions)).toEqual([]);
 });
 
-for (const [status, expected] of [['not-observed', /absence is not permission/], ['not-started', /This exact launch did not start/], ['unavailable', /correlation is unavailable/], ['recovery-required', /correlation requires recovery or support/]]) test(`uncertain launch renders closed ${status} meaning without claiming release`, async ({ page }) => {
+// The wizard's own not-observed Start was never admitted, so it reads like not-started: a fresh review, no release yet.
+for (const [status, expected] of [['not-observed', /This exact launch did not start/], ['not-started', /This exact launch did not start/], ['unavailable', /correlation is unavailable/], ['recovery-required', /correlation requires recovery or support/]]) test(`uncertain launch renders closed ${status} meaning without claiming release`, async ({ page }) => {
   await review(page);
   await page.evaluate(status => { const s = window.launchTest; s.mode = 'structured'; s.reconciliation = { status, planId: s.planId, planFingerprint: s.fingerprint, ...(status === 'unavailable' ? { reason: 'legacy-correlation-unavailable' } : status === 'recovery-required' ? { reason: 'invalid-durable-evidence' } : {}) }; }, status);
   await page.getByRole('button', { name: 'Install this exact reviewed plan' }).click();
   await expect(page.getByText(expected)).toBeVisible();
-  if (status !== 'not-started') {
+  if (!['not-started', 'not-observed'].includes(status)) {
     await expect(page.getByRole('button', { name: /Checking Start outcome/ })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Run a fresh preflight review' })).toHaveCount(0);
+  } else {
+    await expect(page.locator('[data-launch-start]')).toHaveText('Fresh review required');
+    await expect(page.getByRole('button', { name: 'Run a fresh preflight review' })).toBeEnabled();
   }
   expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(0);
 });
@@ -598,18 +602,20 @@ test('N1 immediate not-started replaces checking with a fresh-review action and 
   await expect(page.getByRole('button', { name: 'Run a fresh preflight review' })).toBeEnabled();
   expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(0);
 
+  // Leaving the settled review releases its destination through the guarded backend release, once.
   await page.getByRole('button', { name: 'Run a fresh preflight review' }).click();
   await expect(page.getByRole('button', { name: /Local archive/ })).toBeVisible();
-  expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(0);
+  expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(1);
   await page.evaluate(() => { const s = window.launchTest; s.planId = 'plan-launch-v1-22222222-2222-4222-8222-222222222222'; s.fingerprint = 'b'.repeat(64); });
   await page.getByRole('button', { name: /Local archive/ }).click();
+  await expect(page.locator('body')).not.toContainText('Chosen destination');
   await page.getByRole('button', { name: 'Choose destination and review plan' }).click();
   await expect(page.getByRole('button', { name: 'Run a fresh preflight review' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Install this exact reviewed plan' })).toBeDisabled();
   await page.getByRole('checkbox', { name: /I accept the Minecraft EULA/ }).check();
   await expect(page.getByRole('button', { name: 'Install this exact reviewed plan' })).toBeEnabled();
   expect(await page.evaluate(() => window.launchTest.requests.filter(value => value.channel === 'modpacks:preflight').length)).toBe(2);
-  expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(0);
+  expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(1);
 });
 
 test('N1 later pending-to-not-started closes checking and stops reconciliation without starting or releasing', async ({ page }) => {
@@ -639,7 +645,8 @@ test('N1 late not-started from an abandoned review cannot stale its same-mounted
   await page.evaluate(() => { window.launchTest.defer = 'modpacks:reconcile-new-server-launch'; });
   await page.getByRole('button', { name: 'Check exact launch status' }).click();
   await expect.poll(() => page.evaluate(() => window.launchTest.pending.length)).toBe(1);
-  await expect(page.getByRole('button', { name: 'Check exact launch status' })).toHaveCount(0);
+  // The status button stays mounted (and keeps focus) while its read is held.
+  await expect(page.getByRole('button', { name: 'Check exact launch status' })).toHaveAttribute('aria-busy', 'true');
   await page.getByRole('button', { name: 'Run a fresh preflight review' }).click();
   await expect(page.getByRole('button', { name: /Local archive/ })).toBeVisible();
   await page.evaluate(() => {
@@ -656,7 +663,7 @@ test('N1 late not-started from an abandoned review cannot stale its same-mounted
   await expect(page.getByText(/This exact launch did not start/)).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Run a fresh preflight review' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Check exact launch status' })).toHaveCount(0);
-  expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(0);
+  expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(1);
 });
 
 test('expired pagination requests a fresh snapshot and discovery limits never auto-loop', async ({ page }) => {

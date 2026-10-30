@@ -11,7 +11,7 @@
   import ModpackJobProgress from '../modpacks/ModpackJobProgress.svelte';
   import ModpackInspectionProgress from '../modpacks/ModpackInspectionProgress.svelte';
   import ModpackRecoveryPanel from '../modpacks/ModpackRecoveryPanel.svelte';
-  import { ModpackApiError, modpackApi } from '../../utils/modpacks/modpackApi.js';
+  import { ModpackApiError, isPlanStaleError, modpackApi } from '../../utils/modpacks/modpackApi.js';
   import { mergePublicJob } from '../../utils/modpacks/publicJobMerge.js';
   import { isClosedObject as closed, isValidLaunchJob as validLaunchJob, isValidReconciliation as validReconciliation,
     isValidLaunchSummary as validSummary } from '../../utils/modpacks/launchResultValidation.js';
@@ -58,6 +58,8 @@
   let preflightProgress = null;
   let selectingDestination = false;
   let destinationNotice = '';
+  let reviewActionFailure = null;
+  let reviewActionRegion;
   let activeInspectionController = null;
   let ownsPendingDestination = false;
   let alive = true;
@@ -84,6 +86,29 @@
   function currentIntent(epoch) { return alive && ownerEpoch === epoch; }
   function currentAttempt(attempt) { return currentIntent(attempt.ownerEpoch) && selectedLaunch === attempt; }
   function protectedLaunch() { return launchAttempts.some(attempt => ['launch-pending', 'unknown'].includes(attempt.status)); }
+  const sameLaunch = (left, right) => left.planId === right.planId && left.planFingerprint === right.planFingerprint;
+  const notStartedNotice = 'This exact launch did not start. You may go back and run a fresh review. No server files will be deleted.';
+  const protectedLaunchNotice = 'Start outcome is unknown; it may already have started. New modpack setups wait until its exact status is known, and its destination remains protected.';
+  // Attempts are plain objects. Every status or read change bumps this, so markup and child props follow it.
+  let launchStatusVersion = 0;
+  let launchCheckAnnouncement = '';
+  function launchStatusChanged() { launchStatusVersion += 1; }
+  function latestProtectedAttempt() {
+    for (let index = launchAttempts.length - 1; index >= 0; index -= 1) {
+      if (['launch-pending', 'unknown'].includes(launchAttempts[index].status)) return launchAttempts[index];
+    }
+    return null;
+  }
+  $: launchProtected = (launchStatusVersion, protectedLaunch());
+  $: selectedLaunchProtected = (launchStatusVersion, Boolean(selectedLaunch && ['launch-pending', 'unknown'].includes(selectedLaunch.status)));
+  // A selected launch that is itself unresolved speaks for itself. Otherwise, while any launch still protects a
+  // destination, the notice and its status check describe that launch. The v26.6.1 custom setup never shows either.
+  $: protectedNoticeShown = launchProtected && !selectedLaunchProtected;
+  $: checkableLaunch = (launchStatusVersion, protectedNoticeShown ? latestProtectedAttempt() : selectedLaunch);
+  $: shownLaunchNotice = stage === 'custom' ? '' : protectedNoticeShown ? protectedLaunchNotice : selectedLaunch ? launchNotice : '';
+  // A failed review action is reported next to the button that was pressed. The review banner keeps only a stale
+  // error, which it needs to require a fresh review.
+  $: reviewBannerError = reviewActionFailure && reviewActionFailure === error && !isPlanStaleError(error) ? null : error;
   function invalidateIntent() {
     ownerEpoch += 1;
     planningOwner = null;
@@ -91,6 +116,11 @@
     reviewLaunchOutcome = null;
     selectionContext = null;
     selectedLaunch = null;
+    // Notices belong to the selected launch or review; leaving it never carries their text to the next view.
+    launchNotice = '';
+    launchSettlement = null;
+    launchCheckAnnouncement = '';
+    reviewActionFailure = null;
     for (const attempt of launchAttempts) { clearTimeout(attempt.timer); clearTimeout(attempt.completionTimer); attempt.timer = null; attempt.completionTimer = null; }
     discoveryOwner = null;
     discoveryBusy = false;
@@ -156,7 +186,7 @@
   }
 
   async function releasePendingDestination(record = reservationRecord) {
-    if (!record || record.state !== 'unlaunched') return false;
+    if (!record || !['unlaunched', 'not-started'].includes(record.state)) return false;
     record.releasePending = true;
     let released;
     try { released = await record.release(record.instanceId); }
@@ -170,6 +200,23 @@
       reservedDestinationName = '';
     }
     return released;
+  }
+
+  // A destination whose exact launch did not start can never back another plan. Detach it from this wizard at
+  // once, then ask the guarded backend release to drop it: the backend fences the old plan first and refuses
+  // while any admission or job hold exists. No files are touched, and a refused or failed release only keeps
+  // that one folder reserved. Unlaunched records are released exactly as before.
+  function releaseAbandonedDestination(record) {
+    // Never fall back to releasePendingDestination's default: only the exact abandoned record may be released.
+    if (!record) return Promise.resolve(false);
+    if (record.state !== 'not-started') return releasePendingDestination(record);
+    if (reservationRecord === record) {
+      reservationRecord = null;
+      ownsPendingDestination = false;
+      pendingInstanceId = instanceId;
+      reservedDestinationName = '';
+    }
+    return releasePendingDestination(record).catch(() => false);
   }
 
   function navigateStage(nextStage) {
@@ -282,6 +329,10 @@
       reservationRecord = { instanceId: pendingInstanceId, displayName: '', state: 'unlaunched', release: async () => false };
       return reservationRecord;
     }
+    // A new folder is being chosen. The picker status follows the picker itself, and no earlier destination is shown
+    // as chosen meanwhile, even while an older reservation is still finishing its release.
+    selectingDestination = true;
+    reservedDestinationName = '';
     const reservation = await modpackApi.reserveServerDestination();
     if (!reservation) return null;
     if (!identifier(reservation.instanceId)) throw new Error('The selected destination could not be confirmed.');
@@ -315,7 +366,6 @@
     error = null;
     preflightProgress = null;
     destinationNotice = '';
-    selectingDestination = !pendingInstanceId;
     try {
       const record = await ensureTargetInstance(owner);
       if (!isCurrent()) return;
@@ -328,19 +378,35 @@
       preflightProgress = { phase: 'validating-destination', percent: 0 };
       const nextPlan = await modpackApi.preflight({ inspectionId: owner.inspectionId, instanceId: record.instanceId,
         operationKind: owner.operationKind, selections: owner.selections }, progress => { if (isCurrent()) preflightProgress = progress; });
-      if (!isCurrent() || reservationRecord !== record || record.state !== 'unlaunched') return;
+      if (!isCurrent()) return;
+      // The plan belongs to the destination this review chose; a review that is still shown never resets silently.
+      if (reservationRecord !== record || record.state !== 'unlaunched') {
+        throw new ModpackApiError({ code: 'PLAN_STALE', message: 'The chosen destination changed before the review finished. Run a fresh preflight review. Nothing was installed.' });
+      }
       reviewedPlan = nextPlan;
       reviewContext = Object.freeze({ ownerEpoch: owner.epoch, plan: nextPlan, serverId: record.instanceId, operationKind: owner.operationKind, sourceLabel: owner.sourceLabel, reservationRecord: record });
     } catch (caught) {
-      if (isCurrent()) error = caught;
+      if (isCurrent()) {
+        error = caught;
+        reviewActionFailure = caught;
+        void revealReviewActionFailure(caught);
+      }
     } finally {
       if (isCurrent()) { selectingDestination = false; preflightProgress = null; busy = false; }
     }
   }
 
+  // The review button sits at the end of a long page. Its failure is shown and announced right below it and
+  // receives focus, so neither a pointer nor a keyboard user is left looking at a button that silently reset.
+  async function revealReviewActionFailure(failure) {
+    await tick();
+    if (!alive || reviewActionFailure !== failure || error !== failure || !reviewActionRegion) return;
+    reviewActionRegion.scrollIntoView?.({ block: 'nearest' });
+    reviewActionRegion.focus();
+  }
+
   async function refreshStaleReview() {
     invalidateIntent();
-    launchNotice = '';
     const epoch = ownerEpoch;
     const record = reservationRecord;
     const requestedSelection = selectedRequest ? {
@@ -356,7 +422,7 @@
     try {
       await Promise.all([
         discardInspectionSession(staleInspection),
-        releasePendingDestination(record)
+        releaseAbandonedDestination(record)
       ]);
     } catch (caught) {
       if (currentIntent(epoch)) { error = caught; busy = false; }
@@ -395,11 +461,13 @@
         if (prior.reservationRecord) prior.reservationRecord.state = 'job-owned';
       }
     }
-    // Resource ownership settles even after the originating view has gone away.
-    if (!currentAttempt(attempt)) return;
+    launchStatusChanged();
+    // Resource ownership settles even after the originating view has gone away. The v26.6.1 custom setup is
+    // never replaced by a modpack progress view.
+    if (!currentAttempt(attempt) || stage === 'custom') return;
     const hydrated = await modpackApi.getJob(attempt.jobId);
     if (!validLaunchJob(hydrated, attempt) || hydrated.sequence < value.sequence) throw new Error('The launched operation is awaiting an authoritative status.');
-    if (!currentAttempt(attempt)) return;
+    if (!currentAttempt(attempt) || stage === 'custom') return;
     job = mergePublicJob(value, hydrated, { durable: true });
     if (!attempt.reservationRecord) attempt.reservationRecord = { instanceId: attempt.serverId, state: 'job-owned',
       release: createRetryableReservationRelease(id => modpackApi.releaseServerDestination(id)) };
@@ -409,6 +477,36 @@
     launchNotice = '';
     selectionContext = Object.freeze({ ownerEpoch, attempt, serverId: attempt.serverId, jobId: attempt.jobId });
     stage = 'progress';
+  }
+
+  // Authoritative not-started is final for this exact plan: its plan is fenced or removed, or (not-observed) it
+  // was never admitted and this view never Starts the same plan twice. Job-owned work is never downgraded.
+  function settleNotStarted(attempt) {
+    for (const prior of launchAttempts) {
+      if (!sameLaunch(prior, attempt) || prior.status === 'job-owned') continue;
+      prior.status = 'not-started';
+      prior.retry = false;
+      clearTimeout(prior.timer);
+      prior.timer = null;
+      if (prior.reservationRecord && ['launch-pending', 'unknown'].includes(prior.reservationRecord.state)) prior.reservationRecord.state = 'not-started';
+    }
+    launchStatusChanged();
+  }
+
+  function settledNotStarted(attempt) {
+    if (attempt.status === 'job-owned' || !launchAttempts.some(prior => sameLaunch(prior, attempt) && prior.status === 'not-started')) return false;
+    if (attempt.status !== 'not-started') settleNotStarted(attempt);
+    return true;
+  }
+
+  function noteNotStarted(attempt) {
+    const shown = Boolean(attempt.reviewContext && attempt.reviewContext === reviewContext);
+    if (currentAttempt(attempt)) {
+      launchNotice = notStartedNotice;
+      if (shown) reviewLaunchOutcome = { reviewContext: attempt.reviewContext, status: 'not-started' };
+    }
+    // A review still on screen keeps its destination until the user leaves it.
+    if (!shown && attempt.reservationRecord?.state === 'not-started') void releaseAbandonedDestination(attempt.reservationRecord);
   }
 
   function scheduleReconciliation(attempt) {
@@ -428,28 +526,26 @@
           await adoptLaunch(attempt, result.job);
           return;
         }
-        if (result.status === 'not-started') {
-          for (const prior of launchAttempts) if (prior.planId === attempt.planId && prior.planFingerprint === attempt.planFingerprint) prior.status = 'not-started';
-          if (currentAttempt(attempt)) {
-            launchNotice = 'This exact launch did not start. You may go back and run a fresh review. No server files will be deleted.';
-            if (attempt.reviewContext && attempt.reviewContext === reviewContext) {
-              reviewLaunchOutcome = { reviewContext: attempt.reviewContext, status: 'not-started' };
-            }
-          }
-          return;
+        // not-observed: no admission and no job exist, and this view never Starts the same plan again.
+        if (result.status === 'not-started' || result.status === 'not-observed') {
+          settleNotStarted(attempt);
+          return noteNotStarted(attempt);
         }
+        // An unstable or later read cannot reopen a launch that authoritatively did not start.
+        if (settledNotStarted(attempt)) return noteNotStarted(attempt);
         attempt.status = 'unknown';
         if (attempt.reservationRecord && attempt.reservationRecord.state !== 'job-owned') attempt.reservationRecord.state = 'unknown';
+        launchStatusChanged();
         if (currentAttempt(attempt)) {
           launchNotice = result.status === 'pending' ? result.reason === 'admission-unresolved'
             ? 'Start outcome is unknown; it may already have started. Admission is still unresolved. The destination remains protected.'
             : 'Start outcome is unknown; it may already have started. Checking the exact launch; the destination remains protected.'
-            : result.status === 'not-observed' ? 'Start outcome is unknown. No job is observed, but this plan is still usable; absence is not permission to reuse the destination.'
             : result.status === 'unavailable' ? 'Exact launch correlation is unavailable for this older plan. Use the existing recovery or support workflow; no absence or release is confirmed.'
             : 'Launch correlation requires recovery or support. The destination remains protected; no job has been guessed.';
         }
         attempt.retry = result.status === 'pending';
       } catch {
+        if (settledNotStarted(attempt)) return noteNotStarted(attempt);
         if (currentAttempt(attempt)) launchNotice = 'Start outcome is unknown; it may already have started. Status is unavailable. Checking again will not start or release anything.';
         attempt.retry = true;
       }
@@ -457,10 +553,10 @@
     attempt.retry = false;
     attempt.reading = Promise.resolve().then(work).finally(() => {
       attempt.reading = null;
-      if (currentAttempt(attempt)) selectedLaunch = attempt;
+      launchStatusChanged();
       if (attempt.retry) scheduleReconciliation(attempt);
     });
-    if (currentAttempt(attempt)) selectedLaunch = attempt;
+    launchStatusChanged();
     return attempt.reading;
   }
 
@@ -484,6 +580,7 @@
     record.state = 'launch-pending';
     launchAttempts.push(attempt);
     selectedLaunch = attempt;
+    launchStatusChanged();
     let resolveAttempt;
     attempt.promise = new Promise(resolve => { resolveAttempt = resolve; });
     // All ownership and dedup state is installed before synchronous bridge entry.
@@ -493,7 +590,7 @@
         await adoptLaunch(attempt, value);
         resolveAttempt({ status: 'started' });
       } catch {
-        if (attempt.status !== 'job-owned') { attempt.status = 'unknown'; record.state = 'unknown'; }
+        if (attempt.status === 'launch-pending') { attempt.status = 'unknown'; record.state = 'unknown'; launchStatusChanged(); }
         if (currentAttempt(attempt)) launchNotice = 'Start outcome is unknown; it may already have started. Checking the exact launch; the destination remains protected.';
         await reconcileLaunch(attempt);
         resolveAttempt({ status: attempt.status === 'not-started' ? 'not-started' : attempt.status === 'job-owned' && stage === 'progress' ? 'started' : 'unknown' });
@@ -580,13 +677,38 @@
       return;
     }
     invalidateIntent();
+    // A launch already known not to have started stays settled while it is read again.
+    const settled = launchAttempts.some(attempt => sameLaunch(attempt, candidate) && attempt.status === 'not-started');
     const attempt = { ownerEpoch, planId: candidate.planId, planFingerprint: candidate.planFingerprint,
       serverId: candidate.serverId || prior?.serverId || null, operationKind: candidate.operationKind || prior?.operationKind || null, jobId: candidate.jobId || prior?.jobId || null,
-      sourceLabel: prior?.sourceLabel || candidate.displayName || 'Previous setup', reservationRecord: prior?.reservationRecord || null, status: 'unknown', timer: null, reading: null, completed: prior?.completed || false };
+      sourceLabel: prior?.sourceLabel || candidate.displayName || 'Previous setup', reservationRecord: prior?.reservationRecord || null,
+      status: settled ? 'not-started' : 'unknown', timer: null, reading: null, completed: prior?.completed || false };
     launchAttempts.push(attempt);
     selectedLaunch = attempt;
-    launchNotice = 'Start outcome is unknown; checking the explicitly selected launch.';
+    launchNotice = settled ? notStartedNotice : 'Start outcome is unknown; checking the explicitly selected launch.';
+    launchStatusChanged();
     await reconcileLaunch(attempt);
+  }
+
+  // The notice button re-reads the exact launch it describes, even after the user left that launch's review.
+  async function checkLaunchStatus() {
+    const target = checkableLaunch;
+    if (!alive || stage === 'custom' || !target) return;
+    let attempt = target;
+    if (attempt !== selectedLaunch) {
+      invalidateIntent();
+      attempt = { ownerEpoch, planId: target.planId, planFingerprint: target.planFingerprint, serverId: target.serverId,
+        operationKind: target.operationKind, jobId: target.jobId, sourceLabel: target.sourceLabel, reservationRecord: target.reservationRecord,
+        status: 'unknown', timer: null, reading: null, completed: target.completed || false };
+      launchAttempts.push(attempt);
+      selectedLaunch = attempt;
+      launchNotice = 'Start outcome is unknown; checking the exact launch. Its destination remains protected.';
+      launchStatusChanged();
+    }
+    if (attempt.reading) return attempt.reading;
+    launchCheckAnnouncement = '';
+    await reconcileLaunch(attempt);
+    if (currentAttempt(attempt)) launchCheckAnnouncement = 'Exact launch status checked.';
   }
 
   async function goToSource() {
@@ -610,7 +732,7 @@
     try {
       await Promise.all([
         discardInspectionSession(abandonedInspection),
-        releasePendingDestination(record)
+        releaseAbandonedDestination(record)
       ]);
     } catch (caught) {
       if (currentIntent(epoch)) error = caught;
@@ -669,7 +791,7 @@
     </nav>
   {/if}
 
-  {#if launchNotice}<section class="mp-state warning" role="status" aria-live="polite"><p>{launchNotice}</p>{#if selectedLaunch && !selectedLaunch.reading}<button class="mp-button" type="button" on:click={() => reconcileLaunch(selectedLaunch)}>Check exact launch status</button>{/if}</section>{/if}
+  {#if shownLaunchNotice}<section class="mp-state warning" role="status" aria-live="polite"><p>{shownLaunchNotice}</p>{#if checkableLaunch}<button class="mp-button" type="button" aria-busy={checkableLaunch.reading ? 'true' : 'false'} on:click={checkLaunchStatus}>Check exact launch status</button>{/if}<span class="mp-sr-only">{launchCheckAnnouncement}</span></section>{/if}
   {#if launchSettlement && settlementCopy(launchSettlement)}<section class="mp-state warning" role="status"><p>{settlementCopy(launchSettlement)}</p></section>{/if}
 
   {#if error && stage !== 'review'}
@@ -703,8 +825,9 @@
     <GitHubAssetReview release={githubRelease} assetResult={githubAssets} {busy} {inspectionProgress} on:select={inspectGithubSelection} on:back={() => navigateStage('github')} on:local={selectLocalArchive} on:custom={() => navigateStage('custom')} />
   {:else if stage === 'review'}
     <p class="mp-muted destination-note">When you start preflight, Minecraft Core opens the native folder picker, then runs preflight checks before changing any server files.</p>
+    <ArchiveGuidedReview {inspection} {reviewedPlan} {reviewContext} launchOutcome={reviewLaunchOutcome} {startReviewedOperation} busy={busy || launchProtected} error={reviewBannerError} {preflightProgress} {selectingDestination} {defaultMaxRam} {defaultServerPort} operationKind="install-new" on:preflight={buildPreflight} on:filesonly={(event) => buildPreflight(event, 'import-files-only-new')} on:stale={refreshStaleReview} on:error={(event) => (error = event.detail.error)} on:back={goToSource} />
     {#if destinationNotice}<div class="mp-state destination-notice" role="status" aria-live="polite">{destinationNotice}</div>{/if}
-    <ArchiveGuidedReview {inspection} {reviewedPlan} {reviewContext} launchOutcome={reviewLaunchOutcome} {startReviewedOperation} busy={busy || protectedLaunch()} {error} {preflightProgress} {selectingDestination} {defaultMaxRam} {defaultServerPort} operationKind="install-new" on:preflight={buildPreflight} on:filesonly={(event) => buildPreflight(event, 'import-files-only-new')} on:stale={refreshStaleReview} on:error={(event) => (error = event.detail.error)} on:back={goToSource} />
+    {#if reviewActionFailure && reviewActionFailure === error}<section class="mp-state error review-action-failure" bind:this={reviewActionRegion} tabindex="-1" role="alert"><strong>Review could not continue</strong><p>{reviewActionFailure.message}</p>{#if isPlanStaleError(reviewActionFailure)}<button class="mp-button" type="button" disabled={busy} on:click={refreshStaleReview}>Run a fresh preflight review</button>{/if}</section>{/if}
     {#if reservedDestinationName}<p class="mp-muted destination-note"><strong>Chosen destination:</strong> {reservedDestinationName}. This safe display name is all this review exposes.</p>{/if}
   {:else if stage === 'progress'}
     {#key selectionContext}<ModpackJobProgress {job} {selectionContext} on:terminal={completeSetup} on:action={handleOutcomeAction} on:return={() => { job = null; navigateStage('source'); }} />{/key}

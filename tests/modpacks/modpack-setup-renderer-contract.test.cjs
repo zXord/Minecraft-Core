@@ -23,6 +23,97 @@ function source(relativePath) {
   return fs.readFileSync(path.join(ROOT, relativePath), 'utf8');
 }
 
+function functionSource(text, signature) {
+  const start = text.indexOf(signature);
+  assert.ok(start >= 0, `Expected ${signature}`);
+  let depth = 0;
+  for (let index = text.indexOf('{', start); index < text.length; index += 1) {
+    if (text[index] === '{') depth += 1;
+    else if (text[index] === '}' && --depth === 0) return text.slice(start, index + 1);
+  }
+  throw new Error(`Unterminated ${signature}`);
+}
+
+test('a settled not-started destination is released only through the guarded release, never by default', () => {
+  const setup = source('src/components/setup/ServerSetupWizard.svelte');
+  const release = functionSource(setup, 'async function releasePendingDestination(');
+  // Launch-pending, unknown and job-owned records are never released by the renderer.
+  assert.match(release, /if \(!record \|\| !\['unlaunched', 'not-started'\]\.includes\(record\.state\)\) return false;/u);
+  assert.doesNotMatch(release, /launch-pending|unknown|job-owned/u);
+
+  const abandoned = functionSource(setup, 'function releaseAbandonedDestination(');
+  assert.match(abandoned, /^function releaseAbandonedDestination\(record\) \{/u);
+  assert.match(abandoned, /if \(!record\) return Promise\.resolve\(false\);/u);
+  assert.match(abandoned, /if \(record\.state !== 'not-started'\) return releasePendingDestination\(record\);/u);
+  assert.match(abandoned, /return releasePendingDestination\(record\)\.catch\(\(\) => false\);/u);
+  for (const exit of ['async function refreshStaleReview(', 'async function goToSource(']) {
+    const body = functionSource(setup, exit);
+    assert.match(body, /releaseAbandonedDestination\(record\)/u);
+    assert.doesNotMatch(body, /releasePendingDestination\(/u);
+  }
+});
+
+test('not-started and not-observed settle together and a later read cannot reopen them', () => {
+  const setup = source('src/components/setup/ServerSetupWizard.svelte');
+  const reconcile = functionSource(setup, 'async function reconcileLaunch(');
+  assert.match(reconcile, /if \(result\.status === 'not-started' \|\| result\.status === 'not-observed'\) \{\s*settleNotStarted\(attempt\);\s*return noteNotStarted\(attempt\);/u);
+  assert.equal(reconcile.match(/if \(settledNotStarted\(attempt\)\) return noteNotStarted\(attempt\);/gu)?.length, 2);
+  assert.doesNotMatch(setup, /this plan is still usable/u);
+  // Reads never re-assign the selection; that re-created the focused status button on every read.
+  assert.doesNotMatch(reconcile, /selectedLaunch\s*=/u);
+  assert.match(functionSource(setup, 'function startReviewedOperation('), /if \(attempt\.status === 'launch-pending'\) \{ attempt\.status = 'unknown';/u);
+  assert.match(functionSource(setup, 'async function selectLaunch('), /status: settled \? 'not-started' : 'unknown'/u);
+  const note = functionSource(setup, 'function noteNotStarted(');
+  assert.match(note, /if \(!shown && attempt\.reservationRecord\?\.state === 'not-started'\) void releaseAbandonedDestination\(attempt\.reservationRecord\);/u);
+});
+
+test('launch notices belong to the selected launch and the v26.6.1 custom setup never shows them', () => {
+  const setup = source('src/components/setup/ServerSetupWizard.svelte');
+  const invalidate = functionSource(setup, 'function invalidateIntent(');
+  for (const reset of [/launchNotice = '';/u, /launchSettlement = null;/u, /launchCheckAnnouncement = '';/u, /reviewActionFailure = null;/u]) {
+    assert.match(invalidate, reset);
+  }
+  assert.match(setup, /\$: shownLaunchNotice = stage === 'custom' \? '' :/u);
+  assert.match(setup, /\{#if shownLaunchNotice\}<section class="mp-state warning" role="status" aria-live="polite">/u);
+  assert.equal(functionSource(setup, 'async function adoptLaunch(').match(/if \(!currentAttempt\(attempt\) \|\| stage === 'custom'\) return;/gu)?.length, 2);
+  assert.match(functionSource(setup, 'async function checkLaunchStatus('), /if \(!alive \|\| stage === 'custom' \|\| !target\) return;/u);
+  assert.match(setup, /<ArchiveGuidedReview[^>]*busy=\{busy \|\| launchProtected\}/u);
+});
+
+test('the exact launch status button stays mounted while it reads', () => {
+  const setup = source('src/components/setup/ServerSetupWizard.svelte');
+  const button = setup.match(/<button[^>]*on:click=\{checkLaunchStatus\}>Check exact launch status<\/button>/u)?.[0] || '';
+  assert.match(setup, /\{#if checkableLaunch\}<button[^>]*on:click=\{checkLaunchStatus\}>/u);
+  assert.match(button, /aria-busy=\{checkableLaunch\.reading \? 'true' : 'false'\}/u);
+  assert.doesNotMatch(button, /\bdisabled\b/u);
+  assert.doesNotMatch(setup, /\{#if [^}]*\.reading[^}]*\}/u);
+  assert.match(setup, /<span class="mp-sr-only">\{launchCheckAnnouncement\}<\/span>/u);
+});
+
+test('the review reports its destination and preflight outcome next to its button', () => {
+  const setup = source('src/components/setup/ServerSetupWizard.svelte');
+  const review = setup.slice(setup.indexOf("{:else if stage === 'review'}"), setup.indexOf("{:else if stage === 'progress'}"));
+  const child = review.indexOf('<ArchiveGuidedReview');
+  assert.ok(child >= 0);
+  assert.ok(review.indexOf('destination-notice') > child, 'the destination notice follows the review button');
+  assert.ok(review.indexOf('review-action-failure') > child, 'a failed review action follows the review button');
+  assert.match(review, /<section class="mp-state error review-action-failure" bind:this=\{reviewActionRegion\} tabindex="-1" role="alert">/u);
+  assert.match(review, /<ArchiveGuidedReview[^>]*error=\{reviewBannerError\}/u);
+  const build = functionSource(setup, 'async function buildPreflight(');
+  assert.match(build, /reviewActionFailure = caught;\s*void revealReviewActionFailure\(caught\);/u);
+  // After a successful pick, a review that is still shown ends with a plan or a visible reason, never a silent reset.
+  assert.match(build, /if \(reservationRecord !== record \|\| record\.state !== 'unlaunched'\) \{\s*throw new ModpackApiError\(\{ code: 'PLAN_STALE'/u);
+  assert.doesNotMatch(build, /record\.state !== 'unlaunched'\) return;/u);
+  const reveal = functionSource(setup, 'async function revealReviewActionFailure(');
+  assert.match(reveal, /await tick\(\);/u);
+  assert.match(reveal, /reviewActionRegion\.scrollIntoView\?\.\(\{ block: 'nearest' \}\);\s*reviewActionRegion\.focus\(\);/u);
+
+  // The picker status and the chosen destination follow the native picker itself.
+  const ensure = functionSource(setup, 'async function ensureTargetInstance(');
+  assert.match(ensure, /selectingDestination = true;\s*reservedDestinationName = '';\s*const reservation = await modpackApi\.reserveServerDestination\(\);/u);
+  assert.doesNotMatch(setup, /selectingDestination = !pendingInstanceId/u);
+});
+
 test('renderer modpack client uses only lifecycle IPC and symmetric event cleanup', () => {
   const api = source('src/utils/modpacks/modpackApi.js');
   for (const channel of [
