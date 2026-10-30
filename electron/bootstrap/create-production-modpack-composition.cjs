@@ -600,6 +600,8 @@ async function createProductionModpackComposition(input = {}) {
       launchTerminalPublicationAvailable: typeof rawRecoveryService.retryTerminalPublication === 'function',
       launchRegistrationState: launch => newServerRegistrationState(store, { target: {
         stableServerId: launch.job.serverId, path: launch.binding.targetPath } }),
+      launchUnstartedTargetVerifier: launch => require('../services/modpack-lifecycle/unstarted-launch-authority.cjs')
+        .assertUnstartedLaunchTarget({ launch, fsApi: fsSync, reparseInspector }),
       clock: nowMs,
       workspaceRegistry
     });

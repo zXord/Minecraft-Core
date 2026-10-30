@@ -174,6 +174,51 @@ test('ambiguous instance or path alias rebinding is rejected without corrupting 
   stable.release();
 });
 
+test('authenticated abandoned incarnation retirement waits for its exact mutation release', async () => {
+  const { coordinator } = fixture(); completeEmptyRecovery(coordinator);
+  const gate = deferred(); const entered = deferred();
+  const first = coordinator.runMutation(selector('abandoned', ALPHA_PATH), mutationOptions('first-install', { operation: 'install-new' }), async () => {
+    coordinator.retireAbandonedIncarnation(selector('abandoned', ALPHA_PATH), { operationId: 'first-install' });
+    entered.resolve(); await gate.promise;
+  });
+  // Do not leave this test hanging when the new boundary is not implemented.
+  const ready = await Promise.race([entered.promise.then(() => true), first.then(() => false, error => { throw error; })]);
+  assert.equal(ready, true);
+  await assert.rejects(coordinator.runMutation(selector('replacement', ALPHA_PATH), mutationOptions('too-early'), async () => {}), code('INVALID_REQUEST'));
+  gate.resolve(); await first;
+  let admitted = false;
+  await coordinator.runMutation(selector('replacement', ALPHA_PATH), mutationOptions('second-install'), async () => { admitted = true; });
+  assert.equal(admitted, true);
+  assert.equal(coordinator.retireAbandonedIncarnation(selector('abandoned', ALPHA_PATH), { operationId: 'first-install' }), false,
+    'late old closure must not retire the replacement');
+});
+
+test('abandoned incarnation retirement rejects wrong owner and retains ordinary alias guards', async () => {
+  const { coordinator } = fixture(); completeEmptyRecovery(coordinator);
+  await coordinator.runMutation(selector('abandoned', ALPHA_PATH), mutationOptions('first-install', { operation: 'install-new' }), async () => {});
+  for (const [selected, operationId] of [[selector('abandoned', ALPHA_PATH), 'other-operation'],
+    [selector('abandoned', BETA_PATH), 'first-install']]) {
+    assert.throws(() => coordinator.retireAbandonedIncarnation(selected, { operationId }), code('INVALID_REQUEST'));
+  }
+  const start = await coordinator.acquireStart(selector('abandoned', ALPHA_PATH), startOptions('live-start'));
+  assert.throws(() => coordinator.retireAbandonedIncarnation(selector('abandoned', ALPHA_PATH), { operationId: 'first-install' }), code('OPERATION_IN_PROGRESS'));
+  start.release();
+  coordinator.beginStartupRecovery();
+  coordinator.installRecoveryBlocks([{ operationId: 'blocked-install', selector: selector('abandoned', ALPHA_PATH) }]);
+  coordinator.completeStartupRecovery([{ resolved: false, selector: selector('abandoned', ALPHA_PATH) }]);
+  assert.throws(() => coordinator.retireAbandonedIncarnation(selector('abandoned', ALPHA_PATH), { operationId: 'first-install' }), code('RECOVERY_REQUIRED'));
+  await assert.rejects(coordinator.runMutation(selector('replacement', ALPHA_PATH), mutationOptions('second-install'), async () => {}), code('RECOVERY_REQUIRED'));
+});
+
+test('abandoned incarnation retirement accepts only its resolved recovery owner after restart', async () => {
+  const { coordinator } = fixture();
+  coordinator.installRecoveryBlocks([{ operationId: 'interrupted-install', selector: selector('abandoned', ALPHA_PATH) }]);
+  coordinator.completeStartupRecovery([{ resolved: true, selector: selector('abandoned', ALPHA_PATH) }]);
+  assert.throws(() => coordinator.retireAbandonedIncarnation(selector('abandoned', ALPHA_PATH), { operationId: 'unrelated' }), code('INVALID_REQUEST'));
+  assert.equal(coordinator.retireAbandonedIncarnation(selector('abandoned', ALPHA_PATH), { operationId: 'interrupted-install' }), true);
+  assert.equal(await coordinator.runMutation(selector('replacement', ALPHA_PATH), mutationOptions('replacement-install'), async () => 'admitted'), 'admitted');
+});
+
 test('a pending mutation reserves synchronously before quiesce awaits and blocks a second writer', async () => {
   const { coordinator } = fixture();
   completeEmptyRecovery(coordinator);

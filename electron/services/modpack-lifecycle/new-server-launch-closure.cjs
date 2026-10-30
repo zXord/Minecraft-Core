@@ -133,5 +133,21 @@ function isDestinationRecoveryClosure(job, evidence, registrationState) {
     !evidence.record && !evidence.corrupt && evidence.olderRestriction === true && registrationState === 'absent');
 }
 
+// This is only a candidate for reproof, never release authority by itself. The
+// caller still needs authenticated storage, exclusive ownership, clean recovery
+// and registration evidence, and the unchanged physical reservation.
+function isUnstartedLaunchFailure(job) {
+  const event = job?.events?.[0];
+  return Boolean(job?.phase === 'failed' && job.sequence === 4 && job.terminalAt != null &&
+    ['install-new', 'import-files-only-new'].includes(job.operationKind) && job.swapStep === null &&
+    job.cancellationRequested === false && job.outcome?.status === 'failed' &&
+    job.outcome.errorCode === 'INVALID_REQUEST' && job.outcome.cleanupPending === false &&
+    !job.outcome.failureReason && !job.outcome.runtimeDiagnostic && !job.outcome.cleanupErrorCode &&
+    Array.isArray(job.events) && job.events.length === 1 && event.jobId === job.jobId &&
+    event.channel === 'log' && event.phase === 'preflight' && event.sequence === 3 &&
+    event.details?.step === 'acquire-mutation' && event.details.errorCode === 'INVALID_REQUEST' &&
+    Object.keys(event.details).length === 2);
+}
+
 module.exports = { classifyRecoveryTerminalClosure, classifyLaunchDestination, newServerRegistrationState, hasExactLaunchRecoveryBinding,
-  coversLaunch, isDestinationRecoveryClosure };
+  coversLaunch, isDestinationRecoveryClosure, isUnstartedLaunchFailure };

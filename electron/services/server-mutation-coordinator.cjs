@@ -329,6 +329,7 @@ class ServerMutationCoordinator {
       const record = this._findRecord(outcome.normalized);
       if (!record || (!record.recoveryBlock && !record.revisionFailure)) throw invalidRequest();
       if (outcome.resolved) {
+        record.resolvedRecoveryOperationId = record.recoveryBlock?.operationId || record.revisionFailure?.operationId;
         record.recoveryBlock = null;
         record.revisionFailure = null;
       }
@@ -345,6 +346,48 @@ class ServerMutationCoordinator {
 
   runMutation(selectorValue, optionsValue, work) {
     return this._startMutationRun([selectorValue], optionsValue, work, false);
+  }
+
+  // Internal lifecycle boundary: the caller must first authenticate an abandoned
+  // new-server closure and absence of registration. Ordinary lease release never
+  // permits rebinding an instance/path pair.
+  retireAbandonedIncarnation(selectorValue, optionsValue) {
+    const normalized = normalizeSelector(selectorValue);
+    assertExactKeys(optionsValue, new Set(['operationId']));
+    const operationId = assertOperationId(optionsValue.operationId);
+    if (!normalized.instance || !normalized.serverPath) throw invalidRequest();
+    const record = this.instanceAliases.get(normalized.instance.key);
+    if (!record) return false; // Already retired; never touch a newer path owner.
+    if (record.pathKey !== normalized.serverPath.key || this.pathAliases.get(record.pathKey) !== record ||
+        (record.newServerOperationId !== operationId && record.resolvedRecoveryOperationId !== operationId)) throw invalidRequest();
+    this._assertAvailable(record);
+    if (record.start) throw operationInProgress(record.start.operationId);
+    if (record.mutation && record.mutation.operationId !== operationId) throw operationInProgress(record.mutation.operationId);
+    record.retirementOperationId = operationId;
+    if (!record.mutation) this._retireAbandonedRecord(record);
+    return true;
+  }
+
+  assertUnstartedMutation(selectorValue, optionsValue) {
+    const normalized = normalizeSelector(selectorValue);
+    assertExactKeys(optionsValue, new Set(['operationId']));
+    const operationId = assertOperationId(optionsValue.operationId);
+    if (!normalized.instance || !normalized.serverPath) throw invalidRequest();
+    const record = this._findRecord(normalized);
+    if (!record) { if (this.globalRecoveryBlock) throw recoveryRequired(); return true; }
+    this._assertAvailable(record);
+    if (record.mutation || record.start) throw operationInProgress(record.mutation?.operationId || record.start.operationId);
+    if (record.instanceKey === normalized.instance.key || record.newServerOperationId === operationId) throw invalidRequest();
+    return true;
+  }
+
+  _retireAbandonedRecord(record) {
+    if (!record.retirementOperationId || record.mutation || record.start || record.recoveryBlock || record.revisionFailure) return false;
+    if (this.instanceAliases.get(record.instanceKey) !== record || this.pathAliases.get(record.pathKey) !== record) throw invalidRequest();
+    this.instanceAliases.delete(record.instanceKey);
+    this.pathAliases.delete(record.pathKey);
+    this.records.delete(record);
+    return true;
   }
 
   runManyMutations(selectorValues, optionsValue, work) {
@@ -507,7 +550,10 @@ class ServerMutationCoordinator {
         startupRecovery: false,
         workSettled: false
       };
-      for (const record of records) record.mutation = reservation;
+      for (const record of records) {
+        record.mutation = reservation;
+        record.newServerOperationId = ['install-new', 'import-files-only-new'].includes(options.operation) ? options.operationId : null;
+      }
       return this._executeMutation(reservation, work);
     } catch (error) {
       return Promise.reject(error instanceof ModpackError ? error : invalidRequest(error));
@@ -563,6 +609,7 @@ class ServerMutationCoordinator {
           }
           record.recoveryBlock = null;
           record.revisionFailure = null;
+          record.resolvedRecoveryOperationId = reservation.operationId;
         }
       }
     } catch (error) {
@@ -704,6 +751,7 @@ class ServerMutationCoordinator {
     }
     for (const record of reservation.records) {
       if (record.mutation === reservation) record.mutation = null;
+      if (record.retirementOperationId === reservation.operationId) this._retireAbandonedRecord(record);
     }
     return true;
   }
@@ -855,10 +903,13 @@ class ServerMutationCoordinator {
       instanceId: null,
       instanceKey: null,
       mutation: null,
+      newServerOperationId: null,
       pathFlavor: null,
       pathKey: null,
       recoveryBlock: null,
+      resolvedRecoveryOperationId: null,
       revisionFailure: null,
+      retirementOperationId: null,
       serverPath: null,
       start: null
     };

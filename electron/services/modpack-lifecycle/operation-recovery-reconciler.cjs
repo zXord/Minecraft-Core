@@ -1,7 +1,8 @@
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { normalizeFailureDiagnostic } = require('./publication-failure-diagnostic.cjs');
 const { isDeepStrictEqual } = require('node:util');
-const { classifyRecoveryTerminalClosure, classifyLaunchDestination, hasExactLaunchRecoveryBinding, coversLaunch, isDestinationRecoveryClosure } = require('./new-server-launch-closure.cjs');
+const { classifyRecoveryTerminalClosure, classifyLaunchDestination, hasExactLaunchRecoveryBinding, coversLaunch, isDestinationRecoveryClosure,
+  isUnstartedLaunchFailure } = require('./new-server-launch-closure.cjs');
 
 const RECONCILABLE_PHASES = new Set([
   'publishing', 'published', 'registering', 'starting', 'validating-live',
@@ -387,6 +388,15 @@ async function reconcileNewServerLaunches({ operationStore, recoveryRegistry, li
       const evidence = await readLaunchRecoveryEvidence({ recoveryRegistry, launch, assertCurrent, retryTerminalPublication });
       classifications.set(launch.job.jobId, evidence);
       const registration = await registrationState(launch); assertCurrent();
+      if (launch.binding.destinationDisposition === 'held' && isUnstartedLaunchFailure(launch.job) && evidence.cleanEvidence &&
+          registration === 'absent' && initial.has(launch.job.jobId) && !lifecycleService.hasActiveJob(launch.job.jobId) &&
+          lifecycleService.pendingNewServerAdmissions.size === 0 && lifecycleService.admittedTasks.size === 0) {
+        try { await lifecycleService.settleJobDestination({ jobId: launch.job.jobId, disposition: 'released' }); }
+        catch { assertCurrent(); }
+        launch = await operationStore.getNewServerLaunch(launch.job.jobId, epoch); assertCurrent();
+        if (!launch || !isDeepStrictEqual({ ...launch.binding, destinationDisposition: 'held' },
+            { ...initialLaunch.binding, destinationDisposition: 'held' })) throw invalid();
+      }
       const classificationEvidence = isDestinationRecoveryClosure(launch.job, evidence, registration)
         ? { destinationRecovery: true } : evidence;
       const noCurrentOwner = !lifecycleService.hasActiveJob(launch.job.jobId) &&

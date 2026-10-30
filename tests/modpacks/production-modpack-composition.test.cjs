@@ -36,7 +36,7 @@ const {
 const SHA256 = 'a'.repeat(64);
 const SHA512 = 'b'.repeat(128);
 
-async function seedPriorLaunch(f, { historical = false, pending = false } = {}) {
+async function seedPriorLaunch(f, { historical = false, pending = false, rejectedAdmission = false } = {}) {
   const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
   const { createServerMutationContext } = require('../../electron/services/server-mutation-context.cjs');
   f.input.coordinator = new ServerMutationCoordinator({ context: createServerMutationContext(), readContentRevision: () => 0,
@@ -59,9 +59,24 @@ async function seedPriorLaunch(f, { historical = false, pending = false } = {}) 
   await prior.initialize();
   const jobId = 'launch-prior-job'; const serverId = 'launch-prior-server';
   const targetPath = path.join(f.input.userDataPath, 'inert-launch-target');
+  let capturedReservation = { kind: 'absent' };
+  if (rejectedAdmission) {
+    fs.mkdirSync(targetPath);
+    capturedReservation = await require('../../electron/services/modpack-lifecycle/reserved-target-authority.cjs')
+      .captureReservedTarget({ targetPath, reparseInspector: f.input.reparseInspector });
+  }
   const binding = { planId: 'plan-launch-v1-00000000-0000-4000-8000-000000000099', planFingerprint: SHA256,
-    instanceId: serverId, targetPath, displayName: 'Inert launch target', capturedReservation: { kind: 'absent' }, destinationDisposition: 'held' };
+    instanceId: serverId, targetPath, displayName: 'Inert launch target', capturedReservation, destinationDisposition: 'held' };
   let job = await prior.create({ jobId, serverId, operationKind: 'install-new', planFingerprint: SHA256, launchBinding: binding }, owner.epoch);
+  if (rejectedAdmission) {
+    await prior.transition(jobId, { expectedPhase: 'queued', nextPhase: 'preflight', patch: {} });
+    await prior.updateProgress(jobId, { expectedPhase: 'preflight', progress: { percent: 5, message: 'Verifying cleanup', currentItem: null } });
+    await prior.appendEvent(jobId, { channel: 'log', message: 'The server mutation request is invalid',
+      details: { errorCode: 'INVALID_REQUEST', step: 'acquire-mutation' } });
+    await prior.transition(jobId, { expectedPhase: 'preflight', nextPhase: 'failed', patch: {
+      outcome: { status: 'failed', errorCode: 'INVALID_REQUEST', cleanupPending: false }
+    } });
+  }
   if (historical) {
     job = await prior.transition(jobId, { expectedPhase: 'queued', nextPhase: 'preflight', patch: {} });
     await registry.create({ schemaVersion: 2, sequence: 0, jobId, operationKind: 'install',
@@ -75,6 +90,21 @@ async function seedPriorLaunch(f, { historical = false, pending = false } = {}) 
   }
   return { registry, prior, owner, jobId, serverId, targetPath, permitEnvelope() { failEnvelope = false; } };
 }
+
+for (const changed of [false, true]) test(`launch production startup verifies the physical target before releasing a prior admission failure changed=${changed}`, async t => {
+  const f = fixture(t); const seeded = await seedPriorLaunch(f, { rejectedAdmission: true });
+  const before = fs.lstatSync(seeded.targetPath, { bigint: true });
+  if (changed) fs.writeFileSync(path.join(seeded.targetPath, 'user-file.txt'), 'retain');
+  const c = await createProductionModpackComposition(f.input); t.after(() => c.dispose());
+  await c.initialize();
+  const record = await seeded.prior.getNewServerLaunch(seeded.jobId, seeded.owner.epoch);
+  assert.equal(record.job.phase, 'failed');
+  assert.equal(record.binding.destinationDisposition, changed ? 'held' : 'released');
+  assert.equal(c.destinationReservationService.isDestinationHeld(seeded.serverId), changed);
+  assert.equal(c.lifecycleService.launchSettlements.get(seeded.jobId).settlementStatus, changed ? 'support-required' : 'settled');
+  assert.equal(fs.lstatSync(seeded.targetPath, { bigint: true }).ino, before.ino);
+  assert.deepEqual(fs.readdirSync(seeded.targetPath), changed ? ['user-file.txt'] : []);
+});
 
 for (const historical of [false, true]) test(`launch historical composition startup repairs ${historical ? 'archived closure' : 'prior queued'} before readiness`, async t => {
   const f = fixture(t); const seeded = await seedPriorLaunch(f, { historical });

@@ -95,7 +95,7 @@ test('launch matrix closure topology and identity predicates reject partial iden
   assert.equal(classify({ ...health, outcome: { recovery: { action: 'new-health-failed', operationId: 'other' } } }), null);
 });
 
-async function fixture(t) {
+async function fixture(t, { physicalTarget = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'modpack-launch-task2-'));
   let id = 0;
   const randomUUID = () => `00000000-0000-4000-8000-${String(++id).padStart(12, '0')}`;
@@ -108,11 +108,13 @@ async function fixture(t) {
   } };
   const workspace = { transferOwnership() {}, async releaseOwner() { return true; } };
   const plans = new PlanRegistry({ workspaceRegistry: workspace, randomUUID, clock: () => now, allowNewServerLaunchBindings: true });
-  const targetPath = 'C:\\LaunchFixture\\Pack';
+  const targetPath = physicalTarget ? path.join(root, 'destination') : 'C:\\LaunchFixture\\Pack';
+  if (physicalTarget) fs.mkdirSync(targetPath);
+  const reparseInspector = { async isReparsePoint() { if (!physicalTarget) assert.fail('inert capture must not inspect target'); return false; } };
   const reservations = new ServerDestinationReservationService({
     dialog: { async showOpenDialog() { return { canceled: false, filePaths: [targetPath] }; } },
-    reparseInspector: { async isReparsePoint() { assert.fail('inert capture must not inspect target'); } },
-    captureReservation: async () => ({ kind: 'absent' }), randomUUID, clock: () => now, ttlMs: 1000
+    reparseInspector,
+    ...(physicalTarget ? {} : { captureReservation: async () => ({ kind: 'absent' }) }), randomUUID, clock: () => now, ttlMs: 1000
   });
   let temporary = 0;
   const durableFs = createDurableFs({ allowedRoots: [root], tempNameFactory: () => `launch-${++temporary}`,
@@ -133,6 +135,8 @@ async function fixture(t) {
     archiveInspector: { inspectArchive() {} }, inspectionLoader: { loadInspection() {} }, planningAdapter: { createPlan() {} },
     planRegistry: plans, operationStore: store, workspaceRegistry: workspace, mutationCoordinator: { runMutation() {} }, mutationRuntime: runtime,
     destinationReservations: reservations, launchOwner: owner, allowNewServerLaunchBindings: true, clock: () => now };
+  if (physicalTarget) serviceDependencies.launchUnstartedTargetVerifier = launch =>
+    require('../../electron/services/modpack-lifecycle/unstarted-launch-authority.cjs').assertUnstartedLaunchTarget({ launch, reparseInspector });
   let service = new ModpackLifecycleService(serviceDependencies);
   function reviewedPlan(instanceId) {
     const base = { operation: { kind: 'install', serverKind: 'new', instanceId, expectedContentRevision: 0, downgrade: false },
@@ -150,6 +154,71 @@ async function fixture(t) {
     serviceDependencies, get executions() { return executions; }, advance(ms) { now += ms; }, loseOwner() { current = false; } };
 }
 
+async function seedFailedAdmission(f, { step = 'acquire-mutation', extraEvent = false } = {}) {
+  const { job } = await seedLaunch(f);
+  await f.store.transition(job.jobId, { expectedPhase: 'queued', nextPhase: 'preflight', patch: {
+    progress: { percent: 5, message: 'Revalidating the reviewed plan', currentItem: null }
+  } });
+  await f.store.updateProgress(job.jobId, { expectedPhase: 'preflight', progress: {
+    percent: 5, message: 'The attempt failed; verifying safe cleanup of the candidate.', currentItem: null
+  } });
+  await f.store.appendEvent(job.jobId, { channel: 'log', message: 'The server mutation request is invalid',
+    details: { errorCode: 'INVALID_REQUEST', step } });
+  if (extraEvent) await f.store.appendEvent(job.jobId, { channel: 'log', message: 'Later diagnostic', details: {} });
+  await f.store.transition(job.jobId, { expectedPhase: 'preflight', nextPhase: 'failed', patch: {
+    outcome: { status: 'failed', message: 'The operation failed before the server changed', errorCode: 'INVALID_REQUEST', cleanupPending: false }
+  } });
+  const launch = await f.store.getNewServerLaunch(job.jobId, f.owner.epoch);
+  f.service.rememberNewServerLaunch(launch); f.reservations.restoreJobHold({ jobId: job.jobId, binding: launch.binding });
+  f.service.launchRecoveryRegistry = cleanRecoveryRegistry(); f.service.launchRegistrationState = () => 'absent';
+  const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
+  const { createServerMutationContext } = require('../../electron/services/server-mutation-context.cjs');
+  f.service.mutationCoordinator = new ServerMutationCoordinator({ context: createServerMutationContext(),
+    readContentRevision() { assert.fail('admission repair must not read live revision'); },
+    bumpContentRevision() { assert.fail('admission repair must not write live revision'); } });
+  f.service.mutationCoordinator.completeStartupRecovery([]);
+  return launch;
+}
+
+for (const startup of [false, true]) test(`launch rejected admission releases only its unchanged empty reservation startup=${startup}`, async t => {
+  const f = await fixture(t, { physicalTarget: true }); const launch = await seedFailedAdmission(f);
+  const before = fs.lstatSync(launch.binding.targetPath, { bigint: true });
+  if (startup) {
+    const { reconcileNewServerLaunches } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+    await reconcileNewServerLaunches({ operationStore: f.store, recoveryRegistry: f.service.launchRecoveryRegistry,
+      lifecycleService: f.service, launchOwner: f.owner, jobs: [launch.job], launches: [launch], registrationState: () => 'absent' });
+  } else assert.equal(await f.service.releaseServerDestination(launch.binding.instanceId), true);
+  const current = await f.store.getNewServerLaunch(launch.job.jobId, f.owner.epoch);
+  assert.equal(current.job.phase, 'failed'); assert.equal(current.binding.destinationDisposition, 'released');
+  assert.equal(f.reservations.isDestinationHeld(launch.binding.instanceId), false);
+  assert.equal(fs.lstatSync(launch.binding.targetPath, { bigint: true }).ino, before.ino, 'metadata-only repair must not remove/recreate the directory');
+  assert.deepEqual(fs.readdirSync(launch.binding.targetPath), []);
+  assert.equal(f.executions, 0);
+});
+
+for (const invalidProof of ['later-step', 'extra-event', 'corrupt-event', 'contents', 'registered', 'active', 'claimed', 'pending-admission', 'recovery-record', 'global-block']) {
+  test(`launch rejected admission stays held for ${invalidProof}`, async t => {
+    const f = await fixture(t, { physicalTarget: true }); const launch = await seedFailedAdmission(f, {
+      step: invalidProof === 'later-step' ? 'revalidate-plan' : 'acquire-mutation', extraEvent: invalidProof === 'extra-event'
+    });
+    if (invalidProof === 'corrupt-event') {
+      const bytes = JSON.parse(fs.readFileSync(path.join(f.root, 'modpack-lifecycle', 'operations', `${launch.job.jobId}.json`)));
+      // Public log contents without matching durable checksum are never authority.
+      bytes.events[0].details.step = 'revalidate-plan';
+      fs.writeFileSync(path.join(f.root, 'modpack-lifecycle', 'operations', `${launch.job.jobId}.json`), JSON.stringify(bytes));
+    } else if (invalidProof === 'contents') fs.writeFileSync(path.join(launch.binding.targetPath, 'user-file.txt'), 'retain');
+    else if (invalidProof === 'registered') f.service.launchRegistrationState = () => 'registered';
+    else if (invalidProof === 'active') {
+      f.service.hasActiveJob = () => true;
+    } else if (invalidProof === 'claimed') f.plans.claimedPlans.set('other', { planId: launch.binding.planId });
+    else if (invalidProof === 'pending-admission') f.service.pendingNewServerAdmissions.set('other', { instanceId: launch.binding.instanceId });
+    else if (invalidProof === 'recovery-record') f.service.launchRecoveryRegistry.load = async () => closureRecord({ jobId: launch.job.jobId });
+    else if (invalidProof === 'global-block') f.service.launchRecoveryRegistry.initialize = async () => ({ records: [], corrupt: [], blocks: [], pendingTerminalPublications: [], globalBlock: true });
+    await assert.rejects(f.service.settleJobDestination({ jobId: launch.job.jobId, disposition: 'released' }));
+    assert.equal(f.reservations.isDestinationHeld(launch.binding.instanceId), true);
+  });
+}
+
 async function seedLaunch(f) {
   const reserved = await f.reservations.reserveWithNativeDialog({});
   const request = await f.plan(reserved.instanceId);
@@ -159,6 +228,47 @@ async function seedLaunch(f) {
       instanceId: reserved.instanceId, targetPath: privateReservation.targetPath, capturedReservation: privateReservation.reservation,
       displayName: privateReservation.displayName, destinationDisposition: 'held' } }, f.owner.epoch);
   return { job, launch: await f.store.getNewServerLaunch(job.jobId, f.owner.epoch) };
+}
+
+for (const changed of ['owner', 'active', 'pending-admission', 'registered', 'recovery-record']) {
+  test(`launch rejected admission reproves ${changed} after physical validation awaits`, async t => {
+    const f = await fixture(t, { physicalTarget: true }); const launch = await seedFailedAdmission(f);
+    const verify = f.service.launchUnstartedTargetVerifier;
+    f.service.launchUnstartedTargetVerifier = async value => {
+      const verified = await verify(value);
+      if (changed === 'owner') f.loseOwner();
+      else if (changed === 'active') f.service.hasActiveJob = () => true;
+      else if (changed === 'pending-admission') f.service.pendingNewServerAdmissions.set('new-admission', {});
+      else if (changed === 'registered') f.service.launchRegistrationState = () => 'registered';
+      else f.service.launchRecoveryRegistry.load = async () => closureRecord({ jobId: launch.job.jobId });
+      return verified;
+    };
+    await assert.rejects(f.service.settleJobDestination({ jobId: launch.job.jobId, disposition: 'released' }));
+    assert.equal(f.reservations.isDestinationHeld(launch.binding.instanceId), true);
+    assert.deepEqual(fs.readdirSync(launch.binding.targetPath), []);
+  });
+}
+
+for (const fault of ['before', 'after', 'always']) {
+  test(`launch rejected admission bounds uncertain disposition publication fault=${fault}`, async t => {
+    const f = await fixture(t, { physicalTarget: true }); const launch = await seedFailedAdmission(f);
+    const settle = f.store.settleNewServerDestination.bind(f.store);
+    let calls = 0;
+    f.store.settleNewServerDestination = async (...args) => {
+      calls++;
+      if (fault === 'always' || (fault === 'before' && calls === 1)) throw new Error('uncertain disposition publication');
+      const result = await settle(...args);
+      if (fault === 'after' && calls === 1) throw new Error('publication completed before response failed');
+      return result;
+    };
+    const repair = f.service.settleJobDestination({ jobId: launch.job.jobId, disposition: 'released' });
+    if (fault === 'always') await assert.rejects(repair); else await repair;
+    assert.equal(calls, 2);
+    const current = await f.store.getNewServerLaunch(launch.job.jobId, f.owner.epoch);
+    assert.equal(current.binding.destinationDisposition, fault === 'always' ? 'held' : 'released');
+    assert.equal(f.reservations.isDestinationHeld(launch.binding.instanceId), fault === 'always');
+    assert.deepEqual(fs.readdirSync(launch.binding.targetPath), []);
+  });
 }
 
 function cleanRecoveryRegistry() {
@@ -520,6 +630,42 @@ test('launch settlement rejects restart absence as live-unrecorded proof', async
     expectedPhase: 'queued', nextPhase: 'failed', patch: { outcome: { status: 'failed', message: 'not proved', operationKind: 'install-new', actions: [] } }
   } }), { code: 'RECOVERY_REQUIRED' });
   assert.equal((await f.store.get(job.jobId)).phase, 'queued'); assert.equal(f.reservations.isDestinationHeld(job.serverId), true);
+});
+
+test('launch settled cancellation permits a fresh reserved incarnation at the same path with the real coordinator', async t => {
+  const f = await fixture(t);
+  const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
+  const { createServerMutationContext } = require('../../electron/services/server-mutation-context.cjs');
+  const coordinator = new ServerMutationCoordinator({ context: createServerMutationContext(), readContentRevision: () => 0,
+    bumpContentRevision() { assert.fail('cancelled new target must not acquire a live revision'); } });
+  coordinator.completeStartupRecovery([]); f.service.mutationCoordinator = coordinator;
+  f.service.mutationRuntime.resolveInstance = async ({ plan }) => ({ instanceId: plan.operation.instanceId,
+    serverPath: f.reservations.resolve(plan.operation.instanceId).targetPath, priorRunning: false });
+  const admitted = [];
+  f.service.mutationRuntime.revalidate = async ({ jobId, lease }) => {
+    assert.equal(lease.kind, 'mutation');
+    admitted.push(jobId);
+    const launch = await f.store.getNewServerLaunch(jobId, f.owner.epoch);
+    if (admitted.length === 1) await recordedAbandonment(f, launch);
+    else await f.service.recordUnrecordedLaunchClosure({ jobId, instanceId: launch.binding.instanceId,
+      targetPath: launch.binding.targetPath });
+    await f.store.requestCancellation(jobId);
+    if (admitted.length === 1) await f.service.settleJobDestination({ jobId, disposition: 'released' });
+    throw new ModpackError('CANCELLED', 'cancel before publication');
+  };
+  const original = await f.reservations.reserveWithNativeDialog({});
+  const first = await f.service.startOperation(await f.plan(original.instanceId));
+  await f.service.drain();
+  assert.equal((await f.service.getJob(first.jobId)).phase, 'cancelled');
+  assert.equal((await f.store.getNewServerLaunch(first.jobId, f.owner.epoch)).binding.destinationDisposition, 'released');
+  const next = await f.reservations.reserveWithNativeDialog({});
+  assert.notEqual(next.instanceId, original.instanceId, 'new reservation must not recycle the abandoned server identity');
+  const second = await f.service.startOperation(await f.plan(next.instanceId));
+  await f.service.drain();
+  const final = await f.service.getJob(second.jobId);
+  assert.equal(final.phase, 'cancelled', JSON.stringify({ outcome: final.outcome, events: final.events }));
+  assert.deepEqual(admitted, [first.jobId, second.jobId], 'both exact launches must reach their own real mutation lease');
+  assert.equal((await f.store.getNewServerLaunch(second.jobId, f.owner.epoch)).binding.destinationDisposition, 'released');
 });
 
 test('launch historical pending publication advertises only an actual bound application action', async t => {

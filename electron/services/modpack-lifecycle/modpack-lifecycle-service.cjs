@@ -13,7 +13,7 @@ const { validatePublicJob } = require('./operation-store.cjs');
 const { isDeepStrictEqual } = require('node:util');
 const { randomUUID } = require('node:crypto');
 const { normalizeRecoveryTargetPath } = require('./recovery-target-envelope.cjs');
-const { classifyLaunchDestination, isDestinationRecoveryClosure } = require('./new-server-launch-closure.cjs');
+const { classifyLaunchDestination, isDestinationRecoveryClosure, isUnstartedLaunchFailure } = require('./new-server-launch-closure.cjs');
 const { readLaunchRecoveryEvidence } = require('./operation-recovery-reconciler.cjs');
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -794,6 +794,7 @@ class ModpackLifecycleService {
     launchOwner = null,
     launchRecoveryRegistry = null,
     launchRegistrationState = null,
+    launchUnstartedTargetVerifier = null,
     launchTerminalPublicationAvailable = false,
     allowNewServerLaunchBindings = false,
     clock = () => Date.now(),
@@ -814,6 +815,7 @@ class ModpackLifecycleService {
         (workspaceRegistry !== null && (!workspaceRegistry || typeof workspaceRegistry.releaseOwner !== 'function')) ||
         typeof assertAdmission !== 'function' || typeof clock !== 'function' || typeof allowNewServerLaunchBindings !== 'boolean' ||
         (allowNewServerLaunchBindings && (!launchOwner || !destinationReservations)) ||
+        (launchUnstartedTargetVerifier !== null && typeof launchUnstartedTargetVerifier !== 'function') ||
         typeof yieldControl !== 'function' || typeof snapshotProgressClock !== 'function') {
       throw invalid();
     }
@@ -847,6 +849,7 @@ class ModpackLifecycleService {
     this.launchOwner = launchOwner;
     this.launchRecoveryRegistry = launchRecoveryRegistry;
     this.launchRegistrationState = launchRegistrationState;
+    this.launchUnstartedTargetVerifier = launchUnstartedTargetVerifier;
     this.launchTerminalPublicationAvailable = launchTerminalPublicationAvailable;
     this.allowNewServerLaunchBindings = allowNewServerLaunchBindings;
     this.launchClock = clock;
@@ -913,10 +916,12 @@ class ModpackLifecycleService {
           isDeepStrictEqual({ ...launch.binding, destinationDisposition: 'held' }, { ...live.binding, destinationDisposition: 'held' }) &&
           evidence.cleanEvidence && registrationState === 'absent';
         const destinationRecovery = isDestinationRecoveryClosure(launch.job, evidence, registrationState);
+        const unstartedClosure = !terminalUpdate && disposition === 'released' && launch.binding.destinationDisposition === 'held' &&
+          await this.#verifyUnstartedLaunchClosure(launch, evidence, registrationState, assertCurrent);
         // The older recovery remains a restriction, not this attempt's closure.
         const classification = classifyLaunchDestination({ ...launch, registrationState,
           recoveryEvidence: destinationRecovery ? { destinationRecovery: true } : evidence });
-        if (liveClosure) Object.assign(classification, { disposition: 'released', settlementStatus: 'repair-pending',
+        if (liveClosure || unstartedClosure) Object.assign(classification, { disposition: 'released', settlementStatus: 'repair-pending',
           reason: 'settlement-repair-required', recoveryAvailable: false });
         this.launchSettlements.set(jobId, classification);
         if (classification.disposition !== disposition || (terminalUpdate && !liveClosure &&
@@ -941,6 +946,11 @@ class ModpackLifecycleService {
         if (!confirmed || confirmed.binding.destinationDisposition !== disposition ||
             !isDeepStrictEqual({ ...confirmed.binding, destinationDisposition: 'held' },
               { ...initial.binding, destinationDisposition: 'held' })) throw recoveryRequired(lastError);
+        if (disposition === 'released' && registrationState === 'absent' &&
+            typeof this.mutationCoordinator.retireAbandonedIncarnation === 'function') {
+          this.mutationCoordinator.retireAbandonedIncarnation({ instanceId: confirmed.binding.instanceId,
+            serverPath: confirmed.binding.targetPath }, { operationId: jobId });
+        }
         this.destinationReservations.removeConfirmedJobHold({ jobId, instanceId: confirmed.binding.instanceId, disposition });
         this.#unrecordedLaunchClosures.delete(jobId);
         this.launchSettlements.set(jobId, classifyLaunchDestination({ ...confirmed, registrationState,
@@ -949,6 +959,32 @@ class ModpackLifecycleService {
       }
       throw recoveryRequired(lastError);
     });
+  }
+
+  async #verifyUnstartedLaunchClosure(launch, evidence, registrationState, assertCurrent) {
+    if (!isUnstartedLaunchFailure(launch.job) || !evidence.cleanEvidence || registrationState !== 'absent' ||
+        typeof this.launchUnstartedTargetVerifier !== 'function' ||
+        typeof this.mutationCoordinator?.assertUnstartedMutation !== 'function') return false;
+    const assertUnowned = () => {
+      assertCurrent();
+      if (this.hasActiveJob(launch.job.jobId) || this.pendingNewServerAdmissions.size !== 0 ||
+          !(this.planRegistry.claimedPlans instanceof Map) || [...this.planRegistry.claimedPlans.values()].some(claim =>
+            claim.jobId === launch.job.jobId || claim.planId === launch.binding.planId)) throw recoveryRequired();
+      this.mutationCoordinator.assertUnstartedMutation({ instanceId: launch.binding.instanceId,
+        serverPath: launch.binding.targetPath }, { operationId: launch.job.jobId });
+    };
+    assertUnowned();
+    if (await this.launchUnstartedTargetVerifier(launch) !== true) throw recoveryRequired();
+    assertUnowned();
+    const freshEvidence = await readLaunchRecoveryEvidence({ recoveryRegistry: this.launchRecoveryRegistry, launch, assertCurrent,
+      allowTerminalPublication: false, terminalPublicationAvailable: this.launchTerminalPublicationAvailable });
+    const freshRegistration = await this.launchRegistrationState(launch); assertUnowned();
+    const fresh = await this.operationStore.getNewServerLaunch(launch.job.jobId, this.launchOwner.epoch); assertUnowned();
+    if (!freshEvidence.cleanEvidence || freshRegistration !== 'absent' || !fresh ||
+        !isDeepStrictEqual(fresh.recordRevision, launch.recordRevision) || !isDeepStrictEqual(fresh.binding, launch.binding)) throw recoveryRequired();
+    if (await this.launchUnstartedTargetVerifier(fresh) !== true) throw recoveryRequired();
+    assertUnowned();
+    return true;
   }
 
   closeAdmission() {
@@ -1678,7 +1714,7 @@ class ModpackLifecycleService {
         // getJob waits for terminal settlement, which may need this same path
         // gate. Hydrate first, never while holding the destination gate.
         const job = await this.getJob(hold.jobId);
-        if (job?.phase !== 'failed' || job.outcome?.failureReason !== 'destination-recovery') return false;
+        if (job?.phase !== 'failed' || (job.outcome?.failureReason !== 'destination-recovery' && !isUnstartedLaunchFailure(job))) return false;
         return Boolean(await this.settleJobDestination({ jobId: hold.jobId, disposition: 'released' }));
       }
       const record = reservations.peek(instanceId);
