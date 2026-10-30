@@ -94,6 +94,29 @@ test('ignored-update hydration does not save unchanged backend state during star
   assert.deepEqual(saveInvocations(invocations), []);
 });
 
+test('equivalent empty scoped fallback is cleared without reserving a server save', async (t) => {
+  const hadWindow = Object.hasOwn(globalThis, 'window');
+  const originalWindow = globalThis.window;
+  const hadLocalStorage = Object.hasOwn(globalThis, 'localStorage');
+  const originalLocalStorage = globalThis.localStorage;
+  t.after(() => {
+    if (hadWindow) globalThis.window = originalWindow;
+    else delete globalThis.window;
+    if (hadLocalStorage) globalThis.localStorage = originalLocalStorage;
+    else delete globalThis.localStorage;
+  });
+  const pathKey = 'c:\\servers\\alpha';
+  const fallbackKey = `${IGNORED_UPDATES_LOCAL_KEY}:${encodeURIComponent(pathKey)}`;
+  const storage = new Map([[fallbackKey, '{}']]);
+  const { invocations } = installRendererGlobals({ backend: {}, storage });
+
+  await importFreshModStore('equivalent-empty-scoped-fallback');
+  await new Promise(resolve => setTimeout(resolve, 100));
+
+  assert.deepEqual(saveInvocations(invocations), []);
+  assert.equal(storage.has(fallbackKey), false);
+});
+
 test('nonempty legacy ignored updates migrate once after backend hydration', async (t) => {
   const hadWindow = Object.hasOwn(globalThis, 'window');
   const originalWindow = globalThis.window;
@@ -333,6 +356,175 @@ test('edits made after reactivating a hydration that is still saving persist the
     'Pending.jar': { ids: ['pending-version'], vers: [] },
     'Later.jar': { ids: ['later-version'], vers: [] }
   });
+});
+
+test('same-path activation remains pending until its hydration save settles', async (t) => {
+  const hadWindow = Object.hasOwn(globalThis, 'window');
+  const originalWindow = globalThis.window;
+  const hadLocalStorage = Object.hasOwn(globalThis, 'localStorage');
+  const originalLocalStorage = globalThis.localStorage;
+  t.after(() => {
+    if (hadWindow) globalThis.window = originalWindow;
+    else delete globalThis.window;
+    if (hadLocalStorage) globalThis.localStorage = originalLocalStorage;
+    else delete globalThis.localStorage;
+  });
+  const pathKey = 'c:\\servers\\alpha';
+  const fallbackKey = `${IGNORED_UPDATES_LOCAL_KEY}:${encodeURIComponent(pathKey)}`;
+  const storage = new Map([[fallbackKey, JSON.stringify({
+    'Deferred.jar': { ids: ['deferred-version'], vers: [] }
+  })]]);
+  let signalSaveStarted;
+  const saveStarted = new Promise(resolve => { signalSaveStarted = resolve; });
+  let releaseSave;
+  const blockedSave = new Promise(resolve => { releaseSave = resolve; });
+  installRendererGlobals({
+    backend: {},
+    storage,
+    saveBackend: async () => {
+      signalSaveStarted();
+      await blockedSave;
+      return { success: true, changed: true };
+    }
+  });
+
+  const modStore = await importFreshModStore('same-path-save-boundary');
+  await saveStarted;
+
+  let activationSettled = false;
+  const activation = modStore.activateIgnoredUpdatesServerPath('C:\\servers\\alpha')
+    .then(result => {
+      activationSettled = true;
+      return result;
+    });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(activationSettled, false);
+  releaseSave();
+  assert.equal(await activation, true);
+});
+
+test('a later clear is not undone on restart when its ignore was queued during the hydration save', async (t) => {
+  const hadWindow = Object.hasOwn(globalThis, 'window');
+  const originalWindow = globalThis.window;
+  const hadLocalStorage = Object.hasOwn(globalThis, 'localStorage');
+  const originalLocalStorage = globalThis.localStorage;
+  t.after(() => {
+    if (hadWindow) globalThis.window = originalWindow;
+    else delete globalThis.window;
+    if (hadLocalStorage) globalThis.localStorage = originalLocalStorage;
+    else delete globalThis.localStorage;
+  });
+
+  const serverPath = 'C:\\servers\\alpha';
+  const pathKey = serverPath.toLowerCase();
+  const pendingKey = `${IGNORED_UPDATES_LOCAL_KEY}:pending:${encodeURIComponent(pathKey)}`;
+  const storage = new Map();
+  let backendState = {};
+  let releaseHydration;
+  const hydration = new Promise(resolve => { releaseHydration = resolve; });
+  let signalFirstSaveStarted;
+  const firstSaveStarted = new Promise(resolve => { signalFirstSaveStarted = resolve; });
+  let releaseFirstSave;
+  const blockedFirstSave = new Promise(resolve => { releaseFirstSave = resolve; });
+  let saveCount = 0;
+  const saveBackend = async (_serverPath, json) => {
+    saveCount += 1;
+    if (saveCount === 1) {
+      signalFirstSaveStarted();
+      await blockedFirstSave;
+    }
+    backendState = JSON.parse(json);
+    return { success: true, changed: true };
+  };
+
+  installRendererGlobals({ backend: hydration, storage, saveBackend });
+  const firstStore = await importFreshModStore('queued-save-journal-ack-write');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  firstStore.ignoreUpdate('Base.jar', 'base-version', null);
+  releaseHydration({});
+  await firstSaveStarted;
+
+  const hydrationSettlement = firstStore.activateIgnoredUpdatesServerPath(serverPath);
+  firstStore.ignoreUpdate('Reverted.jar', 'reverted-version', null);
+  releaseFirstSave();
+  assert.equal(await hydrationSettlement, true);
+  firstStore.clearIgnoredUpdates('Reverted.jar');
+  assert.equal(await firstStore.waitForIgnoredUpdatesPersistence(serverPath), true);
+  assert.deepEqual(backendState, {
+    'Base.jar': { ids: ['base-version'], vers: [] }
+  });
+
+  installRendererGlobals({
+    backend: () => backendState,
+    storage,
+    saveBackend
+  });
+  const restartedStore = await importFreshModStore('queued-save-journal-ack-restart');
+  assert.equal(await restartedStore.waitForIgnoredUpdatesPersistence(serverPath), true);
+
+  assert.equal(restartedStore.isUpdateIgnored('Reverted.jar', 'reverted-version', null), false);
+  assert.deepEqual(backendState, {
+    'Base.jar': { ids: ['base-version'], vers: [] }
+  });
+  assert.equal(storage.has(pendingKey), false);
+});
+
+test('a failed clear stays ordered after an older pending ignore across restart', async (t) => {
+  const hadWindow = Object.hasOwn(globalThis, 'window');
+  const originalWindow = globalThis.window;
+  const hadLocalStorage = Object.hasOwn(globalThis, 'localStorage');
+  const originalLocalStorage = globalThis.localStorage;
+  t.after(() => {
+    if (hadWindow) globalThis.window = originalWindow;
+    else delete globalThis.window;
+    if (hadLocalStorage) globalThis.localStorage = originalLocalStorage;
+    else delete globalThis.localStorage;
+  });
+
+  const serverPath = 'C:\\servers\\alpha';
+  const pathKey = serverPath.toLowerCase();
+  const fallbackKey = `${IGNORED_UPDATES_LOCAL_KEY}:${encodeURIComponent(pathKey)}`;
+  const pendingKey = `${IGNORED_UPDATES_LOCAL_KEY}:pending:${encodeURIComponent(pathKey)}`;
+  const storage = new Map();
+  let releaseHydration;
+  const hydration = new Promise(resolve => { releaseHydration = resolve; });
+  installRendererGlobals({
+    backend: hydration,
+    storage,
+    saveBackend: async () => ({ success: false, changed: false })
+  });
+  const firstStore = await importFreshModStore('failed-clear-journal-order-write');
+  await new Promise(resolve => setTimeout(resolve, 20));
+
+  firstStore.ignoreUpdate('Reverted.jar', 'reverted-version', null);
+  const hydrationSettlement = firstStore.activateIgnoredUpdatesServerPath(serverPath);
+  releaseHydration({});
+  assert.equal(await hydrationSettlement, true);
+  assert.equal(firstStore.isUpdateIgnored('Reverted.jar', 'reverted-version', null), true);
+
+  firstStore.clearIgnoredUpdates('Reverted.jar');
+  assert.equal(await firstStore.waitForIgnoredUpdatesPersistence(serverPath), true);
+  assert.equal(firstStore.isUpdateIgnored('Reverted.jar', 'reverted-version', null), false);
+  assert.deepEqual(JSON.parse(storage.get(fallbackKey)), {});
+
+  let backendState = {};
+  installRendererGlobals({
+    backend: () => backendState,
+    storage,
+    saveBackend: async (_savedServerPath, json) => {
+      backendState = JSON.parse(json);
+      return { success: true, changed: true };
+    }
+  });
+  const restartedStore = await importFreshModStore('failed-clear-journal-order-restart');
+  assert.equal(await restartedStore.waitForIgnoredUpdatesPersistence(serverPath), true);
+
+  assert.equal(restartedStore.isUpdateIgnored('Reverted.jar', 'reverted-version', null), false);
+  assert.deepEqual(backendState, {});
+  assert.equal(storage.has(fallbackKey), false);
+  assert.equal(storage.has(pendingKey), false);
 });
 
 test('a failed save is isolated to its server and cannot migrate into another server', async (t) => {
