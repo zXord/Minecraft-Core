@@ -17,11 +17,12 @@
   let busy = false;
   let error = null;
   let cleanupNotice = null;
-  const statuses = new Set(['unmanaged','install-required','unpaired','update-required','modified','ready','runtime-incomplete','recovery-required']);
+  const statuses = new Set(['unmanaged','install-required','unpaired','update-required','modified','ready','runtime-incomplete','recovery-required','requirement-unavailable']);
   const labels = {
     'install-required':'Matching pack installation required', unpaired:'No matching client pack paired',
     'update-required':'Matching pack update required', modified:'Matching pack files modified', ready:'Matching pack ready',
-    'runtime-incomplete':'Matching runtime incomplete', 'recovery-required':'Matching pack recovery required'
+    'runtime-incomplete':'Matching runtime incomplete', 'recovery-required':'Matching pack recovery required',
+    'requirement-unavailable':'Matching pack requirement not checked'
   };
   const phaseLabels = {
     'checking-requirement':'Checking the server’s matching pack requirement',
@@ -187,6 +188,8 @@
     <p>Ask the server owner to pair the same-release MRPACK or MultiMC ZIP in the server’s Modpack overview. GitHub supports both; Modrinth supports MRPACK only. Loose-mod synchronization is disabled for this managed server.</p>
   {:else if state?.status === 'unavailable'}
     <p>The server requirement could not be classified. Content changes and launch stay blocked until it can be checked.</p>
+  {:else if state?.status === 'requirement-unavailable'}
+    <p>The server’s matching pack requirement could not be checked (the server may be offline). Your own client content stays available; syncing from the server and launching wait until it can be checked.</p>
   {:else if state?.status === 'ready'}
     <p>The matching pack is verified. Sign in with Microsoft and use the normal launch action.</p>
   {:else if state?.status === 'modified'}

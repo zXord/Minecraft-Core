@@ -67,6 +67,9 @@ async function request(name, input, { signal, onProgress } = {}) {
   }
 }
 export function allowsLegacyClient(state) { return state?.status === 'unmanaged'; }
+// The client's own content (the Mods tab) also stays available while a host that gave
+// no response leaves the requirement unchecked. Host sync and launch keep allowsLegacyClient.
+export function allowsLocalClientContent(state) { return allowsLegacyClient(state) || state?.status === 'requirement-unavailable'; }
 export const clientPackApi = Object.freeze({
   getCompanion: serverId => invoke('get-companion', { serverId }),
   listCompanionAssets: serverId => invoke('list-companion-assets', { serverId }),

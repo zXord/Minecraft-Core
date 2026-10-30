@@ -1,7 +1,15 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const { EventEmitter } = require('node:events');
 
 const modulePromise = import('../../src/utils/clientPacks/clientPackApi.js');
+const ROOT = path.resolve(__dirname, '../..');
+const source = relativePath => fs.readFileSync(path.join(ROOT, relativePath), 'utf8');
+const quoted = text => [...text.matchAll(/'([^']+)'/gu)].map(match => match[1]);
+const panelStatuses = () => quoted(/const statuses = new Set\(\[([^\]]*)\]\);/u.exec(source('src/components/client/ClientModpackPanel.svelte'))[1]);
 for (const method of ['getState', 'verify']) test(`read-only check renderer ${method} correlates progress and cancellation settlement`, async () => {
   const { clientPackApi } = await modulePromise; const controller = new AbortController();
   const calls = []; const seen = []; let listener, resolveWork, resolveCancel, settled = false;
@@ -47,6 +55,84 @@ test('client requests unwrap failures and never authorize legacy on unknown stat
   await assert.rejects(clientPackApi.getState('a'), { code: 'CLIENT_PACK_UNAVAILABLE' });
   for (const state of [null, {}, { status: 'unpaired' }, { status: 'future-state' }]) assert.equal(allowsLegacyClient(state), false);
   assert.equal(allowsLegacyClient({ status: 'unmanaged' }), true);
+});
+
+test('own client content stays available while an offline host leaves the requirement unchecked, never for managed or unknown states', async () => {
+  const { allowsLocalClientContent, allowsLegacyClient } = await modulePromise;
+  for (const status of ['unmanaged', 'requirement-unavailable']) {
+    assert.equal(allowsLocalClientContent({ clientId: 'a', status, verified: false, descriptor: null }), true, status);
+  }
+  for (const state of [null, undefined, {}, 'unmanaged', { status: 'unpaired' }, { status: 'install-required' }, { status: 'update-required' },
+    { status: 'modified' }, { status: 'ready', verified: true }, { status: 'runtime-incomplete' }, { status: 'recovery-required' },
+    { status: 'unavailable' }, { status: 'loading' }, { status: 'future-state' }, { status: 'error', code: 'CLIENT_PACK_UNAVAILABLE' }]) {
+    assert.equal(allowsLocalClientContent(state), false, JSON.stringify(state));
+  }
+  // Syncing from the host and launching keep the legacy gate: an unchecked requirement never authorizes them.
+  assert.equal(allowsLegacyClient({ status: 'requirement-unavailable' }), false);
+  for (const status of ['unpaired', 'install-required', 'loading', 'future-state']) assert.equal(allowsLegacyClient({ status }), false);
+  assert.equal(allowsLegacyClient({ status: 'unmanaged' }), true);
+});
+
+test('every client pack status list accepts requirement-unavailable: the panel, the IPC boundary and the TS type', async t => {
+  const { clientPackApi } = await modulePromise;
+  const { createClientPackHandlers } = require('../../electron/ipc/client-pack-handlers.cjs');
+  const panel = panelStatuses();
+  const typed = quoted(/export type ClientPackStatus = ([^;]+);/u.exec(source('src/types/client-modpack.d.ts'))[1]);
+  assert.equal(panel.includes('requirement-unavailable'), true, 'the panel must not map the status to unavailable');
+  assert.deepEqual([...panel].sort(), [...typed].sort());
+  let state;
+  const unexpected = name => async () => assert.fail(`A status read must not call ${name}`);
+  const boundary = createClientPackHandlers({
+    clientPackService: { ...Object.fromEntries(['preview', 'install', 'cancel', 'recover'].map(name => [name, unexpected(name)])), getState: async () => state, verify: async () => state },
+    companionService: Object.fromEntries(['getStatus', 'listAssets', 'inspect', 'accept'].map(name => [name, unexpected(name)]))
+  });
+  t.after(() => boundary.dispose());
+  const sender = new EventEmitter(); Object.assign(sender, { id: 1, send() {}, isDestroyed: () => false });
+  global.window = { electron: { on() {}, removeListener() {}, invoke: (channel, input) => boundary.handlers[channel]({ sender }, input) } };
+  for (const status of typed) {
+    state = { clientId: 'a', status, verified: false, descriptor: null };
+    assert.deepEqual(await clientPackApi.getState('a'), state, status);
+    assert.deepEqual(await clientPackApi.verify('a'), state, status);
+  }
+  state = { clientId: 'a', status: 'requirement-unknown', verified: false, descriptor: null };
+  await assert.rejects(clientPackApi.getState('a'), { code: 'INVALID_REQUEST' });
+});
+
+test('the matching pack panel explains an unchecked requirement honestly and keeps Refresh requirement', () => {
+  const panel = source('src/components/client/ClientModpackPanel.svelte');
+  const labels = vm.runInNewContext(`(${/const labels = (\{[\s\S]*?\});/u.exec(panel)[1]})`);
+  // Every status the panel shows has its own heading instead of the generic 'Matching pack unavailable'.
+  for (const status of panelStatuses().filter(status => status !== 'unmanaged')) assert.equal(typeof labels[status], 'string', status);
+  assert.equal(labels['requirement-unavailable'], 'Matching pack requirement not checked');
+  assert.match(panel, /\{:else if state\?\.status === 'requirement-unavailable'\}\s*<p>The server’s matching pack requirement could not be checked \(the server may be offline\)\. Your own client content stays available; syncing from the server and launching wait until it can be checked\.<\/p>/u);
+  const footer = /<footer>([\s\S]*?)<\/footer>/u.exec(panel)[1];
+  assert.equal(footer.includes('>Refresh requirement</button>'), true, 'Refresh requirement stays in the footer');
+  const beforeRefresh = footer.slice(0, footer.indexOf('>Refresh requirement</button>'));
+  assert.equal(beforeRefresh.split('{#if ').length, beforeRefresh.split('{/if}').length, 'Refresh requirement is not tied to a status');
+});
+
+test('the Mods tab opens for own client content while host sync and launch keep the legacy gate', () => {
+  const ui = source('src/components/client/ClientInterface.svelte');
+  assert.match(ui, /function legacyContentAllowed\(\) \{\s*return activeClientKey === instanceKey\s*&& packState\?\.clientId === instance\?\.id && allowsLegacyClient\(packState\);\s*\}/u);
+  // The gate follows the settled pack state for the current instance and keeps its answer while a check runs.
+  assert.match(ui, /let modsTabOpen = false;\s*\$: if \(packState\?\.status !== 'loading'\) \{\s*modsTabOpen = activeClientKey === instanceKey\s*&& packState\?\.clientId === instance\?\.id && allowsLocalClientContent\(packState\);\s*\}/u);
+  assert.match(ui, /\{:else if \$clientState\.activeTab === 'mods'\}\s*\{#if modsTabOpen\}\s*<ModsTab\b/u);
+  // Only the Mods tab uses the local gate; every host-sync flow and launch still call legacyContentAllowed().
+  assert.equal(ui.match(/\bmodsTabOpen\b/gu).length, 3);
+  assert.equal(ui.match(/\ballowsLocalClientContent\(/gu).length, 1);
+});
+
+test('client components compile without warnings and a client that opens on the Mods tab follows the settled check', async () => {
+  const { compile } = await import('svelte/compiler');
+  for (const file of ['src/components/client/ClientInterface.svelte', 'src/components/client/ClientModpackPanel.svelte']) {
+    const { js, warnings } = compile(source(file), { filename: path.join(ROOT, file), generate: 'client', dev: false });
+    assert.deepEqual(warnings.map(warning => warning.code), [], file);
+    if (!file.endsWith('ClientInterface.svelte')) continue;
+    // Legacy-mode Svelte evaluates a function called from the template only when its block is created, so a
+    // gate written as {#if fn()} would keep the answer from before the check settled (the A37 placeholder).
+    assert.doesNotMatch(js.code, /\$\.untrack\(\w*ContentAllowed\)/u);
+    assert.equal(js.code.includes('if ($.get(modsTabOpen)) $$render('), true);
+  }
 });
 
 test('server drift stays a refusal with renderer-local Verify and Repair guidance', async () => {

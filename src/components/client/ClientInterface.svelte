@@ -8,7 +8,7 @@
   import ClientModCompatibilityDialog from './ClientModCompatibilityDialog.svelte';
   import PlayTab from './PlayTab.svelte';
   import ClientModpackPanel from './ClientModpackPanel.svelte';
-  import { allowsLegacyClient } from '../../utils/clientPacks/clientPackApi.js';
+  import { allowsLegacyClient, allowsLocalClientContent } from '../../utils/clientPacks/clientPackApi.js';
   import ModsTab from './ModsTab.svelte';
   import SettingsTab from './SettingsTab.svelte';
   import logger from '../../utils/logger.js';
@@ -187,6 +187,16 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
   function legacyContentAllowed() {
     return activeClientKey === instanceKey
       && packState?.clientId === instance?.id && allowsLegacyClient(packState);
+  }
+  // Only the Mods tab (the client's own content) also opens while an offline host leaves
+  // the requirement unchecked; syncing from the host and launch keep legacyContentAllowed().
+  // Kept as a reactive value because a function called from the template is evaluated only
+  // when the tab opens, and a client that opens on the Mods tab must follow the check once
+  // it settles. A running check keeps the last answer, so a refresh never remounts the tab.
+  let modsTabOpen = false;
+  $: if (packState?.status !== 'loading') {
+    modsTabOpen = activeClientKey === instanceKey
+      && packState?.clientId === instance?.id && allowsLocalClientContent(packState);
   }
   function scopedLegacyContentInvoker() {
     const scope = getAsyncScope();
@@ -3710,7 +3720,7 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
         {isChecking}
       />
     {:else if $clientState.activeTab === 'mods'}
-      {#if legacyContentAllowed()}
+      {#if modsTabOpen}
       <ModsTab
         {instance}
         bind:clientModManagerComponent
