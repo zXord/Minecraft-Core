@@ -67,7 +67,9 @@ const SERVER_WRITER_WRITE_SITE_DIGESTS = Object.freeze({
   'electron/ipc/mod-handlers/manual-mod-handlers.cjs': 'e57e40e9867529da92ab29e36d3f57e703b433e6aff0a58155e62e28983fcc89',
   'electron/ipc/mod-handlers/server-mod-handlers.cjs': '5281ad8cb8c744d42305de058ea9f6563f857bb8825790440afbeb510a8d3186',
   'electron/ipc/mod-utils/file-integrity-service.cjs': 'e9f8638988e171c673b11a4fe39718e044821fe3b1222da141fcc7c950bdd528',
-  'electron/ipc/mod-utils/mod-file-manager.cjs': '06fde5feced0bf3502069f8aaf1f28458dbae3dbe254d2605f57088a5e684333',
+  // Reviewed: ignored-updates saves stage a 'wx' temp file, set unreadable bytes
+  // aside and publish by rename; only minecraft-core-configs is ever created.
+  'electron/ipc/mod-utils/mod-file-manager.cjs': 'c17efbd05dfac4675ad660582134eaf6729535593fb595fe4142021b1cd4cbf9',
   'electron/ipc/mod-utils/mod-installation-service.cjs': 'e93eb84cccef6f6b05fc31b5616aadd65e9814f7b96a990ca51492f8fa7da42e',
   'electron/ipc/player-handlers.cjs': '8484397932aa267e27a85f184d8e196681b24c191702737054d917a0fdbe5b44',
   'electron/ipc/server-java-handlers.cjs': '4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945',

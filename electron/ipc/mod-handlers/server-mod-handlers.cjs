@@ -734,13 +734,23 @@ function createServerModHandlers(win) {
     'get-ignored-mod-updates': async (_e, serverPath) => {
       try {
         const result = await modFileManager.getIgnoredModUpdates(serverPath);
+        if (result.unreadable === true) {
+          logger.warn('Ignored mod updates file is unreadable; it will be set aside and replaced on the next save', {
+            category: 'mods',
+            data: { handler: 'get-ignored-mod-updates', serverPath }
+          });
+          return { success: true, found: false, data: result.data, unreadable: true };
+        }
+        if (result.rootMissing === true) {
+          return { success: true, found: false, data: result.data, rootMissing: true };
+        }
         return { success: true, found: result.found, data: result.data };
       } catch (error) {
         logger.error(`Failed to get ignored mod updates: ${error.message}`, { category: 'mods', data: { handler: 'get-ignored-mod-updates', serverPath } });
         return { success: false, error: error.message };
       }
     },
-    'save-ignored-mod-updates': async (_e, serverPath, data) => {
+    'save-ignored-mod-updates': async (_e, serverPath, data, options) => {
       try {
         let parsed = data;
         if (typeof data === 'string') {
@@ -753,7 +763,9 @@ function createServerModHandlers(win) {
             data: { handler:'save-ignored-mod-updates', serverPath, keys: Object.keys(parsed||{}).length }
           });
   } catch { /* ignore logging errors */ }
-        const changed = await modFileManager.saveIgnoredModUpdates(serverPath, parsed);
+        const changed = await modFileManager.saveIgnoredModUpdates(serverPath, parsed, {
+          replaceOnlyUnreadable: options?.replaceOnlyUnreadable === true
+        });
         return { success: true, changed };
       } catch (error) {
         logger.error(`Failed to save ignored mod updates: ${error.message}`, { category: 'mods', data: { handler: 'save-ignored-mod-updates', serverPath } });

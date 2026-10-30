@@ -15,8 +15,13 @@ function loadServerModHandlers({
   versionsLookup = async () => []
 } = {}) {
   const originalLoad = Module._load;
-  const logger = { debug() {}, error() {}, info() {}, warn() {} };
-  const calls = { save: [], inventory: [], loader: [], versions: [] };
+  const calls = { save: [], inventory: [], loader: [], versions: [], warnings: [] };
+  const logger = {
+    debug() {},
+    error() {},
+    info() {},
+    warn(message, details) { calls.warnings.push([message, details]); }
+  };
   Module._load = function loadIgnoredUpdatesHandlerFixture(request, parent, isMain) {
     if (request === '../../services/mod-api-service.cjs') {
       return {
@@ -227,7 +232,7 @@ test('get-ignored-mod-updates returns a strict persisted-data envelope', async (
   assert.deepEqual(result, { success: true, found: true, data });
 });
 
-test('get-ignored-mod-updates returns a failure envelope for parse or I/O errors', async () => {
+test('get-ignored-mod-updates returns a failure envelope for I/O errors', async () => {
   const { handlers } = loadServerModHandlers({ getError: new Error('ignored updates are unreadable') });
 
   const result = await handlers['get-ignored-mod-updates'](
@@ -250,4 +255,68 @@ test('save-ignored-mod-updates rejects malformed JSON without erasing persisted 
   assert.equal(result.success, false);
   assert.match(result.error, /JSON|Unexpected|position|end/i);
   assert.deepEqual(calls.save, []);
+});
+
+test('R6: get-ignored-mod-updates reports an unreadable file as an empty read with a marker and one warning', async () => {
+  const { handlers, calls } = loadServerModHandlers({
+    getResult: { found: false, data: {}, unreadable: true }
+  });
+
+  const result = await handlers['get-ignored-mod-updates'](
+    { sender: { id: 1 } },
+    'C:\\server'
+  );
+
+  assert.deepEqual(result, { success: true, found: false, data: {}, unreadable: true });
+  assert.equal(calls.warnings.length, 1);
+  assert.match(calls.warnings[0][0], /unreadable/i);
+});
+
+test('R16: get-ignored-mod-updates reports a missing server folder with a marker', async () => {
+  const { handlers, calls } = loadServerModHandlers({
+    getResult: { found: false, data: {}, rootMissing: true }
+  });
+
+  const result = await handlers['get-ignored-mod-updates'](
+    { sender: { id: 1 } },
+    'C:\\server'
+  );
+
+  assert.deepEqual(result, { success: true, found: false, data: {}, rootMissing: true });
+  assert.deepEqual(calls.warnings, []);
+});
+
+test('get-ignored-mod-updates passes the read markers through only when they are true', async () => {
+  const data = { 'Example.jar': { ids: ['version-one'], vers: [] } };
+  const { handlers, calls } = loadServerModHandlers({
+    getResult: { found: true, data, unreadable: false, rootMissing: false }
+  });
+
+  const result = await handlers['get-ignored-mod-updates'](
+    { sender: { id: 1 } },
+    'C:\\server'
+  );
+
+  assert.deepEqual(result, { success: true, found: true, data });
+  assert.deepEqual(calls.warnings, []);
+});
+
+test('save-ignored-mod-updates forwards only the replace-only-unreadable save option', async () => {
+  const { handlers, calls } = loadServerModHandlers({ saveResult: true });
+  const event = { sender: { id: 1 } };
+  const json = '{"Example.jar":{"ids":["version-one"],"vers":[]}}';
+  const parsed = JSON.parse(json);
+
+  assert.deepEqual(
+    await handlers['save-ignored-mod-updates'](event, 'C:\\server', json, { replaceOnlyUnreadable: true }),
+    { success: true, changed: true }
+  );
+  await handlers['save-ignored-mod-updates'](event, 'C:\\server', json);
+  await handlers['save-ignored-mod-updates'](event, 'C:\\server', json, { replaceOnlyUnreadable: 'yes', other: true });
+
+  assert.deepEqual(calls.save, [
+    ['C:\\server', parsed, { replaceOnlyUnreadable: true }],
+    ['C:\\server', parsed, { replaceOnlyUnreadable: false }],
+    ['C:\\server', parsed, { replaceOnlyUnreadable: false }]
+  ]);
 });

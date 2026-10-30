@@ -1441,6 +1441,11 @@ const ignoredUpdatesPendingByPath = new Map();
 const ignoredUpdatesLastSerializedByPath = new Map();
 const ignoredUpdatesPersistTimersByPath = new Map();
 const ignoredUpdatesSaveChainsByPath = new Map();
+// Paths whose last hydration read did not come from a usable file (unreadable
+// bytes or a missing server folder), each with a token for that read. Saves built
+// on such a base may only replace a missing or unreadable file, and a failed one
+// never becomes the scoped fallback: the journal already holds the unsaved edits.
+const ignoredUpdatesNonAuthoritativeBaseByPath = new Map();
 // Persistence strategy: prefer server path file via IPC, fallback to localStorage
 const IGNORED_UPDATES_LOCAL_KEY = 'minecraft-core:ignored-updates';
 const IGNORED_UPDATES_LOAD_ERROR = 'Ignored update preferences could not be loaded. Your changes will be kept until the server can be read safely.';
@@ -1532,18 +1537,26 @@ async function _loadIgnoredFromBackend(serverPath = '') {
     if (result?.success !== true || !_isPlainIgnoredUpdates(result.data)) {
       return { success: false, error: result?.error || 'Ignored update storage returned an invalid response' };
     }
-    return { success: true, found: result.found === true, data: result.data };
+    return {
+      success: true,
+      found: result.found === true,
+      unreadable: result.unreadable === true,
+      rootMissing: result.rootMissing === true,
+      data: result.data
+    };
   } catch (error) {
     return { success: false, error: error?.message || String(error) };
   }
 }
 
-async function _saveIgnoredJsonToBackend(serverPath, json) {
+async function _saveIgnoredJsonToBackend(serverPath, json, options = null) {
   try {
   const sp = serverPath || await _getServerPath();
     if (!sp) return false;
     if (!window.electron || !window.electron.invoke) return false;
-    const result = await window.electron.invoke('save-ignored-mod-updates', sp, json);
+    const result = options
+      ? await window.electron.invoke('save-ignored-mod-updates', sp, json, options)
+      : await window.electron.invoke('save-ignored-mod-updates', sp, json);
     return result?.success === true;
   } catch { return false; }
 }
@@ -1658,8 +1671,10 @@ function _activeIgnoredUpdatesPendingRecord() {
     return ignoredUpdatesActiveHydration;
   }
   const pathKey = _ignoredUpdatesPathKey(ignoredUpdatesHydratedPath);
-  const pending = ignoredUpdatesPendingByPath.get(pathKey);
-  return pending?.length > 0 ? { pathKey, pending } : null;
+  if (!pathKey) return null;
+  // Journal every edit until a save containing it is acknowledged, so neither a
+  // re-hydration nor an app close inside the 250 ms debounce can drop it.
+  return { pathKey, pending: _ignoredUpdatesPendingForPath(pathKey) };
 }
 
 function _pendingIgnoredUpdatesMap(pending) {
@@ -1692,15 +1707,29 @@ function _enqueueIgnoredUpdatesSave(serverPath, serialized, pendingBoundary = nu
   const pathKey = _ignoredUpdatesPathKey(serverPath);
   if (!pathKey) return Promise.resolve(false);
   ignoredUpdatesLastSerializedByPath.set(pathKey, serialized);
+  const nonAuthoritativeBase = ignoredUpdatesNonAuthoritativeBaseByPath.get(pathKey) || null;
   const previous = ignoredUpdatesSaveChainsByPath.get(pathKey) || Promise.resolve();
   const save = previous.catch(() => {}).then(async () => {
-    const saved = await _saveIgnoredJsonToBackend(serverPath, serialized);
+    const saved = await _saveIgnoredJsonToBackend(
+      serverPath,
+      serialized,
+      nonAuthoritativeBase ? { replaceOnlyUnreadable: true } : null
+    );
     const fallbackKey = _ignoredUpdatesFallbackKey(pathKey);
     try {
       if (saved) localStorage.removeItem(fallbackKey);
-      else localStorage.setItem(fallbackKey, serialized);
+      // Not while the path's base is non-authoritative: such a fallback could later
+      // replace a file that reads normally again.
+      else if (!nonAuthoritativeBase && !ignoredUpdatesNonAuthoritativeBaseByPath.has(pathKey)) {
+        localStorage.setItem(fallbackKey, serialized);
+      }
     } catch { /* ignore */ }
-    if (saved) _acknowledgeIgnoredUpdatesPending(pendingBoundary);
+    if (saved) {
+      if (nonAuthoritativeBase && ignoredUpdatesNonAuthoritativeBaseByPath.get(pathKey) === nonAuthoritativeBase) {
+        ignoredUpdatesNonAuthoritativeBaseByPath.delete(pathKey);
+      }
+      _acknowledgeIgnoredUpdatesPending(pendingBoundary);
+    }
     return saved;
   });
   ignoredUpdatesSaveChainsByPath.set(pathKey, save);
@@ -1719,15 +1748,33 @@ function _scheduleIgnoredUpdatesSave(serverPath, serialized) {
   const pendingBoundary = _ignoredUpdatesPendingBoundary({ pathKey, pending });
   ignoredUpdatesLastSerializedByPath.set(pathKey, serialized);
   const currentTimer = ignoredUpdatesPersistTimersByPath.get(pathKey);
-  if (currentTimer) clearTimeout(currentTimer);
-  const timer = setTimeout(() => {
-    ignoredUpdatesPersistTimersByPath.delete(pathKey);
-    void _enqueueIgnoredUpdatesSave(serverPath, serialized, pendingBoundary);
-  }, 250);
+  if (currentTimer) clearTimeout(currentTimer.handle);
+  const timer = {
+    handle: null,
+    persist() {
+      if (ignoredUpdatesPersistTimersByPath.get(pathKey) !== timer) return;
+      ignoredUpdatesPersistTimersByPath.delete(pathKey);
+      void _enqueueIgnoredUpdatesSave(serverPath, serialized, pendingBoundary);
+    }
+  };
+  timer.handle = setTimeout(timer.persist, 250);
   ignoredUpdatesPersistTimersByPath.set(pathKey, timer);
 }
 
+// Starts every debounced save now. Each server activation calls this first, so a
+// snapshot taken before a switch is queued ahead of the next hydration's save
+// instead of landing after it and overwriting newer choices.
+function _flushIgnoredUpdatesSaveTimers() {
+  for (const timer of [...ignoredUpdatesPersistTimersByPath.values()]) {
+    clearTimeout(timer.handle);
+    timer.persist();
+  }
+}
+
 async function _hydrateIgnoredUpdates(record) {
+  // A save that lands while the file is read can acknowledge (remove) journal
+  // entries the read did not see yet; they are replayed from this copy.
+  const pendingAtLoad = record.pending.slice();
   const loaded = await _loadIgnoredFromBackend(record.serverPath);
   const isActive = () => ignoredUpdatesActiveHydration === record &&
     _ignoredUpdatesPathKey(ignoredUpdatesActivePath) === record.pathKey;
@@ -1738,6 +1785,11 @@ async function _hydrateIgnoredUpdates(record) {
     return false;
   }
 
+  if (loaded.unreadable || loaded.rootMissing) {
+    ignoredUpdatesNonAuthoritativeBaseByPath.set(record.pathKey, {});
+  } else {
+    ignoredUpdatesNonAuthoritativeBaseByPath.delete(record.pathKey);
+  }
   let hydratedMap = _ignoredUpdatesMapFromData(loaded.data);
   const backendSerialized = _serializeIgnoredUpdates(hydratedMap);
   const fallbackKey = _ignoredUpdatesFallbackKey(record.pathKey);
@@ -1757,7 +1809,11 @@ async function _hydrateIgnoredUpdates(record) {
     }
   }
 
-  for (const mutation of record.pending) _applyIgnoredUpdateMutation(hydratedMap, mutation);
+  const replay = [
+    ...pendingAtLoad,
+    ...record.pending.filter(mutation => !pendingAtLoad.includes(mutation))
+  ];
+  for (const mutation of replay) _applyIgnoredUpdateMutation(hydratedMap, mutation);
   const serialized = _serializeIgnoredUpdates(hydratedMap);
   record.failed = false;
   record.hydrated = true;
@@ -1777,7 +1833,10 @@ async function _hydrateIgnoredUpdates(record) {
   }
 
   const persistedPendingBoundary = _ignoredUpdatesPendingBoundary(record);
-  const needsBackendSave = serialized !== backendSerialized || migrateLegacy || record.pending.length > 0;
+  // An unreadable file is saved once from the merged state; the saver sets the
+  // unusable bytes aside instead of failing every activation.
+  const needsBackendSave = serialized !== backendSerialized || migrateLegacy ||
+    record.pending.length > 0 || loaded.unreadable === true;
   if (needsBackendSave) {
     const saved = await _enqueueIgnoredUpdatesSave(
       record.serverPath,
@@ -1803,6 +1862,7 @@ async function activateIgnoredUpdatesServerPath(serverPathValue = '') {
     ? serverPathValue
     : _extractPathCandidate(serverPathValue);
   const pathKey = _ignoredUpdatesPathKey(serverPath);
+  _flushIgnoredUpdatesSaveTimers();
   if (!pathKey) {
     ignoredUpdatesActivePath = '';
     ignoredUpdatesActiveHydration = null;

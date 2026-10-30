@@ -791,6 +791,81 @@ function canonicalIgnoredUpdates(data) {
   };
 }
 
+const IGNORED_UPDATES_RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+// Waits between rename attempts, shared by every rename of one save. The save
+// holds the server's mutation reservation, and Start is refused meanwhile.
+const IGNORED_UPDATES_RENAME_RETRY_DELAYS_MS = Object.freeze([25, 50, 75]);
+
+// The stored object, or null when the bytes are not a usable ignored-updates
+// object (empty, truncated, NUL-filled or non-object JSON). A leading UTF-8 BOM
+// from a hand edit is not damage.
+function parseIgnoredUpdatesText(raw) {
+  const text = typeof raw === 'string' && raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw;
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+}
+
+// Read-only check of the server folder itself: null when it is a folder, or the
+// error saying it is missing or not a folder. Other inspection failures throw.
+async function ignoredUpdatesServerFolderProblem(serverPath) {
+  let stats;
+  try {
+    stats = await fs.stat(serverPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return error;
+    throw error;
+  }
+  if (stats.isDirectory()) return null;
+  return Object.assign(new Error(`ENOTDIR: not a directory, stat '${serverPath}'`), {
+    code: 'ENOTDIR',
+    syscall: 'stat',
+    path: serverPath
+  });
+}
+
+async function renameIgnoredUpdatesFile(source, target, retryDelays) {
+  while (true) {
+    try {
+      await fs.rename(source, target);
+      return;
+    } catch (error) {
+      // Windows: antivirus, indexers or sync clients briefly hold the file.
+      if (!IGNORED_UPDATES_RENAME_RETRY_CODES.has(error?.code) || retryDelays.length === 0) throw error;
+      await new Promise(resolve => setTimeout(resolve, retryDelays.shift()));
+    }
+  }
+}
+
+// Writes and flushes the new content beside the target, which is then replaced
+// by a rename: readers see the old or the new file, never a torn one.
+async function writeIgnoredUpdatesTemporaryFile(ignoredPath, text) {
+  const temporaryPath = path.join(
+    path.dirname(ignoredPath),
+    `.${path.basename(ignoredPath)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
+  );
+  const handle = await fs.open(temporaryPath, 'wx');
+  let handleOpen = true;
+  try {
+    await handle.writeFile(text, 'utf8');
+    await handle.sync();
+    handleOpen = false;
+    await handle.close();
+  } catch (error) {
+    if (handleOpen) {
+      try { await handle.close(); } catch { /* keep the write failure */ }
+    }
+    try { await fs.unlink(temporaryPath); } catch { /* keep the write failure */ }
+    throw error;
+  }
+  return temporaryPath;
+}
+
+// Read-only, because the read channel runs outside any server reservation.
 async function getIgnoredModUpdates(serverPath) {
   if (!serverPath) throw new Error('Server path is required');
   const configDirMgr = path.join(serverPath, 'minecraft-core-configs');
@@ -799,21 +874,35 @@ async function getIgnoredModUpdates(serverPath) {
   try {
     raw = await fs.readFile(ignoredPath, 'utf8');
   } catch (error) {
-    if (error?.code === 'ENOENT') return { found: false, data: {} };
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') {
+      // A missing server folder is not "no ignored updates": the renderer must
+      // not let an empty state built on it replace the folder's real file later.
+      if (await ignoredUpdatesServerFolderProblem(serverPath)) return { found: false, data: {}, rootMissing: true };
+      if (error.code === 'ENOENT') return { found: false, data: {} };
+    }
+    // Other I/O failures (locked, denied, not a file) stay failures: the renderer
+    // journals edits and retries on the next activation.
     throw error;
   }
-  const parsed = JSON.parse(raw);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Ignored updates data must be an object');
-  }
+  const parsed = parseIgnoredUpdatesText(raw);
+  // v26.6.1 read unusable content as {}. Keep that, but say so: the renderer
+  // saves its merged state once, and the saver sets the old bytes aside.
+  if (parsed === null) return { found: false, data: {}, unreadable: true };
   return { found: true, data: parsed };
 }
 
-async function saveIgnoredModUpdates(serverPath, data) {
+// options.replaceOnlyUnreadable: the snapshot was built on a file that could not
+// be read or on a missing server folder, so it may only replace a missing or
+// unreadable file, never one that reads as different valid data.
+async function saveIgnoredModUpdates(serverPath, data, options = null) {
   if (!serverPath) throw new Error('Server path is required');
   const canonical = canonicalIgnoredUpdates(data);
   const configDirMgr = path.join(serverPath, 'minecraft-core-configs');
   const ignoredPath = path.join(configDirMgr, 'ignored-mod-updates.json');
+  // Never create a missing or moved server folder. Throwing instead of reporting
+  // "unchanged" keeps the renderer's journal until the folder is back.
+  const folderProblem = await ignoredUpdatesServerFolderProblem(serverPath);
+  if (folderProblem) throw folderProblem;
   let raw = null;
   try {
     raw = await fs.readFile(ignoredPath, 'utf8');
@@ -821,15 +910,44 @@ async function saveIgnoredModUpdates(serverPath, data) {
     if (error?.code !== 'ENOENT') throw error;
     if (canonical.compact === '{}') return false;
   }
-  if (raw !== null) {
+  const existing = raw === null ? null : parseIgnoredUpdatesText(raw);
+  if (existing !== null) {
     try {
-      if (canonicalIgnoredUpdates(JSON.parse(raw)).compact === canonical.compact) return false;
-    } catch { /* malformed content is replaced below */ }
+      if (canonicalIgnoredUpdates(existing).compact === canonical.compact) return false;
+    } catch { /* not comparable: replaced below */ }
+    if (options?.replaceOnlyUnreadable === true) {
+      const changed = new Error('The ignored updates file is readable again and must be reloaded before saving');
+      changed.code = 'IGNORED_UPDATES_CHANGED';
+      throw changed;
+    }
   }
 
   markCurrentServerMutationDirty(serverPath);
-  await fs.mkdir(configDirMgr, { recursive: true });
-  await fs.writeFile(ignoredPath, canonical.formatted);
+  // Only the config folder is created, inside a server folder that exists.
+  try {
+    await fs.mkdir(configDirMgr);
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+  }
+  const retryDelays = [...IGNORED_UPDATES_RENAME_RETRY_DELAYS_MS];
+  const temporaryPath = await writeIgnoredUpdatesTemporaryFile(ignoredPath, canonical.formatted);
+  try {
+    // Unusable bytes (for example a file torn by an older non-atomic save) are
+    // set aside rather than overwritten. Blank content (whitespace, NUL or a lone
+    // byte order mark, which \s matches) holds nothing to keep.
+    if (raw !== null && existing === null && raw.replace(/[\s\0]/g, '') !== '') {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      await renameIgnoredUpdatesFile(
+        ignoredPath,
+        `${ignoredPath}.unreadable-${stamp}-${crypto.randomBytes(3).toString('hex')}`,
+        retryDelays
+      );
+    }
+    await renameIgnoredUpdatesFile(temporaryPath, ignoredPath, retryDelays);
+  } catch (error) {
+    try { await fs.unlink(temporaryPath); } catch { /* keep the publish failure */ }
+    throw error;
+  }
   return true;
 }
 
