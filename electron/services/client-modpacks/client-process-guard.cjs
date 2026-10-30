@@ -9,6 +9,10 @@ const { isSafeWindowsBasename } = require('../modpacks/windows-basename.cjs');
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
 const MARKER = '-Dminecraft.core.clientLaunchId=';
+// 'strict' proves the client stopped (process scan, durable launch record) and holds
+// the folder exclusively. 'none' is for clients without matching pack evidence: a
+// shared hold with no scan and no record, exactly as v26.6.1 had no guard at all.
+const PROOFS = Object.freeze(['strict', 'none']);
 
 function failure(code = 'RECOVERY_REQUIRED', cause) {
   return Object.assign(new Error(code === 'CLIENT_RUNNING' ? 'The client is running, launching, or busy installing a pack. Wait for it to finish, then retry.' : 'Client process state could not be proven stopped. Close the game or launcher, then retry. If an app-owned server cannot be verified, stop and start that server normally.'), { code, cause });
@@ -103,15 +107,34 @@ class ClientProcessGuard {
     this.acquireEndpointLease = acquireEndpointLease;
     this.randomUUID = randomUUID;
     this.isCurrentUnrelatedServer = isCurrentUnrelatedServer;
-    this.active = new Map();
+    this.holders = new Map();
   }
 
-  _target({ clientId, clientPath } = {}, { requireExisting = false } = {}) {
+  _target({ clientId, clientPath } = {}, { requireExisting = false, proof = 'strict' } = {}) {
     if (typeof clientId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(clientId) ||
         typeof clientPath !== 'string' || !path.isAbsolute(clientPath) || clientPath.includes('\0')) throw failure();
+    const resolved = path.resolve(clientPath);
+    if (proof === 'none') {
+      // An existing folder is keyed by its canonical spelling, so junction, SUBST,
+      // mapped and UNC spellings of one folder share one hold and endpoint lease.
+      // Nothing is proven here, so a folder that cannot be inspected or
+      // canonicalised (an offline share, a denied folder, a RAM disk) keeps its
+      // given spelling: the key a strict hold of that spelling would use.
+      let stat;
+      try { stat = fs.statSync(resolved); }
+      catch (error) {
+        if (error?.code !== 'ENOENT') return this._keyed(clientId, resolved);
+        if (requireExisting) throw error;
+      }
+      if (stat) {
+        if (!stat.isDirectory()) throw failure();
+        let canonical = resolved;
+        try { canonical = fs.realpathSync.native(resolved); } catch { /* Keep the given spelling. */ }
+        return this._keyed(clientId, canonical);
+      }
+    }
     // Publication recovery may temporarily have no live leaf. Its proven parent
     // and validated leaf must still resolve to the identical path authority.
-    const resolved = path.resolve(clientPath);
     const leaf = path.basename(resolved);
     if (!isSafeWindowsBasename(leaf) || clientPath.split(/[\\/]/u).some(part => part === '.' || part === '..')) throw failure();
     const parent = path.dirname(resolved);
@@ -122,24 +145,75 @@ class ClientProcessGuard {
     let leafStat;
     try { leafStat = fs.lstatSync(resolved); }
     catch (error) { if (error.code !== 'ENOENT' || requireExisting) throw error; }
-    if (leafStat && (!leafStat.isDirectory() || leafStat.isSymbolicLink() ||
-        normalize(fs.realpathSync.native(resolved)) !== normalize(resolved))) throw failure();
-    const canonical = path.join(canonicalParent, leaf);
+    if (!leafStat) return this._keyed(clientId, path.join(canonicalParent, leaf));
+    if (!leafStat.isDirectory() || leafStat.isSymbolicLink()) throw failure();
+    const canonical = fs.realpathSync.native(resolved);
+    if (normalize(canonical) !== normalize(resolved)) throw failure();
+    return this._keyed(clientId, canonical);
+  }
+
+  _keyed(clientId, canonical) {
     const normalized = process.platform === 'win32' ? canonical.toLowerCase() : canonical;
     const key = crypto.createHash('sha256').update(normalized).digest('hex');
     return { clientId, clientPath: normalized, key, recordPath: path.join(this.root, `${key}.json`) };
   }
 
-  async _acquire(target) {
-    if (this.active.has(target.key)) throw failure('CLIENT_RUNNING');
-    const lease = await this.acquireEndpointLease({ namespace: 'minecraft-core-client', leaseId: target.key });
-    this.active.set(target.key, lease);
-    return lease;
+  // One in-process holder per folder key. Shared holders join each other; an
+  // exclusive holder needs the folder to itself, and either side fails fast with
+  // CLIENT_RUNNING. The endpoint lease is taken by the first holder and released
+  // when the last one leaves, so no pack transaction (in this or another process)
+  // can start while a shared callback or the app's own unmanaged game holds it.
+  async _enter(target, mode, kind) {
+    for (;;) {
+      const current = this.holders.get(target.key);
+      if (!current) break;
+      if (current.closing) {
+        // The last holder is releasing the endpoint. A failed release stays held.
+        if (!await current.closing.then(() => true, () => false)) throw failure('CLIENT_RUNNING');
+        continue;
+      }
+      if (mode === 'exclusive' || current.mode === 'exclusive') throw failure('CLIENT_RUNNING');
+      current.count++;
+      return this._joined(target, current);
+    }
+    const holder = { mode, kind, count: 1, lease: null, closing: null };
+    holder.ready = Promise.resolve()
+      .then(() => this.acquireEndpointLease({ namespace: 'minecraft-core-client', leaseId: target.key }))
+      .then(lease => { holder.lease = lease; return lease; });
+    this.holders.set(target.key, holder);
+    return this._joined(target, holder);
   }
 
-  async _release(target, lease) {
-    await lease.close();
-    if (this.active.get(target.key) === lease) this.active.delete(target.key);
+  async _joined(target, holder) {
+    try { await holder.ready; }
+    catch (error) {
+      await this._leave(target, holder);
+      throw error;
+    }
+    let leaving = null;
+    return Object.freeze({
+      lease: holder.lease,
+      leave: () => { if (!leaving) leaving = this._leave(target, holder); return leaving; }
+    });
+  }
+
+  _leave(target, holder) {
+    holder.count--;
+    if (holder.count > 0) return Promise.resolve();
+    holder.closing = (async () => {
+      if (holder.lease) await holder.lease.close();
+      if (this.holders.get(target.key) === holder) this.holders.delete(target.key);
+    })();
+    // Observed by every waiter; a close failure keeps the folder held (fail closed).
+    holder.closing.catch(() => {});
+    return holder.closing;
+  }
+
+  // In-flight exclusive pack mutations (install, recover, cleanup). Shared client
+  // writers and game sessions never block an app update, as in v26.6.1.
+  listActiveMutations() {
+    return Object.freeze([...this.holders].filter(([, holder]) => holder.mode === 'exclusive' && holder.kind === 'mutation' && !holder.closing)
+      .map(([key]) => `client-mutation:${key}`));
   }
 
   async _snapshot() {
@@ -181,31 +255,44 @@ class ClientProcessGuard {
     } catch { return 'uncertain'; }
   }
 
+  // A strict diagnostic proof: an exclusive hold and a process scan. It is not
+  // wired to any UI. For a client without pack evidence it would report
+  // 'uncertain' for junction, SUBST, UNC and drive-root folders and briefly refuse
+  // that client's shared holders while it scans, so derive the proof from the
+  // client's evidence before using it there.
   async status(request) {
-    let target; let lease;
+    let target; let hold;
     try {
       target = this._target(request);
-      if (this.active.has(target.key)) return 'running';
-      lease = await this._acquire(target);
+      if (this.holders.has(target.key)) return 'running';
+      hold = await this._enter(target, 'exclusive', 'status');
       return await this._status(target);
     } catch { return 'uncertain'; }
-    finally { if (lease) await this._release(target, lease); }
+    finally { if (hold) await hold.leave(); }
   }
 
-  async withMutation(request, callback) {
-    const target = this._target(request);
-    const lease = await this._acquire(target);
+  async withMutation(request, callback, { proof = 'strict' } = {}) {
+    if (!PROOFS.includes(proof)) throw failure();
+    const target = this._target(request, { proof });
+    if (proof === 'none') {
+      const hold = await this._enter(target, 'shared', 'mutation');
+      try { return await callback(); } finally { await hold.leave(); }
+    }
+    const hold = await this._enter(target, 'exclusive', 'mutation');
     try {
       const status = await this._status(target);
       if (status !== 'stopped') throw failure(status === 'running' ? 'CLIENT_RUNNING' : 'RECOVERY_REQUIRED');
-      lease.assertHeld();
+      hold.lease.assertHeld();
       return await callback();
-    } finally { await this._release(target, lease); }
+    } finally { await hold.leave(); }
   }
 
-  async beginLaunch(request) {
-    const target = this._target(request, { requireExisting: true });
-    const lease = await this._acquire(target);
+  async beginLaunch(request, { proof = 'strict' } = {}) {
+    if (!PROOFS.includes(proof)) throw failure();
+    const target = this._target(request, { requireExisting: true, proof });
+    if (proof === 'none') return this._sharedLaunch(target);
+    const hold = await this._enter(target, 'exclusive', 'launch');
+    const { lease } = hold;
     let record;
     try {
       const status = await this._status(target);
@@ -219,7 +306,7 @@ class ClientProcessGuard {
       await this.durableFs.writeJsonAtomicAsync(target.recordPath, record);
       lease.assertHeld();
     } catch (error) {
-      await this._release(target, lease);
+      await hold.leave();
       throw error;
     }
 
@@ -238,7 +325,7 @@ class ClientProcessGuard {
       if (settlement) return settlement;
       settlement = write({ ...record, phase: 'settled' }).then(async () => {
         settled = true;
-        await this._release(target, lease);
+        await hold.leave();
       });
       // Listener-triggered persistence errors keep the endpoint/intent blocked.
       settlement.catch(() => {});
@@ -265,6 +352,43 @@ class ClientProcessGuard {
       close: async () => {
         // Public cleanup cannot substitute for the exact retained child's close.
         if (settlement) await settlement;
+      }
+    });
+  }
+
+  // A launch of a client without matching pack evidence: no process scan and no
+  // durable record. The shared hold ends before spawn or on the exact child's
+  // close, and after a restart a strict proof still finds the game by its
+  // --gameDir, which both launchers always pass.
+  async _sharedLaunch(target) {
+    const launchId = this.randomUUID();
+    if (!UUID.test(launchId)) throw failure();
+    const hold = await this._enter(target, 'shared', 'launch');
+    let attached = false;
+    let release = null;
+    const leave = () => {
+      if (!release) { release = hold.leave(); release.catch(() => {}); }
+      return release;
+    };
+    return Object.freeze({
+      launchId,
+      jvmArgument: `${MARKER}${launchId}`,
+      attach: async child => {
+        // Never throws: a child that cannot be watched keeps the hold (fail closed).
+        if (attached || release) return;
+        attached = true;
+        if (!child || typeof child.once !== 'function') return;
+        child.once('close', () => { leave(); });
+        if (typeof child.on === 'function') child.on('error', () => {}); // An error event is not exact process close.
+      },
+      abortBeforeSpawn: async () => {
+        if (attached) throw failure();
+        await leave();
+      },
+      close: async () => {
+        // Public cleanup cannot substitute for the exact retained child's close.
+        if (!attached) await leave();
+        else if (release) await release;
       }
     });
   }

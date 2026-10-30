@@ -4,9 +4,54 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
-const { clientPackManagementFields } = require('../../electron/services/client-modpacks/client-pack-management.cjs');
+const { clientPackManagementFields, startClientPackManagementFields } = require('../../electron/services/client-modpacks/client-pack-management.cjs');
 const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
 const unpaired = { schemaVersion: 1, status: 'unpaired', serverFingerprint: 'a'.repeat(64), serverVersion: '0.13.4', source: null, runtime: null, artifactSha256: null };
+const unavailable = value => value.clientModpack === null && value.clientModpackError?.code === 'CLIENT_PACK_UNAVAILABLE';
+
+test('a resolver that never settles yields the unavailable fields once the budget after settle has passed (A38)', async () => {
+  const fields = startClientPackManagementFields('server-a', () => new Promise(() => {}));
+  const started = Date.now();
+  const value = await fields.settle({ timeoutMs: 60 });
+  const elapsed = Date.now() - started;
+  assert.equal(unavailable(value), true);
+  assert.ok(elapsed >= 50 && elapsed < 2000, `settled after ${elapsed} ms`);
+  assert.deepEqual(Object.keys(await startClientPackManagementFields('server-a', null).settle()), ['clientModpack', 'clientModpackError']);
+});
+
+test('synchronous legacy work before the await never spends the requirement budget (A38)', async () => {
+  let calls = 0;
+  // A warm managed resolver still needs one event-loop turn, as a cached health check does.
+  const fields = startClientPackManagementFields('server-a', id => { calls++; assert.equal(id, 'server-a'); return new Promise(resolve => setImmediate(() => resolve(unpaired))); });
+  assert.equal(calls, 1, 'the resolver starts at once');
+  const busyUntil = Date.now() + 150;
+  while (Date.now() < busyUntil) { /* synchronous legacy server info work */ }
+  assert.deepEqual(await fields.settle({ timeoutMs: 50 }), { clientModpack: unpaired });
+  assert.deepEqual(await startClientPackManagementFields('server-a', async () => null).settle({ timeoutMs: 50 }), { clientModpack: null });
+});
+
+test('a resolver failure before or after the budget never escapes as an unhandled rejection', async () => {
+  const escaped = []; const listener = reason => escaped.push(reason); process.on('unhandledRejection', listener);
+  try {
+    let fail;
+    const late = startClientPackManagementFields('server-a', () => new Promise((_resolve, reject) => { fail = reject; }));
+    assert.equal(unavailable(await late.settle({ timeoutMs: 10 })), true);
+    fail(new Error('C:\\private token=secret'));
+    const early = startClientPackManagementFields('server-a', async () => { throw new Error('registry corrupted'); });
+    const thrown = startClientPackManagementFields('server-a', () => { throw new Error('synchronous failure'); });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(unavailable(await early.settle()), true); assert.equal(unavailable(await thrown.settle()), true);
+    const changed = await startClientPackManagementFields('server-a', async () => { throw new ModpackError('CLIENT_PACK_SERVER_CHANGED', 'Changed'); }).settle();
+    assert.equal(changed.clientModpackError.code, 'CLIENT_PACK_SERVER_CHANGED');
+  } finally { process.off('unhandledRejection', listener); }
+  assert.deepEqual(escaped, []);
+});
+
+test('the settle budget must be a positive whole number of milliseconds', async () => {
+  const fields = startClientPackManagementFields('server-a', async () => null);
+  for (const timeoutMs of [0, -1, 1.5, Number.NaN, '3000', Infinity]) await assert.rejects(fields.settle({ timeoutMs }), TypeError);
+  assert.deepEqual(await fields.settle(), { clientModpack: null });
+});
 test('management DTO is strict and null only for an authenticated unmanaged result', async () => {
   assert.deepEqual(await clientPackManagementFields('server-a', async id => { assert.equal(id, 'server-a'); return unpaired; }), { clientModpack: unpaired });
   assert.deepEqual(await clientPackManagementFields('server-a', async () => null), { clientModpack: null });

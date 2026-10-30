@@ -129,13 +129,15 @@ for (const provider of ['exact', 'absent', 'failed']) test(`evidence composition
     }
   });
   const integration = f.composition.clientPackIntegration;
+  // A47: a client without matching pack evidence takes no process scan, so the
+  // server proof only decides the strict client-pack operations.
+  assert.equal(await integration.runPersonalMutation({ clientId: 'local-client', clientPath: f.clientPath }, () => 'personal admitted'), 'personal admitted');
+  const launch = await integration.beginManagedLaunch({ clientPath: f.clientPath }); await launch.abortBeforeSpawn();
   if (provider === 'exact') {
-    assert.equal(await integration.runPersonalMutation({ clientId: 'local-client', clientPath: f.clientPath }, () => 'personal admitted'), 'personal admitted');
-    const launch = await integration.beginManagedLaunch({ clientPath: f.clientPath }); await launch.abortBeforeSpawn();
+    assert.equal((await f.composition.clientPackService.cleanup({ clientId: 'local-client' })).status, 'complete');
     assert.equal(f.evidence.handle.isLive(), true);
   } else {
-    await assert.rejects(integration.runPersonalMutation({ clientId: 'local-client', clientPath: f.clientPath }, () => assert.fail('unproven server admitted')), { code: 'RECOVERY_REQUIRED' });
-    await assert.rejects(integration.beginManagedLaunch({ clientPath: f.clientPath }), { code: 'RECOVERY_REQUIRED' });
+    await assert.rejects(f.composition.clientPackService.cleanup({ clientId: 'local-client' }), { code: 'RECOVERY_REQUIRED' });
   }
   assert.equal(deniedSystemProbes, initialDeniedProbes, 'composition must consume the inert inspector injection');
 });

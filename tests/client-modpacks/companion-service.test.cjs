@@ -33,7 +33,11 @@ async function fixture(t, { provider = 'github', clientLoader = '47.3.12', block
   const filePath = path.join(root, 'companions.json');
   const durableFs = createDurableFs({ allowedRoots: [root], durableClient: { moveWriteThrough: fs.renameSync, replaceFileWriteThrough: fs.renameSync, flushDirectory() {} } });
   const store = new CompanionStore({ filePath, durableFs }); await store.initialize();
-  const serverPath = path.join(root, 'server'); fs.mkdirSync(serverPath);
+  const serverPath = path.join(root, 'server'); fs.mkdirSync(path.join(serverPath, '.minecraft-core-state'), { recursive: true });
+  // Lifecycle evidence for the managed fixture; its state itself comes from readServerState.
+  fs.writeFileSync(path.join(serverPath, '.minecraft-core-state', 'modpack.json'), '{}');
+  const unmanagedPath = path.join(root, 'unmanaged-server'); fs.mkdirSync(unmanagedPath);
+  let unmanagedReads = 0;
   let state = { modpackManaged: true, source: provider === 'github' ? { provider, repositoryId: '123', releaseId: '456', githubOwner: 'Pack-Team', githubRepo: 'Pack', selectedAssetIds: ['10'], artifactSetDigest: 'a'.repeat(64), version: 'v1' } : { provider, projectId: 'project', versionId: 'version', artifactSetDigest: 'a'.repeat(64), version: 'v1' }, runtime, selectedOptionalFiles: [] };
   let now = 0;
   let initializedRepository = false;
@@ -90,16 +94,23 @@ async function fixture(t, { provider = 'github', clientLoader = '47.3.12', block
   }; } };
   const health = new ManagedServerModHealth({ readRecord: async () => ({ state, manifest }), fsPromises, reparseInspector: safeReparse });
   const service = new CompanionService({ store, readServerState: async (id, options) => {
+    if (id === 'server-two') {
+      // Models a strict state read that cannot run for this folder's shape (drive root, junction).
+      unmanagedReads++; throw Object.assign(new Error('strict state read refused the folder'), { code: 'RECOVERY_REQUIRED' });
+    }
     assert.equal(id, 'server-one');
     if (managedHealth) {
       if (options?.force) assert.ok(context.getCurrentLease(), 'Fresh bytes must be checked inside the mutation reservation');
       await health.assertHealthy({ serverId: id, serverPath, record: { state, manifest }, ...options });
     }
     return state;
-  }, resolveServer: async id => { assert.equal(id, 'server-one'); if (context.getCurrentLease()) resolveInside?.(); return selector; }, coordinator, providers, sourceResolver, artifactAcquisition: { async downloadSet(actualPlan) { assert.equal(actualPlan, plan); return verified; } }, archiveInspector, clientCandidatePreparer: preparer, clock: () => now });
+  }, resolveServer: async id => {
+    if (id === 'server-two') return { instanceId: 'server-two', serverPath: unmanagedPath };
+    assert.equal(id, 'server-one'); if (context.getCurrentLease()) resolveInside?.(); return selector;
+  }, coordinator, providers, sourceResolver, artifactAcquisition: { async downloadSet(actualPlan) { assert.equal(actualPlan, plan); return verified; } }, archiveInspector, clientCandidatePreparer: preparer, clock: () => now });
   t.after(() => health.dispose());
   t.after(async () => { await service.dispose(); await preparer.dispose(); await registry.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
-  return { root, filePath, store, service, registry, preparer, selector, coordinator, archiveSha256, jarPath, byteReads: () => byteReads, fingerprint: serverPackFingerprint(state), getState: () => state, setState: value => { state = value; }, setNow: value => { now = value; }, setRepositoryId: id => { repositoryId = id; }, setResolveInside: callback => { resolveInside = callback; }, bumps: () => bumps };
+  return { root, filePath, store, service, registry, preparer, selector, coordinator, archiveSha256, jarPath, serverPath, unmanagedPath, unmanagedReads: () => unmanagedReads, byteReads: () => byteReads, fingerprint: serverPackFingerprint(state), getState: () => state, setState: value => { state = value; }, setNow: value => { now = value; }, setRepositoryId: id => { repositoryId = id; }, setResolveInside: callback => { resolveInside = callback; }, bumps: () => bumps };
 }
 const inspect = f => f.service.inspect({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint, assetId: '20' });
 
@@ -360,4 +371,33 @@ test('pruning marks an expiring inspection in-use until raw ownership cleanup se
   try { await assert.rejects(f.service.accept({ serverId: 'server-one', expectedServerFingerprint: f.fingerprint, inspectionId: preview.inspectionId }), { code: 'OPERATION_IN_PROGRESS' }); }
   finally { finish.resolve(); }
   await pruning; assert.equal(f.store.sequence, 0);
+});
+
+test('a server without modpack state answers null before any strict state read', async t => {
+  const f = await fixture(t);
+  assert.equal(await f.service.getStatus({ serverId: 'server-two' }), null);
+  fs.mkdirSync(path.join(f.unmanagedPath, '.minecraft-core-state'));
+  fs.writeFileSync(path.join(f.unmanagedPath, '.minecraft-core-state', 'runtime.json'), '{}');
+  assert.equal(await f.service.getStatus({ serverId: 'server-two' }), null, 'a loader runtime record is not modpack state');
+  assert.equal(f.unmanagedReads(), 0);
+  fs.writeFileSync(path.join(f.unmanagedPath, '.minecraft-core-state', 'modpack.json'), '{}');
+  await assert.rejects(f.service.getStatus({ serverId: 'server-two' }), { code: 'RECOVERY_REQUIRED' });
+  assert.equal(f.unmanagedReads(), 1, 'present modpack state keeps the strict read');
+  await assert.rejects(f.service.listAssets({ serverId: 'server-two' }), { code: 'RECOVERY_REQUIRED' });
+});
+
+test('an unmanaged server answers without waiting for another server lifecycle cleanup', async t => {
+  const f = await fixture(t); const preview = await inspect(f);
+  const entered = deferred(); const finish = deferred();
+  const releaseOwner = f.registry.releaseOwner.bind(f.registry);
+  let paused = false;
+  f.registry.releaseOwner = async id => { if (id === preview.inspectionId && !paused) { paused = true; entered.resolve(); await finish.promise; } return releaseOwner(id); };
+  f.setNow(15 * 60 * 1000);
+  const pruning = f.service.getStatus({ serverId: 'server-one' }); await entered.promise;
+  try {
+    const answer = await Promise.race([f.service.getStatus({ serverId: 'server-two' }),
+      new Promise(resolve => setTimeout(() => resolve('still waiting on the lifecycle lock'), 500))]);
+    assert.equal(answer, null);
+  } finally { finish.resolve(); }
+  assert.equal((await pruning).status, 'unpaired');
 });

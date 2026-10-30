@@ -132,6 +132,8 @@ test('state store atomically round trips both manifest schemas and refuses corru
 const WINDOWS_PATHS = { skip: process.platform !== 'win32' && 'Windows drive-letter paths' };
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir';
 const SUBFOLDER_MESSAGE = 'Matching client packs need the client folder inside another normal folder. Move this client into a subfolder, then retry.';
+const LOCAL_FOLDER_MESSAGE = 'Matching client packs need the client in a normal folder on this computer, not on a network share, a mapped or SUBST drive, or a linked folder. Move this client to a normal local folder, then retry.';
+const NAME_MESSAGE = 'Matching client packs need folder names without spaces at the start or end, and not copied from a Mac. Move this client to a folder with a plain name, then retry.';
 
 function enoent(candidate) {
   return Object.assign(new Error(`ENOENT: ${candidate}`), { code: 'ENOENT' });
@@ -208,7 +210,7 @@ test('a client reached through a junction reads as unmanaged; a manifest behind 
   await assert.rejects(store.read(normalClient), { code: 'RECOVERY_REQUIRED' });
 });
 
-test('publishing a matching pack asks for a subfolder only when the folder shape is the cause', async t => {
+test('publishing a matching pack asks for a subfolder or a local folder only when the folder shape is the cause', async t => {
   const fs = require('node:fs'); const path = require('node:path');
   const { ClientPackStateStore } = require('../../electron/services/client-modpacks/client-pack-state.cjs');
   const { base, factoryCalls, register, router } = strictRouterFixture(t, []);
@@ -222,13 +224,17 @@ test('publishing a matching pack asks for a subfolder only when the folder shape
   fs.mkdirSync(normalClient, { recursive: true });
   for (const clientPath of [path.join(parentLink, 'Client'), leafLink, normalClient]) register(clientPath);
   const store = new ClientPackStateStore({ durableFs: router });
-  const lexicalShapes = process.platform === 'win32'
-    ? ['X:\\MinecraftClient', 'X:\\', '\\\\nas\\share\\MinecraftClient']
-    : ['/MinecraftClient', '/', '//nas/share/MinecraftClient'];
+  const rootShapes = process.platform === 'win32' ? ['X:\\MinecraftClient', 'X:\\'] : ['/MinecraftClient', '/'];
+  const networkShare = process.platform === 'win32' ? '\\\\nas\\share\\MinecraftClient' : '//nas/share/MinecraftClient';
 
-  for (const clientPath of [...lexicalShapes, path.join(parentLink, 'Client'), leafLink]) {
+  for (const clientPath of rootShapes) {
     await assert.rejects(store.assertPublishable(clientPath), error =>
       error.code === 'CLIENT_PACK_UNAVAILABLE' && error.safeMessage === SUBFOLDER_MESSAGE, clientPath);
+  }
+  // A subfolder of a network share, a mapped or SUBST drive or a linked folder is still not local.
+  for (const clientPath of [networkShare, path.join(parentLink, 'Client'), leafLink]) {
+    await assert.rejects(store.assertPublishable(clientPath), error =>
+      error.code === 'CLIENT_PACK_UNAVAILABLE' && error.safeMessage === LOCAL_FOLDER_MESSAGE, clientPath);
   }
   assert.deepEqual(factoryCalls, [], 'a refused shape never reaches the durable layer');
 
@@ -241,6 +247,26 @@ test('publishing a matching pack asks for a subfolder only when the folder shape
   for (const clientPath of [normalClient, path.join(base, 'Missing', 'Client')]) {
     await assert.rejects(unavailable.assertPublishable(clientPath), error =>
       error.code === 'CLIENT_PACK_UNAVAILABLE' && error.safeMessage === 'Matching client pack services are unavailable', clientPath);
+  }
+});
+
+// Q4 release notes: a folder name copied from a Mac (NFD) or one with leading or
+// trailing spaces is refused up front with advice, from the spelling alone.
+test('publishing a matching pack asks for a plain folder name when a name is the cause, before any filesystem access', async () => {
+  const path = require('node:path');
+  const { ClientPackStateStore } = require('../../electron/services/client-modpacks/client-pack-state.cjs');
+  const untouched = () => assert.fail('a refused name is never inspected');
+  const store = new ClientPackStateStore({ durableFs: { readFileBoundedAsync: untouched }, fsPromises: { stat: untouched, lstat: untouched, realpath: untouched } });
+  const games = process.platform === 'win32' ? 'C:\\Games' : '/games';
+  for (const clientPath of [path.join(games, 'Cafe\u0301 Client'), path.join(games, ' Client'), path.join(games, 'Client '), path.join(games, 'Client.'),
+    path.join(games, 'Cafe\u0301', 'Client'), path.join(games, ' Minecraft', 'Client')]) {
+    await assert.rejects(store.assertPublishable(clientPath), error =>
+      error.code === 'CLIENT_PACK_UNAVAILABLE' && error.safeMessage === NAME_MESSAGE, JSON.stringify(clientPath));
+  }
+  const plain = new ClientPackStateStore({ durableFs: { async readFileBoundedAsync() { return null; } },
+    fsPromises: { stat: untouched, lstat: untouched, async realpath(value) { return value; } } });
+  for (const clientPath of [path.join(games, 'Caf\u00e9 Client'), path.join(games, 'My Client'), path.join(games, 'Client.v2')]) {
+    assert.equal(await plain.assertPublishable(clientPath), undefined, JSON.stringify(clientPath));
   }
 });
 

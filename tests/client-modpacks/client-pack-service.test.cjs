@@ -13,9 +13,18 @@ const { ClientPackService } = require('../../electron/services/client-modpacks/c
 const { ManagementSessionBroker } = require('../../electron/services/management-session-broker.cjs');
 const { ManagementPackClient } = require('../../electron/services/client-modpacks/management-pack-client.cjs');
 const { createClientPackIntegration } = require('../../electron/services/client-modpacks/client-pack-integration.cjs');
+const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
 const runtime = { minecraftVersion: '1.20.1', loaderFamily: 'forge', loaderVersion: '47.3.12', javaMajor: 17, os: 'win32', architecture: 'x64' };
 const descriptor = { schemaVersion: 1, status: 'ready', serverFingerprint: 'a'.repeat(64), serverVersion: 'v1', source: { provider: 'modrinth', projectId: 'p', versionId: 'v' }, artifactSha256: 'b'.repeat(64), runtime };
 const reparseInspector = { async isReparsePoint() { return false; } };
+const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir';
+const SUBFOLDER_MESSAGE = 'Matching client packs need the client folder inside another normal folder. Move this client into a subfolder, then retry.';
+const LOCAL_FOLDER_MESSAGE = 'Matching client packs need the client in a normal folder on this computer, not on a network share, a mapped or SUBST drive, or a linked folder. Move this client to a normal local folder, then retry.';
+const SEPARATE_MESSAGE = 'This client folder and a registered server folder are inside each other. Put the client and the server in separate folders, then retry.';
+const SAME_FOLDER_MESSAGE = 'This client folder is also a registered server folder. Put the client and the server in separate folders, then retry.';
+const NAME_MESSAGE = 'Matching client packs need folder names without spaces at the start or end, and not copied from a Mac. Move this client to a folder with a plain name, then retry.';
+const unreachable = () => Object.defineProperty(new ModpackError('CLIENT_PACK_UNAVAILABLE', 'The matching client requirement could not be read'),
+  'reason', { value: 'host-unreachable' });
 
 async function withPersonalHandlers(f, work) {
   const Module = require('node:module'); const { EventEmitter } = require('node:events');
@@ -141,7 +150,7 @@ function fixture(t) {
   const stateStore = new ClientPackStateStore({ durableFs });
   const transaction = new ClientPackTransaction({ journalRoot, durableFs, stateStore, reparseInspector });
   const target = { clientId: 'one', clientPath: live };
-  const external = { requirement: descriptor, digest: descriptor.artifactSha256, runtimeResult: { runtime, quiescent: true }, quiescent: true };
+  const external = { requirement: descriptor, digest: descriptor.artifactSha256, runtimeResult: { runtime, quiescent: true }, quiescent: true, servers: [] };
   const entry = { path: 'mods/pack.jar', pathKey: 'mods/pack.jar', sha256: sha('pack'), size: '4', policy: 'managed' };
   const part = { fileName: 'pack.mrpack', size: '4', calculatedDigests: { sha256: descriptor.artifactSha256 } };
   const runtimeOperations = new Map(); const forgottenOperations = [];
@@ -161,7 +170,7 @@ function fixture(t) {
       async awaitQuiescence(operationId) { const op = runtimeOperations.get(operationId); return !!op && (op.released || (op.started && external.quiescent)); },
       async forgetOperation(operationId) { if (await this.awaitQuiescence(operationId) !== true) return false; forgottenOperations.push(operationId); runtimeOperations.delete(operationId); return true; }
     },
-    stateStore, transaction, processGuard: guard, reparseInspector
+    stateStore, transaction, processGuard: guard, reparseInspector, listServerPaths: async () => external.servers
   };
   const service = new ClientPackService(dependencies);
   t.after(async () => {
@@ -1227,4 +1236,93 @@ test('task7: service reports phase-local selected copy then indeterminate checks
   assert.ok(events.every(event => event.clientId === 'one' && typeof event.operationId === 'string'));
   assert.equal(events.at(-1).completedItems, undefined); assert.equal(JSON.stringify(events).includes(f.live), false);
   assert.equal(result.status, 'ready');
+});
+
+// A14/A32/A22: a pack can only publish beside a normal local client folder. The
+// shape check runs before the requirement read, so nothing is downloaded or staged.
+test('review refuses an unsupported client folder shape before any requirement read or download', async t => {
+  const f = fixture(t); let reads = 0; let downloads = 0;
+  const readRequirement = f.dependencies.managementClient.readRequirement;
+  f.dependencies.managementClient.readRequirement = async (...args) => { reads++; return readRequirement(...args); };
+  const downloadSet = f.dependencies.artifactAcquisition.downloadSet;
+  f.dependencies.artifactAcquisition.downloadSet = async (...args) => { downloads++; return downloadSet(...args); };
+  f.transaction.stage = async () => assert.fail('an unsupported folder must never stage a candidate');
+  const link = path.join(path.dirname(f.live), 'linked-client'); fs.symlinkSync(f.live, link, LINK_TYPE);
+  const shapes = [[link, LOCAL_FOLDER_MESSAGE], [path.join(path.dirname(f.live), 'Cafe\u0301 Client'), NAME_MESSAGE],
+    [path.join(path.dirname(f.live), ' Spaced Client'), NAME_MESSAGE]];
+  if (process.platform === 'win32') shapes.push(['X:\\MinecraftClient', SUBFOLDER_MESSAGE], ['\\\\nas\\share\\MinecraftClient', LOCAL_FOLDER_MESSAGE]);
+  for (const [clientPath, message] of shapes) {
+    const service = new ClientPackService({ ...f.dependencies, resolveClient: async id => ({ clientId: id, clientPath }) });
+    t.after(() => service.dispose());
+    await assert.rejects(service.preview({ clientId: 'one' }), error => error.code === 'CLIENT_PACK_UNAVAILABLE' && error.safeMessage === message, clientPath);
+  }
+  assert.equal(reads, 0); assert.equal(downloads, 0);
+  assert.deepEqual(fs.readdirSync(path.dirname(f.live)).filter(name => name.startsWith('.minecraft-core-client-')), []);
+  assert.equal(typeof (await f.service.preview({ clientId: 'one' })).planId, 'string', 'a normal client still reviews');
+});
+
+test('review and install refuse a client folder nested with a registered server folder', async t => {
+  const f = fixture(t); const parent = path.dirname(f.live);
+  const sibling = path.join(parent, 'server'); fs.mkdirSync(sibling);
+  const nested = path.join(f.live, 'server'); fs.mkdirSync(nested);
+  const linkedNested = path.join(parent, 'linked-server'); fs.symlinkSync(nested, linkedNested, LINK_TYPE);
+  const linkedLive = path.join(parent, 'linked-client'); fs.symlinkSync(f.live, linkedLive, LINK_TYPE);
+  const layouts = [[[f.live], SAME_FOLDER_MESSAGE], [[linkedLive], SAME_FOLDER_MESSAGE], [[sibling, f.live], SAME_FOLDER_MESSAGE],
+    ...(process.platform === 'win32' ? [[[f.live.toUpperCase()], SAME_FOLDER_MESSAGE]] : []),
+    [[parent], SEPARATE_MESSAGE], [[nested], SEPARATE_MESSAGE], [[linkedNested], SEPARATE_MESSAGE]];
+  for (const [servers, message] of layouts) {
+    f.external.servers = servers;
+    await assert.rejects(f.service.preview({ clientId: 'one' }), error => error.code === 'CLIENT_PACK_UNAVAILABLE' && error.safeMessage === message, servers.join(' | '));
+  }
+  f.external.servers = [sibling, path.join(parent, 'client-other'), path.join(parent, 'missing-server'), 'relative-server'];
+  const review = await f.service.preview({ clientId: 'one' });
+  f.external.servers = [nested];
+  await assert.rejects(f.service.install({ clientId: 'one', planId: review.planId, conflictChoices: {} }),
+    error => error.code === 'CLIENT_PACK_UNAVAILABLE' && error.safeMessage === SEPARATE_MESSAGE);
+  assert.equal(await f.transaction.status(f.target), null);
+  assert.equal(fs.existsSync(path.join(nested)), true);
+});
+
+test('only an unreachable host leaves a client without a matching pack requirement-unavailable', async t => {
+  const f = fixture(t); const readRequirement = f.dependencies.managementClient.readRequirement;
+  f.dependencies.managementClient.readRequirement = async () => { throw unreachable(); };
+  for (const method of ['getState', 'verify']) {
+    assert.deepEqual(await f.service[method]({ clientId: 'one' }), { clientId: 'one', status: 'requirement-unavailable', verified: false, descriptor: null });
+  }
+  for (const failure of [new ModpackError('CLIENT_PACK_UNAVAILABLE', 'The matching client requirement could not be read'),
+    Object.assign(new Error('forged reason'), { code: 'CLIENT_PACK_UNAVAILABLE', reason: 'host-unreachable' })]) {
+    f.dependencies.managementClient.readRequirement = async () => { throw failure; };
+    await assert.rejects(f.service.getState({ clientId: 'one' }), error => error === failure);
+  }
+  f.dependencies.managementClient.readRequirement = readRequirement;
+  f.external.requirement = null;
+  assert.equal((await f.service.getState({ clientId: 'one' })).status, 'unmanaged', 'a readable null requirement stays unmanaged');
+  f.external.requirement = descriptor;
+  const review = await f.service.preview({ clientId: 'one' });
+  assert.equal((await f.service.install({ clientId: 'one', planId: review.planId, conflictChoices: {} })).verified, true);
+  f.dependencies.managementClient.readRequirement = async () => { throw unreachable(); };
+  await assert.rejects(f.service.getState({ clientId: 'one' }), { code: 'CLIENT_PACK_UNAVAILABLE' });
+});
+
+test('the service requires the publication check and the registered server list', t => {
+  const f = fixture(t);
+  assert.throws(() => new ClientPackService({ ...f.dependencies, stateStore: { read: () => null } }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => new ClientPackService({ ...f.dependencies, listServerPaths: undefined }), { code: 'INVALID_REQUEST' });
+});
+
+test('a client folder named in another Unicode form reads its state and is refused a pack before any download', {
+  skip: process.platform !== 'win32' && 'the durable layer refuses non-NFC names on Windows'
+}, async t => {
+  const f = fixture(t); let downloads = 0;
+  const downloadSet = f.dependencies.artifactAcquisition.downloadSet;
+  f.dependencies.artifactAcquisition.downloadSet = async (...args) => { downloads++; return downloadSet(...args); };
+  const clientPath = path.join(path.dirname(f.live), 'Cafe\u0301 Client'); fs.mkdirSync(clientPath);
+  const service = new ClientPackService({ ...f.dependencies, resolveClient: async id => ({ clientId: id, clientPath }) });
+  t.after(() => service.dispose());
+  f.external.requirement = null;
+  assert.equal((await service.getState({ clientId: 'one' })).status, 'unmanaged');
+  f.external.requirement = descriptor;
+  assert.equal((await service.getState({ clientId: 'one' })).status, 'install-required');
+  await assert.rejects(service.preview({ clientId: 'one' }), error => error.code === 'CLIENT_PACK_UNAVAILABLE' && error.safeMessage === NAME_MESSAGE);
+  assert.equal(downloads, 0);
 });

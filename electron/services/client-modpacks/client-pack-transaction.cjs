@@ -73,13 +73,22 @@ class ClientPackTransaction {
   _options() { return { reparseInspector: this.reparseInspector }; }
   candidatePathFor(target, operationId) { if (!validUuid(operationId)) throw fail('INVALID_REQUEST'); return this._paths(target, operationId).candidatePath; }
   async assertNoUnsettledAtPath(clientPath) {
-    const normalized = normalizeServerDirectoryPath(clientPath);
-    const separator = path.win32.isAbsolute(normalized) ? '\\' : path.sep;
-    const canonical = normalized.replace(/[\\/]+$/, '');
-    // Legacy writers hashed the normalized trailing separator when supplied.
-    // Inspect both exact keys without rewriting or orphaning either authority.
-    const journalPaths = new Set([canonical, canonical + separator].map(value => this._paths({ clientId: 'path-guard', clientPath: value }).journalPath));
     try {
+      if (typeof clientPath !== 'string' || !path.isAbsolute(clientPath) || clientPath.includes('\0')) throw fail('INVALID_REQUEST');
+      const journalPaths = new Set();
+      // A transaction is only ever staged under an NFC spelling below a root. A
+      // non-NFC spelling (a folder copied from a Mac) is therefore checked under
+      // its NFC spelling, and a drive or share root has no journal to check.
+      for (const spelling of new Set([clientPath, clientPath.normalize('NFC')])) {
+        const resolved = path.resolve(spelling);
+        if (spelling !== spelling.normalize('NFC') || path.dirname(resolved) === resolved) continue;
+        const normalized = normalizeServerDirectoryPath(spelling);
+        const separator = path.win32.isAbsolute(normalized) ? '\\' : path.sep;
+        const canonical = normalized.replace(/[\\/]+$/, '');
+        // Legacy writers hashed the normalized trailing separator when supplied.
+        // Inspect both exact keys without rewriting or orphaning either authority.
+        for (const value of [canonical, canonical + separator]) journalPaths.add(this._paths({ clientId: 'path-guard', clientPath: value }).journalPath);
+      }
       for (const journalPath of journalPaths) {
         const bytes = await this.durableFs.readFileBoundedAsync(journalPath, { maxBytes: 1024 * 1024, allowMissing: true });
         if (bytes === null) continue;
@@ -165,7 +174,21 @@ class ClientPackTransaction {
     // phase alone never permits forgetting retained candidate/previous trees.
     await this.durableFs.writeJsonAtomicAsync(historyPath, record, { expectedTargetSha256: null });
   }
+  // stage() only ever records a journal under an NFC spelling below a root. A
+  // folder named in another form (copied from a Mac) or a drive or share root
+  // has no journal of its own, so its status is the settled check under its NFC
+  // spelling; publishing into such a folder stays refused elsewhere.
+  _ownsJournalKey(target) {
+    if (!target || typeof target.clientId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(target.clientId) ||
+        typeof target.clientPath !== 'string' || !path.isAbsolute(target.clientPath)) return true;
+    const resolved = path.resolve(target.clientPath);
+    return target.clientPath === target.clientPath.normalize('NFC') && path.dirname(resolved) !== resolved;
+  }
   async status(target) {
+    if (!this._ownsJournalKey(target)) {
+      await this.assertNoUnsettledAtPath(target.clientPath);
+      return null;
+    }
     const { record } = await this._read(target);
     if (record && ['committed', 'abandoned'].includes(record.phase)) {
       await assertServerDirectoryIdentity(path.dirname(target.clientPath), record.parentIdentity, this._options());

@@ -6,6 +6,7 @@ const { strictJsonClone } = require('../../utils/durable-fs.cjs');
 const { normalizeCompanionDescriptor } = require('./companion-contracts.cjs');
 const { clientPathPolicy } = require('./client-content-policy.cjs');
 const { normalizeRuntimeConstraints } = require('./client-runtime-constraints.cjs');
+const { isSafeWindowsBasename } = require('../modpacks/windows-basename.cjs');
 const MANIFEST_NAME = '.minecraft-core-client-pack.json';
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 // Up to 100,000 entry objects (seven values each when preserved), 10,000
@@ -13,6 +14,10 @@ const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MANIFEST_JSON_VALUES = 1_000_000;
 const fail = () => new ModpackError('RECOVERY_REQUIRED', 'Client ownership state could not be verified');
 const SUBFOLDER_REQUIRED = 'Matching client packs need the client folder inside another normal folder. Move this client into a subfolder, then retry.';
+// A subfolder of a network share, a mapped or SUBST drive or a linked folder is still not local.
+const LOCAL_FOLDER_REQUIRED = 'Matching client packs need the client in a normal folder on this computer, not on a network share, a mapped or SUBST drive, or a linked folder. Move this client to a normal local folder, then retry.';
+// Names copied from a Mac (not NFC) or ones Windows would trim.
+const NAME_REQUIRED = 'Matching client packs need folder names without spaces at the start or end, and not copied from a Mac. Move this client to a folder with a plain name, then retry.';
 function samePath(left, right) {
   return process.platform === 'win32' ? left.toLocaleLowerCase('en-US') === right.toLocaleLowerCase('en-US') : left === right;
 }
@@ -88,7 +93,8 @@ class ClientPackStateStore {
   // authority over the client's parent. Refuse up front, with advice the user
   // can act on, when the folder's shape is the reason that authority is missing.
   async assertPublishable(clientPath) {
-    if (await this.#unsupportedShape(clientPath)) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', SUBFOLDER_REQUIRED);
+    const advice = await this.#unsupportedShape(clientPath);
+    if (advice) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', advice);
     try {
       await this.durableFs.readFileBoundedAsync(path.join(clientPath, MANIFEST_NAME), { maxBytes: MAX_MANIFEST_BYTES, allowMissing: true });
     } catch (cause) {
@@ -96,14 +102,15 @@ class ClientPackStateStore {
     }
   }
   async #unsupportedShape(clientPath) {
-    if (typeof clientPath !== 'string' || !path.isAbsolute(clientPath)) return false;
-    if (/^[\\/]{2}/u.test(clientPath)) return true;
+    if (typeof clientPath !== 'string' || !path.isAbsolute(clientPath)) return null;
+    if (/^[\\/]{2}/u.test(clientPath)) return LOCAL_FOLDER_REQUIRED;
     const resolved = path.resolve(clientPath);
     const root = path.parse(resolved).root;
-    if (samePath(resolved, root) || samePath(path.dirname(resolved), root)) return true;
+    if (samePath(resolved, root) || samePath(path.dirname(resolved), root)) return SUBFOLDER_REQUIRED;
+    if (resolved.slice(root.length).split(/[\\/]/u).filter(Boolean).some(name => name !== name.normalize('NFC') || !isSafeWindowsBasename(name))) return NAME_REQUIRED;
     let real;
-    try { real = await this.fsPromises.realpath(resolved); } catch { return false; }
-    return !samePath(path.resolve(real), resolved);
+    try { real = await this.fsPromises.realpath(resolved); } catch { return null; }
+    return samePath(path.resolve(real), resolved) ? null : LOCAL_FOLDER_REQUIRED;
   }
   async write(clientPath, value) {
     const manifest = normalizeClientPackManifest(value);

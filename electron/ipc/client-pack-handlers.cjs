@@ -59,7 +59,7 @@ function publicValue(name, value) {
     return {inspectionId:id(value.inspectionId),...descriptor(fields),name:text(value.name),version:text(value.version,128),optionalFiles:options(value.optionalFiles),downloadBytes:decimal(value.downloadBytes)};
   }
   if (['get-state','verify'].includes(name)) {
-    const result={clientId:id(value.clientId),status:one(value.status,['unmanaged','install-required','unpaired','update-required','modified','ready','runtime-incomplete','recovery-required']),verified:bool(value.verified),descriptor:value.descriptor === null ? null : descriptor(value.descriptor)};
+    const result={clientId:id(value.clientId),status:one(value.status,['unmanaged','install-required','unpaired','update-required','modified','ready','runtime-incomplete','recovery-required','requirement-unavailable']),verified:bool(value.verified),descriptor:value.descriptor === null ? null : descriptor(value.descriptor)};
     if (value.recoveryReason !== undefined) {
       if (result.status !== 'recovery-required') throw fail();
       result.recoveryReason=one(value.recoveryReason,['restart-required']);

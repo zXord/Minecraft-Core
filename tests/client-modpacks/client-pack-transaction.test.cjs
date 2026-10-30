@@ -118,6 +118,66 @@ for (const phase of ['preparing', 'ready']) test(`${phase} pre-publication aband
   await reopened.assertNoUnsettledAtPath(f.live);
 });
 
+// C2 critique #1 / A27: an unmanaged server folder copied from a Mac (NFD name) must
+// still reach every server writer, while a real unsettled journal keeps refusing.
+function journalFor(f, clientPath, phase) {
+  const { journalPath } = f.tx._paths({ clientId: 'client-one', clientPath });
+  fs.writeFileSync(journalPath, JSON.stringify({ schemaVersion: 1, operationId: '99999999-9999-4999-8999-999999999999', clientId: 'client-one', clientPath,
+    parentIdentity: { volumeSerial: 'a1', fileId: 'b2' }, oldTree: { directoryIdentity: { volumeSerial: 'a1', fileId: 'c3' }, fingerprint: 'd'.repeat(64) },
+    candidateIdentity: null, candidateTree: null, phase }));
+  return journalPath;
+}
+
+test('a non-NFC folder spelling is checked under its NFC spelling and never refused as invalid', async t => {
+  const f = fixture(t);
+  const nfc = path.join(f.root, 'Caf\u00e9 Server'); const nfd = path.join(f.root, 'Cafe\u0301 Server');
+  assert.notEqual(nfd, nfd.normalize('NFC'));
+  for (const spelling of [nfd, path.join(nfd, 'world'), nfc]) await f.tx.assertNoUnsettledAtPath(spelling);
+  const journalPath = journalFor(f, nfc, 'preparing');
+  for (const spelling of [nfd, nfc]) await assert.rejects(f.tx.assertNoUnsettledAtPath(spelling), { code: 'RECOVERY_REQUIRED' }, spelling);
+  journalFor(f, nfc, 'abandoned');
+  for (const spelling of [nfd, nfc]) await f.tx.assertNoUnsettledAtPath(spelling);
+  fs.writeFileSync(journalPath, '{unreadable');
+  await assert.rejects(f.tx.assertNoUnsettledAtPath(nfd), { code: 'RECOVERY_REQUIRED' });
+});
+
+test('the unsettled-journal check never answers INVALID_REQUEST and has nothing to check at a root', async t => {
+  const f = fixture(t);
+  await f.tx.assertNoUnsettledAtPath(path.parse(f.root).root);
+  const shapes = process.platform === 'win32' ? ['\\\\?\\C:\\Device\\Client', 'relative\\client', 'C:\\Client\0'] : ['relative/client', '/client\0'];
+  for (const value of [...shapes, null, 42]) {
+    await assert.rejects(f.tx.assertNoUnsettledAtPath(value), { code: 'RECOVERY_REQUIRED' }, String(value));
+  }
+});
+
+test('a client folder that can never hold its own journal reports none once its NFC spelling is settled', async t => {
+  const f = fixture(t);
+  const nfc = path.join(f.root, 'Caf\u00e9 Client'); const nfd = path.join(f.root, 'Cafe\u0301 Client'); fs.mkdirSync(nfd);
+  for (const clientPath of [nfd, path.parse(f.root).root]) assert.equal(await f.tx.status({ clientId: 'client-one', clientPath }), null, clientPath);
+  journalFor(f, nfc, 'preparing');
+  await assert.rejects(f.tx.status({ clientId: 'client-one', clientPath: nfd }), { code: 'RECOVERY_REQUIRED' });
+  journalFor(f, nfc, 'abandoned');
+  assert.equal(await f.tx.status({ clientId: 'client-one', clientPath: nfd }), null);
+  await assert.rejects(f.tx.status({ clientId: '../forged', clientPath: nfd }), { code: 'INVALID_REQUEST' });
+  await assert.rejects(f.tx.status({ clientId: 'client-one', clientPath: 'relative' }), { code: 'INVALID_REQUEST' });
+});
+
+test('server destination checks admit an unmanaged NFD server folder and still refuse client pack evidence', async t => {
+  const f = fixture(t);
+  const { createClientPackIntegration } = require('../../electron/services/client-modpacks/client-pack-integration.cjs');
+  const integration = createClientPackIntegration({ resolveClient: async () => null, resolveClientByPath: async () => null,
+    processGuard: {}, transaction: f.tx, stateStore: f.stateStore, managementClient: {}, clientPackService: {} });
+  const nfc = path.join(f.root, 'Caf\u00e9 Server'); const nfd = path.join(f.root, 'Cafe\u0301 Server');
+  fs.mkdirSync(path.join(nfd, 'world'), { recursive: true });
+  await integration.assertServerDestination(nfd);
+  await integration.assertServerDestination(path.join(nfd, 'world'));
+  const journalPath = journalFor(f, nfc, 'ready');
+  await assert.rejects(integration.assertServerDestination(nfd), { code: 'RECOVERY_REQUIRED' });
+  fs.unlinkSync(journalPath);
+  fs.writeFileSync(path.join(nfd, '.minecraft-core-client-pack.json'), '{}');
+  await assert.rejects(integration.assertServerDestination(path.join(nfd, 'world')), { code: 'CLIENT_PACK_UNAVAILABLE' });
+});
+
 for (const control of ['previous', 'substituted-live', 'substituted-candidate']) test(`changed-live settlement refuses ${control} evidence`, async t => {
   const f = fixture(t); const context = await stage(f); await f.tx.seal(context);
   write(f.live, 'client-config.json', 'latest personal bytes');

@@ -76,6 +76,16 @@ test('only the bounded restart recovery reason is exposed with recovery-required
   assert.equal((await f.call('get-state',{clientId:'c'})).ok,false);
   await f.dispose();
 });
+test('an unchecked host requirement crosses IPC as requirement-unavailable without a descriptor or recovery reason',async()=>{
+  let result={clientId:'c',status:'requirement-unavailable',verified:false,descriptor:null};
+  const f=fixture({client:{getState:async()=>result,verify:async()=>result}});
+  for(const channel of ['get-state','verify']) assert.deepEqual(await f.call(channel,{clientId:'c'}),{ok:true,value:result});
+  result={...result,recoveryReason:'restart-required'};
+  assert.equal((await f.call('get-state',{clientId:'c'})).ok,false);
+  result={clientId:'c',status:'requirement-unknown',verified:false,descriptor:null};
+  assert.equal((await f.call('get-state',{clientId:'c'})).ok,false);
+  await f.dispose();
+});
 test('accessors, malformed identifiers, excessive arrays and unsafe conflict paths reject without evaluation',async()=>{
   const f=fixture();let reads=0;const accessor={};Object.defineProperty(accessor,'clientId',{enumerable:true,get(){reads++;return'client-qa';}});
   for(const input of [accessor,{clientId:'../real'},{clientId:''},{clientId:'a'.repeat(129)}]) assert.equal((await f.call('get-state',input)).error.code,'INVALID_REQUEST');

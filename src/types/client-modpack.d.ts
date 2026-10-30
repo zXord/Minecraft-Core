@@ -1,6 +1,7 @@
 import type { RuntimeTuple } from './modpack';
 
-export type ClientPackStatus = 'unmanaged' | 'install-required' | 'unpaired' | 'update-required' | 'modified' | 'ready' | 'runtime-incomplete' | 'recovery-required';
+// 'requirement-unavailable': the host gave no response, and the client has no matching pack.
+export type ClientPackStatus = 'unmanaged' | 'install-required' | 'unpaired' | 'update-required' | 'modified' | 'ready' | 'runtime-incomplete' | 'recovery-required' | 'requirement-unavailable';
 export type ClientCompanionSource =
   | { provider: 'github'; repositoryId: string; githubOwner: string; githubRepo: string; releaseId: string; assetId: string }
   | { provider: 'modrinth'; projectId: string; versionId: string };

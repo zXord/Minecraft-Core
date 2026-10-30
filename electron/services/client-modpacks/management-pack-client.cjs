@@ -1,7 +1,15 @@
 const { ModpackError, CLIENT_PACK_SERVER_CHANGED_GUIDANCE: SERVER_CHANGED_GUIDANCE } = require('../modpacks/errors.cjs');
+const { MANAGEMENT_INFO_MAX_BYTES, HOST_UNREACHABLE_REASON } = require('../management-session-transport.cjs');
 const { normalizeCompanionDescriptor } = require('./companion-contracts.cjs');
-const MAX_BYTES = 256 * 1024;
+const MAX_BYTES = MANAGEMENT_INFO_MAX_BYTES;
 const fail = (code = 'CLIENT_PACK_UNAVAILABLE', cause) => new ModpackError(code, 'The matching client requirement could not be read', { cause });
+// Carries the broker's internal reachability reason; non-enumerable, so public
+// results and serialized errors never include it.
+function unavailable(cause) {
+  const error = fail('CLIENT_PACK_UNAVAILABLE', cause);
+  if (cause instanceof ModpackError && cause.reason === HOST_UNREACHABLE_REASON) Object.defineProperty(error, 'reason', { value: HOST_UNREACHABLE_REASON });
+  return error;
+}
 
 class ManagementPackClient {
   constructor({ sessionBroker, clock = Date.now } = {}) {
@@ -14,8 +22,17 @@ class ManagementPackClient {
       const { response, binding } = await this.sessionBroker.readServerInfo(clientId, { signal, deadline, expectedBinding });
       signal?.throwIfAborted();
       if (!response || typeof response !== 'object' || Array.isArray(response) ||
-          Buffer.byteLength(JSON.stringify(response), 'utf8') > MAX_BYTES || !Object.hasOwn(response, 'clientModpack')) throw fail();
-      if (Object.hasOwn(response, 'clientModpackError')) {
+          Buffer.byteLength(JSON.stringify(response), 'utf8') > MAX_BYTES) throw fail();
+      const hasRequirement = Object.hasOwn(response, 'clientModpack');
+      const hasError = Object.hasOwn(response, 'clientModpackError');
+      // Hosts that predate matching client packs (v26.6.1) send neither field and
+      // cannot publish a requirement. Every current host always sends clientModpack.
+      if (!hasRequirement && !hasError) {
+        if (response.success !== true) throw fail();
+        return { descriptor: null, binding, minecraftPort: response.minecraftPort, legacyHost: true };
+      }
+      if (!hasRequirement) throw fail();
+      if (hasError) {
         if (response.clientModpackError?.code === 'CLIENT_PACK_SERVER_CHANGED') {
           throw new ModpackError('CLIENT_PACK_SERVER_CHANGED', SERVER_CHANGED_GUIDANCE);
         }
@@ -27,11 +44,12 @@ class ManagementPackClient {
         minecraftPort: response.minecraftPort };
     } catch (cause) {
       if (!signal?.aborted && cause instanceof ModpackError && ['CLIENT_PACK_SERVER_CHANGED', 'PLAN_STALE', 'CANCELLED', 'INVALID_REQUEST'].includes(cause.code)) throw cause;
-      throw fail(signal?.aborted ? 'CANCELLED' : 'CLIENT_PACK_UNAVAILABLE', cause);
+      throw signal?.aborted ? fail('CANCELLED', cause) : unavailable(cause);
     }
   }
   async readRequirement(clientId, options) {
-    const { descriptor, binding } = await this._read(clientId, options); return { descriptor, binding };
+    const { descriptor, binding, legacyHost } = await this._read(clientId, options);
+    return legacyHost ? { descriptor, binding, legacyHost } : { descriptor, binding };
   }
   async getRequirement(clientId, options) { return (await this._read(clientId, options)).descriptor; }
   // Main-only: the renderer cannot choose the endpoint or supply runtime authority.

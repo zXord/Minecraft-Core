@@ -1,10 +1,13 @@
 const crypto = require('node:crypto');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { normalizeRuntimeTuple } = require('../modpacks/contracts.cjs');
+const { proveEntriesAbsent } = require('../modpacks/instance-ownership.cjs');
+const { CURRENT_STATE, STATE_DIRECTORY } = require('../modpacks/state/modpack-state-repository.cjs');
 const { serverPackFingerprint, normalizeCompanionDescriptor } = require('./companion-contracts.cjs');
 const { isClientArchiveName, singleClientArchive } = require('./client-archive-source.cjs');
 const MAX_INSPECTIONS = 4;
 const TTL_MS = 15 * 60 * 1000;
+const MODPACK_STATE_ENTRY = `${STATE_DIRECTORY}/${CURRENT_STATE}`;
 const fail = (code = 'INVALID_REQUEST', cause) => new ModpackError(code, code === 'CLIENT_PACK_UNAVAILABLE' ? 'The matching client pack is unavailable' : 'The matching client pack request could not be completed', { cause });
 function request(value, keys, required = keys) {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length ||
@@ -33,6 +36,12 @@ class CompanionService {
   getStatus(value) {
     return this.#run(undefined, async signal => {
       request(value, ['serverId']); identifier(value.serverId);
+      // A server whose modpack state is proven absent answers before the lifecycle
+      // lock, so another server's inspection cleanup can never delay or fail its
+      // {clientModpack:null}. Present or unprovable state keeps the strict read.
+      const selector = await this.resolveServer(value.serverId);
+      if (!selector) throw fail('CLIENT_PACK_UNAVAILABLE');
+      if (proveEntriesAbsent(selector.serverPath, [MODPACK_STATE_ENTRY])) return null;
       await this.#prune(); cancelled(signal);
       const installed = await this.#installed(value.serverId, undefined, { signal });
       if (!installed) return null;

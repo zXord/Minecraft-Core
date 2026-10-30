@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -13,6 +14,9 @@ const { createClientProcessInspector } = require('../../electron/services/client
 const owner = { pid: process.pid, parentPid: process.ppid, creationTime: '2026-10-08T10:00:00Z', executablePath: process.execPath, commandLine: 'node guard-test' };
 const launchId = 'b09956c1-1daa-4fb9-a8fe-bf6d401c04bc';
 const blocked = error => error.code === 'CLIENT_RUNNING' || error.code === 'RECOVERY_REQUIRED';
+const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir';
+const folderKey = value => crypto.createHash('sha256').update(process.platform === 'win32' ? value.toLowerCase() : value).digest('hex');
+const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 
 for (const recordState of ['missing', 'settled']) {
   for (const [name, command] of [
@@ -129,13 +133,19 @@ function fixture(t) {
     moveWriteThroughAsync: fs.promises.rename, replaceFileWriteThroughAsync: fs.promises.rename, async flushDirectoryAsync() {}
   } });
   let snapshot = { complete: true, processes: [owner] };
-  const leases = [];
+  let inspections = 0;
+  const leases = []; const leaseIds = [];
   const makeGuard = (overrides = {}) => new ClientProcessGuard({ root, durableFs, randomUUID: () => launchId,
-    inspectProcesses: async () => { if (snapshot instanceof Error) throw snapshot; return snapshot; },
-    acquireEndpointLease: async request => { const lease = await acquireProcessBoundLocalEndpointLease(request); leases.push(lease); return lease; }, ...overrides
+    inspectProcesses: async () => { inspections++; if (snapshot instanceof Error) throw snapshot; return snapshot; },
+    acquireEndpointLease: async request => {
+      leaseIds.push(request.leaseId);
+      const lease = await acquireProcessBoundLocalEndpointLease(request); leases.push(lease); return lease;
+    }, ...overrides
   });
   t.after(async () => { await Promise.all(leases.map(lease => lease.close())); fs.rmSync(root, { recursive: true, force: true }); });
-  return { root, durableFs, client: { clientId: 'client-a', clientPath }, makeGuard, leases, setSnapshot(value) { snapshot = value; },
+  return { root, durableFs, client: { clientId: 'client-a', clientPath }, makeGuard, leases, leaseIds, setSnapshot(value) { snapshot = value; },
+    inspections: () => inspections,
+    records: () => fs.readdirSync(root).filter(name => name.endsWith('.json')),
     record() { return JSON.parse(fs.readFileSync(path.join(root, fs.readdirSync(root).find(name => name.endsWith('.json'))), 'utf8')); }
   };
 }
@@ -329,4 +339,213 @@ test('failed child identity persistence cannot poison later exact-close settleme
   await launch.close();
   assert.equal(f.record().phase, 'settled');
   assert.equal(await guard.withMutation(f.client, () => 'safe'), 'safe');
+});
+
+// A47: clients without pack evidence keep v26.6.1 behaviour. Their channels and
+// the app's own unmanaged game share the folder without any process scan.
+test('proof none never inspects processes, even for rows that stay uncertain or a failing inspector', async t => {
+  const f = fixture(t);
+  for (const snapshot of [
+    { complete: true, processes: [owner, { pid: 9990, parentPid: 4, name: 'java.exe', creationTime: 'java-start', executablePath: null, commandLine: null }] },
+    { complete: true, processes: [owner, { ...owner, pid: 9991, name: 'java.exe',
+      commandLine: 'java @user_jvm_args.txt @libraries/net/minecraftforge/forge/1.20.1-47.3.12/win_args.txt nogui' }] },
+    { complete: true, processes: [owner, { ...owner, pid: 9992, name: 'javaw.exe', commandLine: 'javaw.exe org.prismlauncher.EntryPoint' }] },
+    new Error('process inspection blocked')
+  ]) {
+    f.setSnapshot(snapshot);
+    const guard = f.makeGuard();
+    assert.equal(await guard.status(f.client), 'uncertain', 'the strict proof would refuse this row');
+    const before = f.inspections();
+    assert.equal(await guard.withMutation(f.client, () => 'personal', { proof: 'none' }), 'personal');
+    const launch = await guard.beginLaunch(f.client, { proof: 'none' }); const child = childFixture();
+    await launch.attach(child); child.emit('close', 0); await launch.close();
+    const aborted = await guard.beginLaunch(f.client, { proof: 'none' }); await aborted.abortBeforeSpawn();
+    assert.equal(f.inspections(), before);
+  }
+  assert.deepEqual(f.records(), [], 'lenient holds never write a durable launch record');
+});
+
+test('shared holders join each other, including the app own unmanaged game', async t => {
+  const f = fixture(t); const guard = f.makeGuard();
+  const launch = await guard.beginLaunch(f.client, { proof: 'none' });
+  assert.match(launch.jvmArgument, /^-Dminecraft\.core\.clientLaunchId=[a-f0-9-]{36}$/u);
+  const child = childFixture(); await launch.attach(child);
+  const gate = deferred(); const entered = deferred();
+  const personal = guard.withMutation(f.client, async () => { entered.resolve(); await gate.promise; return 'refresh-auth'; }, { proof: 'none' });
+  await entered.promise;
+  assert.equal(await guard.withMutation({ ...f.client, clientId: 'alias' }, () => 'check-mods', { proof: 'none' }), 'check-mods');
+  const second = await guard.beginLaunch(f.client, { proof: 'none' }); await second.abortBeforeSpawn();
+  gate.resolve(); assert.equal(await personal, 'refresh-auth');
+  child.emit('close', 0); await launch.close();
+  assert.equal(f.leases.length, 1, 'one endpoint lease serves the whole shared group');
+  assert.equal(await guard.withMutation(f.client, () => 'install'), 'install');
+});
+
+test('exclusive and shared holders refuse each other in both directions', async t => {
+  const f = fixture(t); const guard = f.makeGuard();
+  const gate = deferred(); const entered = deferred();
+  const strict = guard.withMutation(f.client, async () => { entered.resolve(); await gate.promise; return 'install'; });
+  await entered.promise;
+  await assert.rejects(guard.withMutation(f.client, () => assert.fail('shared joined a pack transaction'), { proof: 'none' }), { code: 'CLIENT_RUNNING' });
+  await assert.rejects(guard.beginLaunch(f.client, { proof: 'none' }), { code: 'CLIENT_RUNNING' });
+  gate.resolve(); assert.equal(await strict, 'install');
+
+  const sharedGate = deferred(); const sharedEntered = deferred();
+  const shared = guard.withMutation(f.client, async () => { sharedEntered.resolve(); await sharedGate.promise; return 'check-mods'; }, { proof: 'none' });
+  await sharedEntered.promise;
+  await assert.rejects(guard.withMutation(f.client, () => assert.fail('pack transaction joined a shared holder')), { code: 'CLIENT_RUNNING' });
+  await assert.rejects(guard.beginLaunch(f.client), { code: 'CLIENT_RUNNING' });
+  sharedGate.resolve(); assert.equal(await shared, 'check-mods');
+  const managed = await guard.beginLaunch(f.client);
+  await assert.rejects(guard.withMutation(f.client, () => assert.fail('shared joined a managed launch'), { proof: 'none' }), { code: 'CLIENT_RUNNING' });
+  await managed.abortBeforeSpawn();
+});
+
+test('the endpoint stays held until the last shared holder settles', async t => {
+  const f = fixture(t); const guard = f.makeGuard();
+  const launch = await guard.beginLaunch(f.client, { proof: 'none' }); const child = childFixture(); await launch.attach(child);
+  const gate = deferred(); const entered = deferred();
+  const personal = guard.withMutation(f.client, async () => { entered.resolve(); await gate.promise; return 'sign-in'; }, { proof: 'none' });
+  await entered.promise;
+  child.emit('close', 0); await launch.close();
+  await assert.rejects(guard.withMutation(f.client, () => assert.fail('pack transaction ran under a pending personal write')), { code: 'CLIENT_RUNNING' });
+  await assert.rejects(f.makeGuard().withMutation(f.client, () => assert.fail('another process entered while the endpoint was held')), blocked);
+  gate.resolve(); assert.equal(await personal, 'sign-in');
+  assert.equal(await guard.withMutation(f.client, () => 'install'), 'install');
+});
+
+test('a lenient launch reservation releases only before spawn or on the exact child close', async t => {
+  const f = fixture(t); const guard = f.makeGuard();
+  const aborted = await guard.beginLaunch(f.client, { proof: 'none' }); await aborted.abortBeforeSpawn();
+  assert.equal(await guard.withMutation(f.client, () => 'released before spawn'), 'released before spawn');
+  const closedEarly = await guard.beginLaunch(f.client, { proof: 'none' }); await closedEarly.close();
+  assert.equal(await guard.withMutation(f.client, () => 'released by cleanup before spawn'), 'released by cleanup before spawn');
+  const launch = await guard.beginLaunch(f.client, { proof: 'none' }); const child = childFixture();
+  await launch.attach(child); await launch.attach(child);
+  await assert.rejects(launch.abortBeforeSpawn(), blocked);
+  await launch.close(); child.emit('error', new Error('stdio error')); child.emit('exit', 0);
+  await assert.rejects(guard.withMutation(f.client, () => assert.fail('released while the game still runs')), { code: 'CLIENT_RUNNING' });
+  child.emit('close', 0); await launch.close();
+  assert.equal(await guard.withMutation(f.client, () => 'released by close'), 'released by close');
+});
+
+function linkedClient(f) {
+  const realParent = path.join(f.root, 'games'); const realClient = path.join(realParent, 'client');
+  fs.mkdirSync(realClient, { recursive: true });
+  const parentLink = path.join(f.root, 'linked-games'); fs.symlinkSync(realParent, parentLink, LINK_TYPE);
+  const leafLink = path.join(f.root, 'linked-client'); fs.symlinkSync(realClient, leafLink, LINK_TYPE);
+  return { real: { clientId: 'real', clientPath: realClient }, parentLink, aliases: [path.join(parentLink, 'client'), leafLink] };
+}
+
+test('junction-parent and junction-leaf spellings share the canonical key when no proof is needed', async t => {
+  const f = fixture(t); const guard = f.makeGuard(); const linked = linkedClient(f);
+  const canonicalKey = folderKey(fs.realpathSync.native(linked.real.clientPath));
+  for (const clientPath of linked.aliases) {
+    assert.equal(await guard.withMutation({ clientId: 'aliased', clientPath }, () => 'shared', { proof: 'none' }), 'shared', clientPath);
+    assert.equal(f.leaseIds.at(-1), canonicalKey, clientPath);
+    const launch = await guard.beginLaunch({ clientId: 'aliased', clientPath }, { proof: 'none' });
+    assert.equal(f.leaseIds.at(-1), canonicalKey, clientPath);
+    await assert.rejects(guard.withMutation(linked.real, () => assert.fail('alias hid a running game')), { code: 'CLIENT_RUNNING' });
+    await launch.abortBeforeSpawn();
+  }
+  const gate = deferred(); const entered = deferred();
+  const strict = guard.withMutation(linked.real, async () => { entered.resolve(); await gate.promise; });
+  await entered.promise;
+  for (const clientPath of linked.aliases) {
+    await assert.rejects(guard.withMutation({ clientId: 'aliased', clientPath }, () => assert.fail('alias joined a pack transaction'), { proof: 'none' }),
+      { code: 'CLIENT_RUNNING' });
+  }
+  gate.resolve(); await strict;
+  for (const clientPath of linked.aliases) {
+    await assert.rejects(guard.withMutation({ clientId: 'aliased', clientPath }, () => assert.fail('strict proof accepted an alias')), { code: 'RECOVERY_REQUIRED' });
+  }
+});
+
+test('a missing leaf under a junction parent is still refused', async t => {
+  const f = fixture(t); const guard = f.makeGuard(); const { parentLink } = linkedClient(f);
+  const missing = { clientId: 'missing', clientPath: path.join(parentLink, 'missing-client') };
+  await assert.rejects(guard.withMutation(missing, () => assert.fail('strict proof accepted a missing alias leaf')), { code: 'RECOVERY_REQUIRED' });
+  await assert.rejects(guard.withMutation(missing, () => assert.fail('lenient hold accepted a missing alias leaf'), { proof: 'none' }), { code: 'RECOVERY_REQUIRED' });
+});
+
+// A47: a lenient hold proves nothing, so a folder it cannot inspect or canonicalise
+// (an offline share, a folder Windows denies, a RAM disk whose realpath fails) is
+// keyed by its given spelling, the same key a strict hold of that spelling uses.
+test('a lenient hold keys a folder it cannot inspect or canonicalise by its given spelling', async t => {
+  const f = fixture(t); const guard = f.makeGuard();
+  const givenKey = folderKey(path.resolve(f.client.clientPath));
+  const { statSync } = fs; const realpathNative = fs.realpathSync.native;
+  const faults = [['stat', 'UNKNOWN'], ['stat', 'EPERM'], ['realpath', 'EISDIR'], ['realpath', 'UNKNOWN']];
+  const inject = (operation, code) => {
+    const fault = () => { throw Object.assign(new Error(`${code}: injected ${operation} failure`), { code }); };
+    if (operation === 'stat') t.mock.method(fs, 'statSync', (value, ...rest) => value === f.client.clientPath ? fault() : statSync(value, ...rest));
+    else t.mock.method(fs.realpathSync, 'native', (value, ...rest) => value === f.client.clientPath ? fault() : realpathNative(value, ...rest));
+  };
+  const gate = deferred(); const entered = deferred();
+  const strict = guard.withMutation(f.client, async () => { entered.resolve(); await gate.promise; });
+  await entered.promise;
+  for (const [operation, code] of faults) {
+    inject(operation, code);
+    await assert.rejects(guard.withMutation(f.client, () => assert.fail('a fallback key bypassed a pack transaction'), { proof: 'none' }),
+      { code: 'CLIENT_RUNNING' }, `${operation} ${code}`);
+    t.mock.restoreAll();
+  }
+  gate.resolve(); await strict;
+  for (const [operation, code] of faults) {
+    inject(operation, code);
+    assert.equal(await guard.withMutation(f.client, () => 'synced', { proof: 'none' }), 'synced', `${operation} ${code}`);
+    assert.equal(f.leaseIds.at(-1), givenKey);
+    const launch = await guard.beginLaunch(f.client, { proof: 'none' });
+    assert.equal(f.leaseIds.at(-1), givenKey); await launch.abortBeforeSpawn();
+    if (operation === 'realpath') await assert.rejects(guard.withMutation(f.client, () => assert.fail('strict proof without a canonical folder')), { code });
+    t.mock.restoreAll();
+  }
+  assert.equal(f.inspections(), 1, 'only the strict holder scanned processes');
+  assert.deepEqual(f.records(), []);
+});
+
+test('a lenient launch still needs the client folder to exist', async t => {
+  const f = fixture(t); const guard = f.makeGuard();
+  const missing = { clientId: 'missing', clientPath: path.join(f.root, 'missing-client') };
+  await assert.rejects(guard.beginLaunch(missing, { proof: 'none' }), { code: 'ENOENT' });
+  assert.deepEqual(f.leaseIds, []);
+});
+
+test('a normal client keeps its key in both proof modes', async t => {
+  const f = fixture(t); const guard = f.makeGuard();
+  const expected = folderKey(path.join(fs.realpathSync.native(path.dirname(f.client.clientPath)), path.basename(f.client.clientPath)));
+  await guard.withMutation(f.client, () => {});
+  assert.equal(f.leaseIds.at(-1), expected);
+  await guard.withMutation(f.client, () => {}, { proof: 'none' });
+  assert.equal(f.leaseIds.at(-1), expected);
+  const launch = await guard.beginLaunch(f.client); await launch.abortBeforeSpawn();
+  assert.equal(f.record().key, expected);
+  assert.equal(path.basename(f.records()[0], '.json'), expected);
+});
+
+test('only exclusive pack mutations are reported as active work', async t => {
+  const f = fixture(t); const guard = f.makeGuard();
+  assert.deepEqual(guard.listActiveMutations(), []);
+  const key = folderKey(fs.realpathSync.native(f.client.clientPath));
+  const gate = deferred(); const entered = deferred();
+  const strict = guard.withMutation(f.client, async () => { entered.resolve(); await gate.promise; });
+  await entered.promise;
+  assert.deepEqual(guard.listActiveMutations(), [`client-mutation:${key}`]);
+  gate.resolve(); await strict;
+  assert.deepEqual(guard.listActiveMutations(), []);
+  const sharedGate = deferred(); const sharedEntered = deferred();
+  const shared = guard.withMutation(f.client, async () => { sharedEntered.resolve(); await sharedGate.promise; }, { proof: 'none' });
+  await sharedEntered.promise;
+  assert.deepEqual(guard.listActiveMutations(), [], 'ordinary client writers never block an app update');
+  sharedGate.resolve(); await shared;
+  const launch = await guard.beginLaunch(f.client);
+  assert.deepEqual(guard.listActiveMutations(), [], 'a game session is not an unfinished change');
+  await launch.abortBeforeSpawn();
+});
+
+test('an unknown proof mode is refused before any hold', async t => {
+  const f = fixture(t); const guard = f.makeGuard();
+  await assert.rejects(guard.withMutation(f.client, () => assert.fail('unknown proof admitted'), { proof: 'lenient' }), { code: 'RECOVERY_REQUIRED' });
+  await assert.rejects(guard.beginLaunch(f.client, { proof: 'lenient' }), { code: 'RECOVERY_REQUIRED' });
+  assert.deepEqual(f.leaseIds, []);
 });

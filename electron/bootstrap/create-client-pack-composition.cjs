@@ -113,6 +113,7 @@ function createClientPackComposition(input) {
   const managementClient = new ManagementPackClient({ sessionBroker: managementSessionBroker, clock: sessionClock });
   const clientPackService = new ClientPackService({ resolveClient, managementClient, candidatePreparer: clientCandidatePreparer,
     sourceResolver, artifactAcquisition, archiveInspector, processGuard, transaction, stateStore, runtimeInstaller,
+    listServerPaths: () => getInstances().filter(i => i?.type === 'server' && typeof i.path === 'string' && path.isAbsolute(i.path)).map(i => i.path),
     reparseInspector, clock: () => clock.now() });
   const clientPackIntegration = createClientPackIntegration({ resolveClient, resolveClientByPath,
     processGuard, transaction, stateStore, managementClient, clientPackService });

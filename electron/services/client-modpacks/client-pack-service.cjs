@@ -1,13 +1,22 @@
 const crypto = require('node:crypto');
+const fsPromises = require('node:fs/promises');
+const path = require('node:path');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { normalizeRuntimeTuple } = require('../modpacks/contracts.cjs');
 const { captureServerDirectoryCopySource } = require('../modpack-lifecycle/server-directory-identity.cjs');
+const { HOST_UNREACHABLE_REASON } = require('../management-session-transport.cjs');
 const { normalizeCompanionDescriptor } = require('./companion-contracts.cjs');
 const { planOwnership } = require('./client-pack-state.cjs');
 const { singleClientArchive } = require('./client-archive-source.cjs');
 const fail = (code = 'INVALID_REQUEST', cause) => new ModpackError(code,
   code === 'CANCELLED' ? 'The matching client pack request was cancelled' : 'The matching client pack operation could not be completed', { cause });
+const SEPARATE_FOLDERS = 'This client folder and a registered server folder are inside each other. Put the client and the server in separate folders, then retry.';
+const SAME_FOLDER = 'This client folder is also a registered server folder. Put the client and the server in separate folders, then retry.';
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+function inside(root, value) {
+  const relative = path.relative(root, value);
+  return !relative || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
+}
 const RUNTIME_ROOTS = new Set(['versions', 'libraries', 'assets', 'java', 'natives']);
 function nonRuntimeFiles(snapshot) {
   return snapshot.entries.filter(entry => entry.type === 'file' && !RUNTIME_ROOTS.has(entry.pathKey.split('/')[0]) && entry.pathKey !== '.minecraft-core-state/runtime.json')
@@ -21,15 +30,15 @@ function request(value, keys, required = keys) {
 function cancelled(signal) { if (signal?.aborted) throw fail('CANCELLED'); }
 function sameRuntime(a, b) { return equal(normalizeRuntimeTuple(a), normalizeRuntimeTuple(b)); }
 class ClientPackService {
-  constructor({ resolveClient, managementClient, candidatePreparer, sourceResolver, artifactAcquisition, archiveInspector,
+  constructor({ resolveClient, listServerPaths, managementClient, candidatePreparer, sourceResolver, artifactAcquisition, archiveInspector,
     processGuard, transaction, stateStore, runtimeInstaller, reparseInspector, clock = Date.now } = {}) {
-    if (typeof resolveClient !== 'function') throw fail();
+    if (typeof resolveClient !== 'function' || typeof listServerPaths !== 'function') throw fail();
     for (const [object, methods] of [[managementClient, ['readRequirement']], [candidatePreparer, ['inspect', 'prepare', 'release', 'forgetInspection']],
       [sourceResolver, ['resolveArtifactSetPlan']], [artifactAcquisition, ['downloadSet']], [archiveInspector, ['inspectArchive']],
       [archiveInspector?.materializer?.workspaceRegistry, ['releaseOwner']], [processGuard, ['withMutation']],
-      [transaction, ['stage', 'seal', 'publish', 'abandon', 'status', 'recover', 'cleanup', 'candidatePathFor']], [stateStore, ['read']],
+      [transaction, ['stage', 'seal', 'publish', 'abandon', 'status', 'recover', 'cleanup', 'candidatePathFor']], [stateStore, ['read', 'assertPublishable']],
       [runtimeInstaller, ['reserveOperation', 'releaseReservedOperation', 'prepare', 'verify', 'awaitQuiescence', 'forgetOperation']]]) for (const method of methods) if (typeof object?.[method] !== 'function') throw fail();
-    Object.assign(this, { resolveClient, managementClient, candidatePreparer, sourceResolver, artifactAcquisition, archiveInspector, processGuard, transaction, stateStore, runtimeInstaller, reparseInspector, clock });
+    Object.assign(this, { resolveClient, listServerPaths, managementClient, candidatePreparer, sourceResolver, artifactAcquisition, archiveInspector, processGuard, transaction, stateStore, runtimeInstaller, reparseInspector, clock });
     this.plans = new Map(); this.operations = new Map(); this.closed = false;
   }
   async _target(clientId) {
@@ -61,6 +70,24 @@ class ClientPackService {
     operation.promise = Promise.resolve().then(() => { progress({ phase: 'preparing' }); cancelled(controller.signal); return work({ signal: controller.signal, deadline: options.deadline, onProgress: progress, operationId }); })
       .finally(() => { this.operations.delete(operationId); options.signal?.removeEventListener('abort', abort); });
     return operation.promise;
+  }
+  // Publication swaps the whole client folder, so a registered server folder must
+  // never be the client, inside it or around it. Servers registered through a
+  // junction or SUBST spelling are compared by their canonical spelling too; a
+  // network share stays a share when canonicalised, so it is compared as is.
+  async _assertSeparateFromServers(clientPath) {
+    const servers = await this.listServerPaths();
+    if (!Array.isArray(servers)) throw fail('CLIENT_PACK_UNAVAILABLE');
+    const client = path.resolve(clientPath);
+    for (const serverPath of servers) {
+      if (typeof serverPath !== 'string' || !path.isAbsolute(serverPath)) continue;
+      const spellings = [path.resolve(serverPath)];
+      if (!/^[\\/]{2}/u.test(serverPath)) {
+        try { spellings.push(await fsPromises.realpath(spellings[0])); } catch { /* A missing server folder is compared as registered. */ }
+      }
+      if (spellings.some(server => !path.relative(server, client))) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', SAME_FOLDER);
+      if (spellings.some(server => inside(server, client) || inside(client, server))) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', SEPARATE_FOLDERS);
+    }
   }
   async _requirement(clientId, options = {}) {
     const { descriptor, binding } = await this.managementClient.readRequirement(clientId, options);
@@ -108,6 +135,9 @@ class ClientPackService {
       if (this.plans.size >= 4) throw fail('OPERATION_IN_PROGRESS');
       const status = await this.transaction.status(target);
       if (status && !['committed', 'abandoned'].includes(status.phase)) throw fail('RECOVERY_REQUIRED');
+      // Refuse folders a pack can never publish into before any download or staging.
+      await this.stateStore.assertPublishable(target.clientPath);
+      await this._assertSeparateFromServers(target.clientPath);
       const { descriptor, binding } = await this._requirement(value.clientId, { signal: operation.signal, deadline: operation.deadline });
       if (descriptor?.status !== 'ready') throw fail('CLIENT_PACK_UNAVAILABLE');
       // Recheck/reserve after the awaited requirement lookup. In-flight previews
@@ -149,6 +179,8 @@ class ClientPackService {
         return await this.processGuard.withMutation(target, async () => {
           let context; let runtimeStarted = false; let publicationStarted = false; let reservationAttempted = false; let cleanupAttempted = false;
           try {
+            // A server may have been registered inside or around the client since review.
+            await this._assertSeparateFromServers(target.clientPath);
             if (!equal((await this._requirement(value.clientId, { signal: operation.signal, deadline: operation.deadline, expectedBinding: plan.binding })).descriptor, plan.descriptor)) throw fail('PLAN_STALE');
             await this._resolved(plan.descriptor, operation); cancelled(operation.signal);
             reservationAttempted = true;
@@ -273,7 +305,16 @@ class ClientPackService {
         }
         cancelled(operation.signal);
         operation.onProgress({ phase: 'checking-requirement' });
-        descriptor = (await this._requirement(value.clientId, { signal: operation.signal, deadline: operation.deadline })).descriptor;
+        try {
+          descriptor = (await this._requirement(value.clientId, { signal: operation.signal, deadline: operation.deadline })).descriptor;
+        } catch (cause) {
+          // A host that gave no HTTP response leaves the requirement unknown. That is
+          // reported only for a client without a matching pack; any reply refuses.
+          if (!(cause instanceof ModpackError) || cause.code !== 'CLIENT_PACK_UNAVAILABLE' || cause.reason !== HOST_UNREACHABLE_REASON ||
+              await this.stateStore.read(target.clientPath) !== null) throw cause;
+          cancelled(operation.signal);
+          return deepFreeze({ clientId: value.clientId, status: 'requirement-unavailable', verified: false, descriptor: null });
+        }
         cancelled(operation.signal);
         const result = await this._verify(target, descriptor, operation);
         cancelled(operation.signal);
