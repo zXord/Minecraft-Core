@@ -6,7 +6,20 @@ Updated 13 October 2026, Asia/Riyadh. **Not release ready.** This is the restart
 
 The user explicitly cancelled Microsoft sign-in and authenticated gameplay testing. **Do not log in, reuse credentials, ask for sign-in, or run authenticated launch/join/rejoin tests.** These checks are **excluded by user request, not passed and no longer waiting on user input**. Continue only the remaining non-authentication checks on disposable QA instances. Older sign-in handoff instructions below are historical and superseded.
 
-## Latest native cancellation/review checkpoint — 13 October 13:16
+## Latest native retry checkpoint — 13 October 17:45
+
+The user authorized continuing the d1 retry. Normal mouse/keyboard use exposed two genuine defects; neither is a passed test:
+
+- At about 17:32, the four-hour-old review's Start was authoritatively classified **not started**, but its button incorrectly remained **Checking Start outcome…**. Expiry is plausible from the two-hour review lifetime, but no specific expiry error was recorded. No new job was created. A bounded renderer correction is under verification: the exact old review stays disabled as **Fresh review required**, with explicit refresh and no automatic Start or destination release.
+- A fresh native review of the same empty d1 folder succeeded with the same exact Adrenaline release, 3 GiB, local-only25577 and 27 additions/zero changes/removals. Install was clicked once, with EULA accepted and post-install running unchecked. **`op2-5b06318da660852536930bfc477ebfe3` failed at 17:42:18.717**: `INVALID_REQUEST`, `acquire mutation`, before extraction. The new reservation's instance ID differs from the cancelled attempt. The coordinator still retains the old cancelled incarnation's path alias, conflicting with the intentionally fresh reservation ID. A safe abandoned-incarnation retirement integration is being implemented; global alias rebinding will not be enabled.
+
+The second failure has `cleanupPending:false` but **destinationDisposition:"held"** and no active/history recovery pair. Do not call it released or manually delete its records. At 17:45 the d1 directory was still empty, with the exact captured directory identity, no candidate/failed siblings, and the previous cancellation's history hash unchanged. The pre-acquisition failure settlement gap is part of the bounded correction.
+
+The normal app remains open on this failed operation while source/regression work proceeds. No blind retry, profile/journal rewrite, real-instance access, a1 access, authentication, push or publication. Full same-folder installation and uninstall remain **unpassed**. This supersedes the pending-approval wording below.
+
+Renderer correction verification at 17:58: root ran the complete launch/reconciliation browser suite, **58/58 passed (38.5 s)**, including delayed authoritative closure and a late response after same-mounted-wizard review replacement. Independent final three-file review found no findings. Root production renderer build passed in **11.13 s**. The manual exact-status button now reacts to read completion as well. These are supporting regression/build results; the corrected renderer is not yet deployed to the normal app, and backend/full-suite/native retry gates remain pending.
+
+## Historical native cancellation/review checkpoint — 13 October 13:16
 
 After the user's action-time approval, normal Install started the prepared Adrenaline `26.5.1+mc26.2.fabric` setup on the **new, previously empty d1 destination only**: `C:\Users\s3eed\SynologyDrive\Desktop\ET\Minecraft\Codex QA Modrinth 2026-10-13-d1`. Minecraft 26.2/Fabric 0.19.5/Java 25, 3 GiB and local-only port 25577 were retained; post-install running was not selected. Ordinary Cancel was clicked during staging, before publication. Operation `op2-192c7b884a48e8f09c2649d09cd8c7d6` settled at **13:01:30.886 Asia/Riyadh**. The native result showed **Cancelled / Operation cancelled**, retained-download actions and Choose another asset, with no visible Recovery needed state. This is a cancellation pass, not a successful installation or gameplay pass.
 
