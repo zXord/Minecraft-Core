@@ -10,8 +10,19 @@ const { fixtureAuthority, fixtureDurableFs, fixtureRegistry, fixtureRecovery,
 const { computePreflightPlanFingerprint } = require('../../electron/services/modpacks/planning/plan-fingerprint.cjs');
 const {
   ProductionMutationRuntime,
+  candidateWorldDirectories,
   scanCandidateManifest
 } = require('../../electron/services/modpack-lifecycle/production-mutation-runtime.cjs');
+const {
+  captureExistingUnmanagedTarget,
+  captureReservedTarget,
+  consumeReservedTarget
+} = require('../../electron/services/modpack-lifecycle/reserved-target-authority.cjs');
+const { copyServerDirectoryContents } = require('../../electron/services/modpack-lifecycle/server-directory-identity.cjs');
+const { planOwnership } = require('../../electron/services/modpacks/planning/ownership-planner.cjs');
+const { scanManifest } = require('../../electron/services/modpacks/planning/production-candidate-preparer.cjs');
+const { createProductionServerSnapshot } = require('../../electron/services/modpacks/planning/production-server-snapshot.cjs');
+const { ModpackStateRepository } = require('../../electron/services/modpacks/state/modpack-state-repository.cjs');
 const { validatePreparedRuntime } = require('../../electron/services/loader-install-service.cjs');
 const { ServerHealthValidator } = require('../../electron/services/server-health-validator.cjs');
 const {
@@ -1328,5 +1339,705 @@ test('existing-server validation has no fallible intent persist after the transa
   assert.deepEqual(context.transactionCalls.filter(call => call.kind === 'healthy'), [
     { kind: 'healthy', operationKind: 'detach', validateLive: true }
   ]);
+  });
+});
+
+// Files the user keeps. A keep-both choice leaves the user's file at its path and
+// puts the pack's copy at the reviewed alternate path. A world folder named by
+// level-name holds the server's world exactly like the default world folder.
+
+const OWNERSHIP_NOW = '2026-08-02T00:00:00.000Z';
+const DEFAULT_WORLD_DIRECTORIES = Object.freeze(['world', 'world_nether', 'world_the_end']);
+const OWNERSHIP_SOURCE = Object.freeze({
+  provider: 'modrinth', projectId: 'project-one', versionId: 'version-one', version: '1.0.0', title: 'Pack'
+});
+// What Java and a Forge-style loader installer write while the exact runtime is prepared.
+const OWNERSHIP_JAVA_FILE = 'java/bin/java.exe';
+const OWNERSHIP_LOADER_FILES = Object.freeze({
+  'libraries/net/minecraft/server/1.20.1/server-1.20.1.jar': 'minecraft server bytes',
+  'run.bat': '@echo off\r\njava @user_jvm_args.txt %*\r\n',
+  'user_jvm_args.txt': '# Add custom JVM arguments here\n'
+});
+const KEPT_BYTES = Buffer.from('mine=true\n');
+const PACK_COPY_BYTES = Buffer.from('pack=true\n');
+const plainReparseInspector = Object.freeze({ async isReparsePoint() { return false; } });
+
+function bytesSha256(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+function temporaryRoot(t, prefix) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+function writeTree(root, files) {
+  for (const [relative, bytes] of Object.entries(files)) {
+    const filePath = path.join(root, ...relative.split('/'));
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, bytes);
+  }
+}
+
+function liveFile(relativePath, bytes) {
+  return {
+    path: relativePath, pathKey: relativePath.toLocaleLowerCase('en-US'), type: 'file',
+    sha256: bytesSha256(bytes), size: String(Buffer.byteLength(bytes)), origin: 'user'
+  };
+}
+
+function packFile(relativePath, bytes, role) {
+  return {
+    path: relativePath, pathKey: relativePath.toLocaleLowerCase('en-US'), origin: 'pack',
+    managementPolicy: 'replaceable-managed', role, installedHash: bytesSha256(bytes),
+    size: String(Buffer.byteLength(bytes)), priorBaseline: null
+  };
+}
+
+function ownershipOf(manifest, pathKey) {
+  const entry = manifest.entries.find(item => item.pathKey === pathKey);
+  return entry && {
+    origin: entry.origin, managementPolicy: entry.managementPolicy, role: entry.role,
+    installedHash: entry.installedHash, priorBaseline: entry.priorBaseline
+  };
+}
+
+function decisionFor(ownershipPlan, pathKey) {
+  const action = ownershipPlan.actions.find(item => item.pathKey === pathKey);
+  return action && [action.action, action.reason];
+}
+
+// 'Review uninstall': the installed manifest against an empty pack with every
+// blocked file kept, exactly as the production planning adapter plans it.
+function uninstallReview(oldManifest, liveSnapshot) {
+  const input = {
+    oldManifest,
+    liveSnapshot,
+    incomingManifest: { schemaVersion: 1, installationId: 'uninstall-empty', entries: [] }
+  };
+  const preview = planOwnership({ ...input, conflictChoices: {} });
+  const paths = Object.fromEntries(preview.blocked.map(action => [action.path, { choice: 'keep-mine' }]));
+  return planOwnership({ ...input, conflictChoices: { paths, categories: {} } });
+}
+
+// The manifest a run records after the user chose keep-both for config/a.toml.
+async function keepBothCandidateManifest(t, oldManifest = null) {
+  const candidatePath = path.join(temporaryRoot(t, 'minecraft-core-keep-both-'), 'candidate');
+  const incomingManifest = {
+    schemaVersion: 1,
+    installationId: 'installation-keep-both',
+    entries: [packFile('config/a.toml', PACK_COPY_BYTES, 'configuration')]
+  };
+  const ownershipPlan = planOwnership({
+    oldManifest,
+    liveSnapshot: {
+      kind: 'existing', worldDirectories: [...DEFAULT_WORLD_DIRECTORIES], protectedPaths: [],
+      entries: [liveFile('config/a.toml', KEPT_BYTES)]
+    },
+    incomingManifest,
+    conflictChoices: { paths: { 'config/a.toml': { choice: 'keep-both', alternatePath: 'config/a.pack.toml' } } }
+  });
+  assert.deepEqual(ownershipPlan.actions.map(action => [action.pathKey, action.action, action.incomingPath]), [
+    ['config/a.toml', 'keep-both', 'config/a.pack.toml']
+  ]);
+  // The run leaves the user's bytes at the original path and copies the pack's
+  // file to the reviewed alternate path.
+  writeTree(candidatePath, { 'config/a.toml': KEPT_BYTES, 'config/a.pack.toml': PACK_COPY_BYTES });
+  return scanCandidateManifest({
+    candidatePath,
+    installationId: 'installation-keep-both',
+    incomingManifest,
+    oldManifest,
+    ownershipPlan,
+    reparseInspector: plainReparseInspector
+  });
+}
+
+test('a keep-both choice records the kept file as the user\'s and the pack copy at the alternate path as the pack\'s', async t => {
+  const packCopy = {
+    origin: 'pack', managementPolicy: 'replaceable-managed', role: 'configuration',
+    installedHash: bytesSha256(PACK_COPY_BYTES), priorBaseline: null
+  };
+  const adopted = await keepBothCandidateManifest(t);
+  assert.deepEqual(ownershipOf(adopted, 'config/a.toml'), {
+    origin: 'user', managementPolicy: 'protected', role: 'other',
+    installedHash: bytesSha256(KEPT_BYTES), priorBaseline: null
+  });
+  assert.deepEqual(ownershipOf(adopted, 'config/a.pack.toml'), packCopy);
+
+  // During an update the kept file was the pack's earlier version, changed by the user.
+  const earlierBytes = Buffer.from('pack=false\n');
+  const updated = await keepBothCandidateManifest(t, {
+    schemaVersion: 1,
+    installationId: 'installation-earlier',
+    entries: [packFile('config/a.toml', earlierBytes, 'configuration')]
+  });
+  assert.deepEqual(ownershipOf(updated, 'config/a.toml'), {
+    origin: 'user', managementPolicy: 'protected', role: 'other',
+    installedHash: bytesSha256(KEPT_BYTES), priorBaseline: bytesSha256(earlierBytes)
+  });
+  assert.deepEqual(ownershipOf(updated, 'config/a.pack.toml'), packCopy);
+});
+
+test('later update and uninstall reviews never replace or remove the file kept by a keep-both choice', async t => {
+  const manifest = await keepBothCandidateManifest(t);
+  const liveSnapshot = {
+    kind: 'existing', worldDirectories: [...DEFAULT_WORLD_DIRECTORIES], protectedPaths: [],
+    entries: [liveFile('config/a.pack.toml', PACK_COPY_BYTES), liveFile('config/a.toml', KEPT_BYTES)]
+  };
+
+  const update = planOwnership({
+    oldManifest: manifest,
+    liveSnapshot,
+    incomingManifest: {
+      schemaVersion: 1,
+      installationId: 'installation-next',
+      entries: [packFile('config/a.toml', Buffer.from('pack=next\n'), 'configuration')]
+    },
+    conflictChoices: {}
+  });
+  assert.deepEqual(decisionFor(update, 'config/a.toml'), ['conflict', 'protected-managed-path']);
+
+  const uninstall = uninstallReview(manifest, liveSnapshot);
+  assert.deepEqual(uninstall.blocked, []);
+  assert.deepEqual(uninstall.removed.map(action => action.pathKey), ['config/a.pack.toml']);
+  assert.deepEqual(decisionFor(uninstall, 'config/a.toml'), ['preserve-orphan', 'user-owned-content-preserved']);
+});
+
+test('pack files inside the world folder named by level-name are recorded preserve-after-seed', async t => {
+  const root = temporaryRoot(t, 'minecraft-core-custom-world-');
+  const regionBytes = Buffer.from('pack region');
+  const modBytes = Buffer.from('pack mod');
+  const incomingManifest = {
+    schemaVersion: 1,
+    installationId: 'installation-custom-world',
+    entries: [packFile('custom/region/r.0.0.mca', regionBytes, 'other'), packFile('mods/pack.jar', modBytes, 'mod')]
+  };
+  const recorded = async (candidatePath, worldDirectories) => {
+    const manifest = await scanCandidateManifest({
+      candidatePath,
+      installationId: 'installation-custom-world',
+      incomingManifest,
+      worldDirectories,
+      reparseInspector: plainReparseInspector
+    });
+    return [ownershipOf(manifest, 'custom/region/r.0.0.mca'), ownershipOf(manifest, 'mods/pack.jar')];
+  };
+  const expected = [
+    {
+      origin: 'pack', managementPolicy: 'preserve-after-seed', role: 'other',
+      installedHash: bytesSha256(regionBytes), priorBaseline: null
+    },
+    {
+      origin: 'pack', managementPolicy: 'replaceable-managed', role: 'mod',
+      installedHash: bytesSha256(modBytes), priorBaseline: null
+    }
+  ];
+
+  // A new server: the pack's own server.properties names the world folder.
+  const newCandidate = path.join(root, 'new');
+  writeTree(newCandidate, {
+    'server.properties': 'motd=Pack\nlevel-name=custom\n',
+    'custom/region/r.0.0.mca': regionBytes,
+    'mods/pack.jar': modBytes
+  });
+  const newWorlds = candidateWorldDirectories(newCandidate, DEFAULT_WORLD_DIRECTORIES);
+  assert.deepEqual(newWorlds, ['custom', 'world', 'world_nether', 'world_the_end']);
+  assert.deepEqual(await recorded(newCandidate, newWorlds), expected);
+
+  // An existing server: its live server.properties named the world folder when
+  // the run was revalidated.
+  const existingCandidate = path.join(root, 'existing');
+  writeTree(existingCandidate, { 'custom/region/r.0.0.mca': regionBytes, 'mods/pack.jar': modBytes });
+  const existingWorlds = candidateWorldDirectories(existingCandidate, ['custom']);
+  assert.deepEqual(existingWorlds, ['custom']);
+  assert.deepEqual(await recorded(existingCandidate, existingWorlds), expected);
+});
+
+test('candidate world folders ignore an unreadable or invalid level-name and invalid reviewed folders', t => {
+  const root = temporaryRoot(t, 'minecraft-core-candidate-worlds-');
+  const defaults = [...DEFAULT_WORLD_DIRECTORIES];
+  let candidates = 0;
+  const worldsFor = (properties, fsApi) => {
+    candidates += 1;
+    const candidatePath = path.join(root, `candidate-${candidates}`);
+    fs.mkdirSync(candidatePath);
+    if (properties !== null) fs.writeFileSync(path.join(candidatePath, 'server.properties'), properties);
+    return candidateWorldDirectories(candidatePath, DEFAULT_WORLD_DIRECTORIES, fsApi);
+  };
+
+  assert.deepEqual(worldsFor(null), defaults);
+  assert.deepEqual(worldsFor('motd=Pack\n'), defaults);
+  for (const levelName of ['', '../outside', 'C:/outside', 'worlds/../outside', 'CON', 'world.']) {
+    assert.deepEqual(worldsFor(`level-name=${levelName}\n`), defaults, levelName);
+  }
+  assert.deepEqual(worldsFor(Buffer.concat([
+    Buffer.from('level-name=custom\n'),
+    Buffer.alloc(1024 * 1024, 0x23)
+  ])), defaults, 'larger than 1 MiB');
+  const unreadable = {
+    ...fs,
+    openSync() { throw Object.assign(new Error('access denied'), { code: 'EACCES' }); },
+    readFileSync() { throw Object.assign(new Error('access denied'), { code: 'EACCES' }); }
+  };
+  assert.deepEqual(worldsFor('level-name=custom\n', unreadable), defaults, 'unreadable');
+  const directoryCandidate = path.join(root, 'directory');
+  fs.mkdirSync(path.join(directoryCandidate, 'server.properties'), { recursive: true });
+  assert.deepEqual(candidateWorldDirectories(directoryCandidate, DEFAULT_WORLD_DIRECTORIES), defaults, 'not a file');
+
+  // The last level-name wins, and Minecraft falls back to ISO-8859-1 for bytes
+  // that are not UTF-8.
+  assert.deepEqual(worldsFor(Buffer.from('level-name=Welt\nlevel-name=W\u00e9lt\n', 'latin1')),
+    [...defaults, 'w\u00e9lt'].sort((left, right) => left.localeCompare(right, 'en-US')));
+  assert.deepEqual(worldsFor('level-name=Worlds/Survival\n'),
+    [...defaults, 'worlds/survival'].sort((left, right) => left.localeCompare(right, 'en-US')));
+  assert.deepEqual(candidateWorldDirectories(path.join(root, 'missing'), [
+    'World', null, 7, '../outside', 'C:\\outside', 'Worlds\\Survival', 'world'
+  ]), ['world', 'worlds/survival']);
+});
+
+function ownershipDurableFs() {
+  return {
+    flushDirectory() {},
+    async flushDirectoryAsync() {},
+    writeFileAtomic(filePath, bytes) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); fs.writeFileSync(filePath, bytes); },
+    async writeFileAtomicAsync(filePath, bytes) { fs.mkdirSync(path.dirname(filePath), { recursive: true }); fs.writeFileSync(filePath, bytes); },
+    renameDurable(source, destination) { fs.renameSync(source, destination); },
+    async renameDurableAsync(source, destination) { fs.renameSync(source, destination); },
+    readFileBounded(filePath, options = {}) {
+      if (options.allowMissing && !fs.existsSync(filePath)) return null;
+      return fs.readFileSync(filePath);
+    },
+    async readFileBoundedAsync(filePath, options = {}) {
+      if (options.allowMissing && !fs.existsSync(filePath)) return null;
+      return fs.readFileSync(filePath);
+    },
+    writeJsonAtomic(filePath, value) {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+    },
+    async writeJsonAtomicAsync(filePath, value) {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+    }
+  };
+}
+
+// The production runtime over the real state repository and server snapshot.
+// Recovery durability, Java, the loader installer and health are doubles.
+function ownershipRuntime({ jobRoot, authority, recoveryRegistry, stateRepository, ...dependencies }) {
+  const runtimePolicy = {
+    suspend() { return { held: true }; },
+    async ensureStopped() { return { alreadyStopped: true }; },
+    async adoptValidatedHandoff() { return { adopted: true }; },
+    restoreAutoRestart() { return { restored: true }; }
+  };
+  const recoveryServices = {
+    registry: recoveryRegistry,
+    runtimeWriterAuthority: {
+      async run(_jobId, work) { return work(); },
+      async assertRecoveryAllowed(record) { return record; }
+    },
+    runtimePolicy
+  };
+  recoveryServices.recoveryService = fixtureRecovery({
+    authority, registry: recoveryRegistry, durableFs: fixtureDurableFs(jobRoot), runtimePolicy,
+    reparseInspector: plainReparseInspector
+  });
+  return new ProductionMutationRuntime({
+    coordinator: authority.coordinator,
+    clock: () => new Date(OWNERSHIP_NOW),
+    durableFsFactory: ownershipDurableFs,
+    fsApi: fs,
+    healthValidator: {
+      async validateCandidate() { return { evidence: { ok: true } }; },
+      async validateLive() { return { evidence: { ok: true }, handoff: null }; }
+    },
+    planValidator() {},
+    prepareRuntime: async ({ targetPath }) => {
+      writeTree(targetPath, OWNERSHIP_LOADER_FILES);
+      return { prepared: true };
+    },
+    javaManagerFactory(runtimeTarget) {
+      return {
+        async ensureJava() {
+          writeTree(runtimeTarget, { [OWNERSHIP_JAVA_FILE]: 'trusted java' });
+          return { success: true, javaPath: path.join(runtimeTarget, ...OWNERSHIP_JAVA_FILE.split('/')) };
+        }
+      };
+    },
+    recoveryServices,
+    releaseTrackingStore: { async list() { return []; }, async remove() { return false; }, async upsert() {} },
+    revisionPublisher: { async publishOnce() { return { published: true }; } },
+    reparseInspector: plainReparseInspector,
+    availableBytes: async () => '999999999999',
+    stateRepository,
+    store: { get: key => (key === 'instances' ? [] : null), set() {} },
+    instanceContext: { updateInstances() {} },
+    userDataPath: jobRoot,
+    ...dependencies
+  });
+}
+
+function sourcePlan({ kind, serverKind, instanceId, expectedContentRevision, ownership, conflictChoices, paths }) {
+  return {
+    fingerprint: 'a'.repeat(64),
+    operation: { kind, serverKind, instanceId, expectedContentRevision },
+    source: {
+      provider: 'modrinth', projectId: OWNERSHIP_SOURCE.projectId,
+      versionId: OWNERSHIP_SOURCE.versionId, version: OWNERSHIP_SOURCE.version
+    },
+    artifact: { setDigest: 'b'.repeat(64) },
+    runtime: CURRENT_RUNTIME,
+    inspection: { fingerprint: 'c'.repeat(64) },
+    ownership,
+    selections: {
+      optionalFileIds: [], conflictChoices: conflictChoices || { paths: {}, categories: {} },
+      maxRam: 4, serverPort: 25601, networkAccess: 'loopback'
+    },
+    preconditions: {
+      ...(paths === undefined ? {} : { paths }),
+      artifactPartsFingerprint: 'd'.repeat(64), inspectionFingerprint: 'e'.repeat(64),
+      ownershipFingerprint: 'f'.repeat(64), selectionsFingerprint: '1'.repeat(64),
+      restorePointsFingerprint: '2'.repeat(64), assetPatternFingerprint: '3'.repeat(64),
+      acceptedMappingFingerprint: '4'.repeat(64), operationFingerprint: '5'.repeat(64), minimumAvailableBytes: '1'
+    }
+  };
+}
+
+function ownershipStateRepository(root) {
+  return new ModpackStateRepository({ fsApi: fs, durableFs: fixtureDurableFs(root), clock: () => new Date(OWNERSHIP_NOW) });
+}
+
+function ownershipSnapshot(stateRepository) {
+  return createProductionServerSnapshot({ fsApi: fs, reparseInspector: plainReparseInspector, stateRepository });
+}
+
+// Runs one reviewed source operation on an existing server through the
+// production runtime: revalidation against the stopped server, the private full
+// copy of the live folder, the reviewed file changes, Java and loader
+// preparation, the recorded ownership and the candidate state. Publication then
+// replaces the live folder with the candidate.
+async function runExistingSourceOperation({
+  root, jobId, operationKind, plan, executionRecord, serverPath, stateRepository, templatePath
+}) {
+  const jobRoot = path.join(root, jobId);
+  fs.mkdirSync(jobRoot, { recursive: true });
+  const recoveryRegistry = fixtureRegistry(jobRoot);
+  const authority = fixtureAuthority({
+    instanceId: plan.operation.instanceId, serverPath, jobId,
+    baseRevision: plan.operation.expectedContentRevision, registry: recoveryRegistry
+  });
+  let candidatePath = null;
+  const runtime = ownershipRuntime({
+    jobRoot,
+    authority,
+    recoveryRegistry,
+    stateRepository,
+    destinationReservations: { resolve() { return null; }, consume() { return true; }, release() { return true; } },
+    instanceResolver: { async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: false }; } },
+    planningAdapter: { getExecutionRecord() { return executionRecord; } },
+    snapshotServer: ownershipSnapshot(stateRepository),
+    workspaceRegistry: { resolveOwnedWorkspace({ id, kind }) { return { id, kind, path: templatePath }; } },
+    buildExistingCandidateFn: async context => {
+      candidatePath = context.candidatePath;
+      fs.mkdirSync(candidatePath);
+      await recordFixtureCandidate(recoveryRegistry, { ...context, candidatePath, reparseInspector: plainReparseInspector });
+      await copyServerDirectoryContents(serverPath, candidatePath, {
+        durableFs: { async flushDirectoryAsync() {} }, fsApi: fs, reparseInspector: plainReparseInspector
+      });
+      await context.applyIncoming({ candidatePath, jobId: context.jobId });
+      await context.stateRepository.writeCandidateAsync(candidatePath, context.candidateState);
+      return { candidatePath };
+    }
+  });
+  const resolved = { instanceId: plan.operation.instanceId, serverPath, priorRunning: false };
+  const choices = { acceptEula: false, startAfterInstall: false, restorePointId: null };
+  await authority.run(async lease => {
+    await runtime.revalidate({ jobId, plan, choices, resolved, lease });
+    await runtime.buildCandidate({ jobId, operationKind, plan, choices, restorePoint: null, resolved, lease });
+  });
+  fs.rmSync(serverPath, { recursive: true, force: true });
+  fs.renameSync(candidatePath, serverPath);
+}
+
+test('installing on an existing server with keep-both keeps the user\'s file through later update and uninstall', async t => {
+  const root = temporaryRoot(t, 'minecraft-core-keep-both-install-');
+  const serverPath = path.join(root, 'Server');
+  const keptText = 'Welcome to my server\n';
+  const packText = 'Welcome to the pack\n';
+  // A server Minecraft Core already runs without a modpack, as every v26.6.1
+  // server is. It and the pack both have motd.txt.
+  writeTree(serverPath, { 'motd.txt': keptText, 'server.properties': 'motd=mine\n', 'world/level.dat': 'my world' });
+  const jobId = 'job-keep-both';
+  const templatePath = path.join(root, jobId, 'template');
+  writeTree(templatePath, { 'motd.txt': packText, 'mods/pack.jar': 'pack mod bytes' });
+  const stateRepository = ownershipStateRepository(root);
+  const snapshotServer = ownershipSnapshot(stateRepository);
+  const incomingManifest = (await scanManifest(templatePath, 'installation-keep-both', {
+    reparseInspector: plainReparseInspector
+  })).manifest;
+  const reviewed = await snapshotServer({
+    currentState: null, operationKind: 'install', runtime: CURRENT_RUNTIME, serverKind: 'existing',
+    serverPath, unmanagedAdoption: true
+  });
+  const ownershipInput = { oldManifest: null, liveSnapshot: reviewed.liveSnapshot, incomingManifest };
+  assert.deepEqual(decisionFor(planOwnership({ ...ownershipInput, conflictChoices: {} }), 'motd.txt'),
+    ['conflict', 'user-path-collision']);
+  // The alternate path the guided review offers for keep-both.
+  const conflictChoices = { paths: { 'motd.txt': { choice: 'keep-both', alternatePath: 'motd.pack.txt' } }, categories: {} };
+  const ownership = planOwnership({ ...ownershipInput, conflictChoices });
+  await runExistingSourceOperation({
+    root,
+    jobId,
+    operationKind: 'install-existing',
+    plan: sourcePlan({
+      kind: 'install', serverKind: 'existing', instanceId: 'server-existing', expectedContentRevision: 0,
+      ownership, conflictChoices, paths: reviewed.pathPreconditions
+    }),
+    executionRecord: {
+      execution: { templateOutputId: 'output-template' },
+      incomingManifest,
+      inspectionResult: { classification: { kind: 'prepared-server-pack' } },
+      adoption: await captureExistingUnmanagedTarget({ targetPath: serverPath, fsApi: fs, reparseInspector: plainReparseInspector }),
+      reservation: null,
+      serverKind: 'existing',
+      source: { ...OWNERSHIP_SOURCE },
+      serverPath
+    },
+    serverPath,
+    stateRepository,
+    templatePath
+  });
+
+  assert.equal(fs.readFileSync(path.join(serverPath, 'motd.txt'), 'utf8'), keptText);
+  assert.equal(fs.readFileSync(path.join(serverPath, 'motd.pack.txt'), 'utf8'), packText);
+  const installed = stateRepository.read(serverPath);
+  assert.deepEqual(ownershipOf(installed.manifest, 'motd.txt'), {
+    origin: 'user', managementPolicy: 'protected', role: 'other',
+    installedHash: bytesSha256(keptText), priorBaseline: null
+  });
+  assert.deepEqual(ownershipOf(installed.manifest, 'motd.pack.txt'), {
+    origin: 'pack', managementPolicy: 'replaceable-managed', role: 'other',
+    installedHash: bytesSha256(packText), priorBaseline: null
+  });
+
+  const { liveSnapshot } = await snapshotServer({
+    currentState: installed, operationKind: 'upgrade', runtime: CURRENT_RUNTIME, serverKind: 'existing', serverPath
+  });
+  const nextTemplate = path.join(root, 'next-template');
+  writeTree(nextTemplate, { 'motd.txt': 'Welcome to the next pack\n', 'mods/pack.jar': 'pack mod bytes' });
+  const update = planOwnership({
+    oldManifest: installed.manifest,
+    liveSnapshot,
+    incomingManifest: (await scanManifest(nextTemplate, 'installation-next', { reparseInspector: plainReparseInspector })).manifest,
+    conflictChoices: {}
+  });
+  assert.deepEqual(decisionFor(update, 'motd.txt'), ['conflict', 'protected-managed-path']);
+
+  // 'Remove managed pack files' removes the pack's copy and keeps the user's file.
+  const uninstall = uninstallReview(installed.manifest, liveSnapshot);
+  assert.deepEqual(decisionFor(uninstall, 'motd.txt'), ['preserve-orphan', 'user-owned-content-preserved']);
+  assert.deepEqual(decisionFor(uninstall, 'motd.pack.txt'), ['remove', 'incoming-removed']);
+  const uninstallCandidate = path.join(root, 'uninstall-candidate');
+  fs.mkdirSync(uninstallCandidate);
+  await copyServerDirectoryContents(serverPath, uninstallCandidate, {
+    durableFs: { async flushDirectoryAsync() {} }, fsApi: fs, reparseInspector: plainReparseInspector
+  });
+  stateRepository.uninstallCandidate(uninstallCandidate, {
+    operationId: 'job-uninstall',
+    timestamp: OWNERSHIP_NOW,
+    contentRevision: installed.state.contentRevision + 1,
+    confirmation: uninstall.confirmation,
+    removePathKeys: uninstall.actions.filter(action => action.action === 'remove').map(action => action.pathKey),
+    restorePointId: 'restore-before-uninstall',
+    restorePointSha256: 'a'.repeat(64)
+  });
+  assert.equal(fs.readFileSync(path.join(uninstallCandidate, 'motd.txt'), 'utf8'), keptText);
+  assert.equal(fs.existsSync(path.join(uninstallCandidate, 'motd.pack.txt')), false);
+});
+
+test('a new server whose pack names a custom world folder records its world files preserve-after-seed', async t => {
+  const root = temporaryRoot(t, 'minecraft-core-custom-world-install-');
+  const targetPath = path.join(root, 'Reserved Server');
+  const templatePath = path.join(root, 'template');
+  const jobId = 'job-install-new';
+  const regionText = 'pack region bytes';
+  fs.mkdirSync(targetPath);
+  writeTree(templatePath, {
+    'Adventure/region/r.0.0.mca': regionText,
+    'mods/pack.jar': 'pack mod bytes',
+    'server.properties': 'motd=Pack\nlevel-name=Adventure\n'
+  });
+  const recoveryRegistry = fixtureRegistry(root);
+  const authority = fixtureAuthority({ instanceId: 'server-new', serverPath: targetPath, jobId, registry: recoveryRegistry });
+  const stateRepository = ownershipStateRepository(root);
+  const snapshotServer = ownershipSnapshot(stateRepository);
+  const incomingManifest = (await scanManifest(templatePath, 'installation-new', { reparseInspector: plainReparseInspector })).manifest;
+  const executionRecord = {
+    execution: { templateOutputId: 'output-template' },
+    incomingManifest,
+    inspectionResult: { classification: { kind: 'prepared-server-pack' } },
+    reservation: await captureReservedTarget({ targetPath, fsApi: fs, reparseInspector: plainReparseInspector }),
+    serverKind: 'new',
+    source: { ...OWNERSHIP_SOURCE },
+    serverPath: targetPath
+  };
+  const reviewed = await snapshotServer({
+    currentState: null, operationKind: 'install', runtime: CURRENT_RUNTIME, serverKind: 'new', serverPath: targetPath
+  });
+  const plan = sourcePlan({
+    kind: 'install', serverKind: 'new', instanceId: 'server-new', expectedContentRevision: 0,
+    ownership: planOwnership({ oldManifest: null, liveSnapshot: reviewed.liveSnapshot, incomingManifest, conflictChoices: {} })
+  });
+  let candidatePath = null;
+  const runtime = ownershipRuntime({
+    jobRoot: root,
+    authority,
+    recoveryRegistry,
+    stateRepository,
+    consumeReservedTargetFn: consumeReservedTarget,
+    destinationReservations: {
+      resolve(instanceId) {
+        return { instanceId, displayName: 'Reserved Server', targetPath, reservation: executionRecord.reservation };
+      },
+      consume() { return true; },
+      release() { return true; }
+    },
+    instanceResolver: { async resolveInstance(instanceId) { return { instanceId, serverPath: targetPath, priorRunning: false }; } },
+    planningAdapter: { getExecutionRecord() { return executionRecord; } },
+    snapshotServer,
+    workspaceRegistry: { resolveOwnedWorkspace({ id, kind }) { return { id, kind, path: templatePath }; } },
+    buildNewCandidateFn: async context => {
+      candidatePath = context.expectedPaths?.candidatePath || context.candidatePath;
+      fs.mkdirSync(candidatePath, { recursive: true });
+      await recordFixtureCandidate(recoveryRegistry, { ...context, candidatePath, reparseInspector: plainReparseInspector });
+      await context.materializeCandidate({ candidatePath, jobId: context.jobId });
+      await context.persistCandidateState({
+        candidatePath, candidateState: context.candidateState, jobId: context.jobId,
+        stateRepository: context.stateRepository
+      });
+      return { candidatePath };
+    }
+  });
+  const resolved = { instanceId: 'server-new', serverPath: targetPath, priorRunning: false };
+  const choices = { acceptEula: true, startAfterInstall: false, restorePointId: null };
+  await authority.run(async lease => {
+    await runtime.revalidate({ jobId, plan, choices, resolved, lease });
+    await runtime.buildCandidate({ jobId, operationKind: 'install-new', plan, choices, restorePoint: null, resolved, lease });
+  });
+  // Publication renames the candidate into place.
+  const serverPath = path.join(root, 'Server');
+  fs.renameSync(candidatePath, serverPath);
+
+  const { manifest } = stateRepository.read(serverPath);
+  assert.deepEqual(ownershipOf(manifest, 'adventure/region/r.0.0.mca'), {
+    origin: 'pack', managementPolicy: 'preserve-after-seed', role: 'other',
+    installedHash: bytesSha256(regionText), priorBaseline: null
+  });
+  assert.equal(ownershipOf(manifest, 'mods/pack.jar').managementPolicy, 'replaceable-managed');
+  // Playing saves the world. That is not managed-file damage.
+  writeTree(serverPath, { 'Adventure/region/r.0.0.mca': 'region saved while playing' });
+  const verification = await stateRepository.verifyManagedFiles(serverPath);
+  assert.deepEqual(verification.mismatches, []);
+  assert.equal(verification.healthy, true);
+});
+
+test('Repair keeps a played custom-named world that an earlier build recorded as replaceable pack files', async t => {
+  const root = temporaryRoot(t, 'minecraft-core-custom-world-repair-');
+  const serverPath = path.join(root, 'Server');
+  const packFiles = {
+    'custom/region/r.0.0.mca': 'pack region 0',
+    'custom/region/r.1.0.mca': 'pack region 1',
+    'mods/pack.jar': 'pack mod bytes'
+  };
+  writeTree(serverPath, { ...packFiles, 'server.properties': 'motd=Pack\nlevel-name=custom\n' });
+  const stateRepository = ownershipStateRepository(root);
+  // Earlier builds classified the candidate without its world folders.
+  const earlierManifest = await scanCandidateManifest({
+    candidatePath: serverPath,
+    installationId: 'installation-earlier',
+    incomingManifest: {
+      schemaVersion: 1,
+      installationId: 'installation-earlier',
+      entries: [
+        packFile('custom/region/r.0.0.mca', packFiles['custom/region/r.0.0.mca'], 'other'),
+        packFile('custom/region/r.1.0.mca', packFiles['custom/region/r.1.0.mca'], 'other'),
+        packFile('mods/pack.jar', packFiles['mods/pack.jar'], 'mod')
+      ]
+    },
+    reparseInspector: plainReparseInspector
+  });
+  assert.equal(ownershipOf(earlierManifest, 'custom/region/r.0.0.mca').managementPolicy, 'replaceable-managed');
+  stateRepository.writeCandidate(serverPath, {
+    schemaVersion: 1, modpackManaged: true, source: { ...OWNERSHIP_SOURCE }, runtime: CURRENT_RUNTIME,
+    selectedOptionalFiles: [], installedAt: OWNERSHIP_NOW, contentRevision: 1, manifest: earlierManifest
+  });
+  // The world is played and the pack's mod is damaged.
+  const savedRegion = 'region saved while playing';
+  writeTree(serverPath, { 'custom/region/r.0.0.mca': savedRegion, 'mods/pack.jar': 'damaged mod bytes' });
+
+  const currentState = stateRepository.read(serverPath);
+  const reviewed = await ownershipSnapshot(stateRepository)({
+    currentState, operationKind: 'repair', runtime: CURRENT_RUNTIME, serverKind: 'existing', serverPath
+  });
+  assert.equal(reviewed.liveSnapshot.worldDirectories.includes('custom'), true);
+  const incomingManifest = { ...currentState.manifest, installationId: 'installation-repair' };
+  const ownership = planOwnership({
+    oldManifest: currentState.manifest,
+    liveSnapshot: reviewed.liveSnapshot,
+    incomingManifest,
+    operationKind: 'repair',
+    conflictChoices: {}
+  });
+  const jobId = 'job-repair';
+  const templatePath = path.join(root, jobId, 'repair-template');
+  // The repair payload holds the pack's bytes for every mismatched replaceable pack file.
+  writeTree(templatePath, {
+    'custom/region/r.0.0.mca': packFiles['custom/region/r.0.0.mca'],
+    'mods/pack.jar': packFiles['mods/pack.jar']
+  });
+  const repairPayloadManifest = (await scanManifest(templatePath, 'installation-repair', {
+    reparseInspector: plainReparseInspector
+  })).manifest;
+  await runExistingSourceOperation({
+    root,
+    jobId,
+    operationKind: 'repair',
+    plan: sourcePlan({
+      kind: 'repair', serverKind: 'existing', instanceId: 'server-existing', expectedContentRevision: 1,
+      ownership, paths: reviewed.pathPreconditions
+    }),
+    executionRecord: {
+      execution: { templateOutputId: 'output-repair', repairPayloadManifest },
+      incomingManifest,
+      inspectionResult: { classification: { kind: 'prepared-server-pack' } },
+      reservation: null,
+      serverKind: 'existing',
+      source: { ...OWNERSHIP_SOURCE },
+      serverPath
+    },
+    serverPath,
+    stateRepository,
+    templatePath
+  });
+
+  assert.equal(fs.readFileSync(path.join(serverPath, 'custom', 'region', 'r.0.0.mca'), 'utf8'), savedRegion);
+  assert.equal(fs.readFileSync(path.join(serverPath, 'mods', 'pack.jar'), 'utf8'), packFiles['mods/pack.jar']);
+  assert.deepEqual(decisionFor(ownership, 'custom/region/r.0.0.mca'), ['preserve-modified', 'user-content-preserved']);
+  assert.deepEqual(decisionFor(ownership, 'mods/pack.jar'), ['replace', 'managed-file-corrupt']);
+  const { manifest } = stateRepository.read(serverPath);
+  assert.deepEqual(ownershipOf(manifest, 'custom/region/r.0.0.mca'), {
+    origin: 'user', managementPolicy: 'protected', role: 'other',
+    installedHash: bytesSha256(savedRegion), priorBaseline: bytesSha256(packFiles['custom/region/r.0.0.mca'])
+  });
+  assert.deepEqual(ownershipOf(manifest, 'custom/region/r.1.0.mca'), {
+    origin: 'pack', managementPolicy: 'preserve-after-seed', role: 'other',
+    installedHash: bytesSha256(packFiles['custom/region/r.1.0.mca']), priorBaseline: null
+  });
+  assert.deepEqual(ownershipOf(manifest, 'mods/pack.jar'), {
+    origin: 'pack', managementPolicy: 'replaceable-managed', role: 'mod',
+    installedHash: bytesSha256(packFiles['mods/pack.jar']), priorBaseline: null
   });
 });

@@ -247,6 +247,10 @@ function pathsOverlap(left, right) {
   return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
 }
 
+function isWithinAny(pathKey, roots) {
+  return roots.some(root => pathKey === root || pathKey.startsWith(`${root}/`));
+}
+
 function findLiveFileAncestor(pathKey, liveByPath) {
   const parts = pathKey.split('/');
   let prefix = '';
@@ -333,6 +337,10 @@ function planOwnership({ oldManifest, liveSnapshot, incomingManifest, conflictCh
   const consumedPaths = new Set();
   const consumedCategories = new Set();
   const actions = [];
+  // World folders, including one named by level-name, and registered protected
+  // paths hold the server's own data even where an earlier build recorded pack
+  // files. Repair never replaces or restores anything there.
+  const repairProtectedRoots = [...liveState.worldDirectories, ...liveState.protectedPaths];
 
   for (const pathKey of keys) {
     const oldEntry = oldByPath.get(pathKey);
@@ -343,7 +351,7 @@ function planOwnership({ oldManifest, liveSnapshot, incomingManifest, conflictCh
     const pathValue = incomingEntry?.path || liveEntry?.path || oldEntry.path;
     if (targetedRepair && oldEntry) {
       const managedRepairTarget = ['pack', 'runtime'].includes(oldEntry.origin) &&
-        oldEntry.managementPolicy === 'replaceable-managed';
+        oldEntry.managementPolicy === 'replaceable-managed' && !isWithinAny(pathKey, repairProtectedRoots);
       if (managedRepairTarget) {
         if (!incomingEntry || incomingEntry.installedHash !== oldEntry.installedHash ||
             incomingEntry.origin !== oldEntry.origin || incomingEntry.managementPolicy !== oldEntry.managementPolicy) {

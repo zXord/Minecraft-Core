@@ -21,7 +21,11 @@ const {
   issueForgeCandidateHealthAuthorization
 } = require('../forge-candidate-health-authorization.cjs');
 const { getDefaultServerConfig, readServerConfig } = require('../../utils/config-manager.cjs');
-const { applyServerNetworkProperties, isNetworkAccess } = require('../../utils/server-network-properties.cjs');
+const {
+  applyServerNetworkProperties,
+  isNetworkAccess,
+  readEffectiveServerProperty
+} = require('../../utils/server-network-properties.cjs');
 const instanceContext = require('../../utils/instance-context.cjs');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { computePreflightReserve, parseNonNegativeBytes } = require('../modpacks/limits.cjs');
@@ -637,17 +641,103 @@ function isManifestExcluded(pathKey) {
   return pathKey === 'eula.txt' || EXCLUDED_MANIFEST_ROOTS.has(first);
 }
 
+function worldDirectoryKeys(values) {
+  const keys = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    try {
+      keys.add(canonicalPath(value).pathKey);
+    } catch {
+      // A value that is not a relative folder path names no world folder.
+    }
+  }
+  return [...keys];
+}
+
+// The level-name in the candidate's server.properties as a path key, or null.
+// Only a regular file within the server.properties limit is read; anything
+// unreadable or invalid names no world folder.
+function candidateLevelNameKey(candidatePath, fsApi) {
+  try {
+    const propertiesPath = path.join(candidatePath, 'server.properties');
+    const before = fsApi.lstatSync(propertiesPath, { bigint: true, throwIfNoEntry: false });
+    if (!before?.isFile() || before.isSymbolicLink() || before.size > BigInt(MAX_SERVER_PROPERTIES_BYTES)) return null;
+    const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+    const descriptor = fsApi.openSync(propertiesPath, fs.constants.O_RDONLY | noFollow);
+    let bytes;
+    try {
+      const opened = fsApi.fstatSync(descriptor, { bigint: true });
+      if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino ||
+          opened.size > BigInt(MAX_SERVER_PROPERTIES_BYTES)) return null;
+      const expectedBytes = Number(opened.size);
+      const buffer = Buffer.alloc(expectedBytes + 1);
+      let total = 0;
+      while (total < buffer.length) {
+        const count = fsApi.readSync(descriptor, buffer, total, buffer.length - total, total);
+        if (count === 0) break;
+        total += count;
+      }
+      if (total !== expectedBytes) return null;
+      bytes = buffer.subarray(0, total);
+    } finally {
+      fsApi.closeSync(descriptor);
+    }
+    let levelName;
+    try {
+      levelName = readEffectiveServerProperty(bytes, 'level-name');
+    } catch {
+      // Minecraft reads server.properties as UTF-8 and falls back to ISO-8859-1.
+      levelName = readEffectiveServerProperty(Buffer.from(bytes.toString('latin1'), 'utf8'), 'level-name');
+    }
+    return levelName === null ? null : canonicalPath(levelName).pathKey;
+  } catch {
+    return null;
+  }
+}
+
+// The world folders a candidate's files belong to, as path keys: the folders of
+// the server the run was revalidated against, and the folder named by level-name
+// in the candidate's own server.properties, which a pack may ship.
+function candidateWorldDirectories(candidatePath, executionWorldDirectories, fsApi = fs) {
+  const worlds = new Set(worldDirectoryKeys(executionWorldDirectories));
+  const levelName = candidateLevelNameKey(candidatePath, fsApi);
+  if (levelName !== null) worlds.add(levelName);
+  return [...worlds].sort((left, right) => left.localeCompare(right, 'en-US'));
+}
+
+function packOwnership(packEntry, measured, worldDirectories) {
+  // A pack may seed files every review protects, such as operator, whitelist and
+  // JVM argument files and the files of a world folder. After seeding they are
+  // the server owner's.
+  const seeded = packEntry.managementPolicy === 'replaceable-managed' &&
+    pathIsProtected(measured.pathKey, packEntry.role, packEntry.managementPolicy, worldDirectories, [], packEntry.origin);
+  return {
+    ...packEntry,
+    ...(seeded ? { managementPolicy: 'preserve-after-seed' } : {}),
+    path: measured.path,
+    pathKey: measured.pathKey,
+    installedHash: measured.installedHash,
+    size: measured.size
+  };
+}
+
 function candidateManifestFromVerifiedScan({
   verifiedManifest,
   installationId,
   incomingManifest,
   oldManifest = null,
   ownershipPlan = null,
-  runtimePathKeys = null
+  runtimePathKeys = null,
+  worldDirectories = []
 } = {}) {
+  const worlds = worldDirectoryKeys(worldDirectories);
   const incoming = new Map((incomingManifest?.entries || []).map(entry => [entry.pathKey, entry]));
   const old = new Map((oldManifest?.entries || []).map(entry => [entry.pathKey, entry]));
   const actions = new Map((ownershipPlan?.actions || []).map(entry => [entry.pathKey, entry]));
+  // A keep-both choice leaves the user's file at its path and puts the pack's
+  // copy at the reviewed alternate path.
+  const keepBothByAlternate = new Map((ownershipPlan?.actions || [])
+    .filter(entry => entry.action === 'keep-both')
+    .map(entry => [canonicalPath(entry.incomingPath).pathKey, entry]));
   const entries = [];
   for (const measured of verifiedManifest.entries) {
     if (isManifestExcluded(measured.pathKey)) continue;
@@ -655,7 +745,8 @@ function candidateManifestFromVerifiedScan({
     const incomingEntry = incoming.get(measured.pathKey);
     const oldEntry = old.get(measured.pathKey);
     const action = actions.get(measured.pathKey);
-    if (runtime && pathIsProtected(measured.pathKey, runtime.role, runtime.managementPolicy, [])) {
+    const keptBoth = keepBothByAlternate.get(measured.pathKey);
+    if (runtime && pathIsProtected(measured.pathKey, runtime.role, runtime.managementPolicy, worlds)) {
       // Runtime preparation also writes files every review protects:
       // server.properties from the reviewed network choices, JVM argument files
       // and loader launch scripts. They stay the user's protected files, never
@@ -663,19 +754,16 @@ function candidateManifestFromVerifiedScan({
       entries.push(userOwnership(measured));
     } else if (runtime) {
       entries.push({ ...measured, ...runtime, priorBaseline: null });
+    } else if (action?.action === 'keep-both') {
+      // The file the user chose to keep. A later update or uninstall must never
+      // treat it as the pack's.
+      entries.push({ ...userOwnership(measured), priorBaseline: oldEntry?.installedHash ?? null });
+    } else if (keptBoth) {
+      const packEntry = incoming.get(keptBoth.pathKey);
+      if (!packEntry) throw stale();
+      entries.push({ ...packOwnership(packEntry, measured, worlds), priorBaseline: null });
     } else if (incomingEntry && !['preserve-modified', 'preserve-orphan'].includes(action?.action)) {
-      // A pack may seed files every review protects, such as operator, whitelist
-      // and JVM argument files. After seeding they are the server owner's.
-      const seeded = incomingEntry.managementPolicy === 'replaceable-managed' &&
-        pathIsProtected(measured.pathKey, incomingEntry.role, incomingEntry.managementPolicy, [], [], incomingEntry.origin);
-      entries.push({
-        ...incomingEntry,
-        ...(seeded ? { managementPolicy: 'preserve-after-seed' } : {}),
-        path: measured.path,
-        pathKey: measured.pathKey,
-        installedHash: measured.installedHash,
-        size: measured.size
-      });
+      entries.push(packOwnership(incomingEntry, measured, worlds));
     } else if (oldEntry && ['unchanged', 'preserve-modified', 'preserve-orphan', 'absent'].includes(action?.action)) {
       const preservedByUser = ['preserve-modified', 'preserve-orphan'].includes(action?.action) ||
         measured.installedHash !== oldEntry.installedHash;
@@ -705,6 +793,7 @@ async function scanCandidateManifest({
   oldManifest = null,
   ownershipPlan = null,
   runtimePathKeys = null,
+  worldDirectories = [],
   reparseInspector,
   signal
 } = {}) {
@@ -719,7 +808,8 @@ async function scanCandidateManifest({
     incomingManifest,
     oldManifest,
     ownershipPlan,
-    runtimePathKeys
+    runtimePathKeys,
+    worldDirectories
   });
 }
 
@@ -2721,6 +2811,7 @@ class ProductionMutationRuntime {
         oldManifest: context.currentState?.manifest || null,
         ownershipPlan: context.executionOwnership,
         runtimePathKeys,
+        worldDirectories: candidateWorldDirectories(candidatePath, context.executionWorldDirectories, this.fs),
         reparseInspector: this.reparseInspector,
         signal
       });
@@ -2935,7 +3026,8 @@ class ProductionMutationRuntime {
       incomingManifest: context.executionRecord.incomingManifest,
       oldManifest,
       ownershipPlan: context.executionOwnership,
-      runtimePathKeys
+      runtimePathKeys,
+      worldDirectories: candidateWorldDirectories(candidatePath, context.executionWorldDirectories, this.fs)
     });
   }
 
@@ -2966,4 +3058,4 @@ class ProductionMutationRuntime {
 
 }
 
-module.exports = { ProductionMutationRuntime, scanCandidateManifest, sourceForState };
+module.exports = { ProductionMutationRuntime, candidateWorldDirectories, scanCandidateManifest, sourceForState };

@@ -365,6 +365,68 @@ test('new equal-byte collisions stay user-owned until explicitly adopted', () =>
   assert.equal(adopted.actions[0].action, 'replace');
 });
 
+test('targeted repair never replaces or restores pack files inside a custom-named world or a protected path', () => {
+  // An earlier build recorded the files of a world named by level-name (and a
+  // registered protected path) as replaceable pack files.
+  const oldManifest = { schemaVersion: 1, installationId: 'installed', entries: [
+    managed('bin/custom-bootstrap.cfg', hash(1), { role: 'other' }),
+    managed('custom/region/r.0.0.mca', hash(1), { role: 'other' }),
+    managed('mods/corrupt.jar', hash(1)),
+    managed('worlds/survival-notes.txt', hash(1), { role: 'other' }),
+    managed('worlds/survival/level.dat', hash(1), { role: 'other' })
+  ] };
+  const repair = entries => planOwnership({
+    oldManifest,
+    liveSnapshot: {
+      kind: 'existing',
+      worldDirectories: ['custom', 'world', 'world_nether', 'world_the_end', 'worlds/survival'],
+      protectedPaths: ['bin/custom-bootstrap.cfg'],
+      entries
+    },
+    incomingManifest: { ...oldManifest, installationId: 'repair-desired' },
+    operationKind: 'repair',
+    conflictChoices: {}
+  });
+  const decision = (plan, pathValue) => {
+    const action = plan.actions.find(item => item.path === pathValue);
+    return [action.action, action.reason, action.protected];
+  };
+
+  const played = repair([
+    live('bin/custom-bootstrap.cfg', hash(2)),
+    live('custom/region/r.0.0.mca', hash(2)),
+    live('mods/corrupt.jar', hash(2)),
+    live('worlds/survival-notes.txt', hash(2)),
+    live('worlds/survival/level.dat', hash(2))
+  ]);
+  for (const pathValue of ['bin/custom-bootstrap.cfg', 'custom/region/r.0.0.mca', 'worlds/survival/level.dat']) {
+    assert.deepEqual(decision(played, pathValue), ['preserve-modified', 'user-content-preserved', true], pathValue);
+  }
+  assert.deepEqual(decision(played, 'mods/corrupt.jar'), ['replace', 'managed-file-corrupt', false]);
+  // Only the world folder itself and what sits under it; a sibling that shares its name prefix stays managed.
+  assert.deepEqual(decision(played, 'worlds/survival-notes.txt'), ['replace', 'managed-file-corrupt', false]);
+  assert.deepEqual(played.blocked, []);
+
+  const missing = repair([live('mods/corrupt.jar', hash(2))]);
+  for (const pathValue of ['bin/custom-bootstrap.cfg', 'custom/region/r.0.0.mca', 'worlds/survival/level.dat']) {
+    assert.deepEqual(decision(missing, pathValue), ['absent', 'user-content-absent', true], pathValue);
+  }
+  assert.deepEqual(decision(missing, 'worlds/survival-notes.txt'), ['restore-missing', 'managed-file-missing', false]);
+
+  const unchanged = repair([
+    live('bin/custom-bootstrap.cfg', hash(1)),
+    live('custom/region/r.0.0.mca', hash(1)),
+    live('mods/corrupt.jar', hash(2)),
+    live('worlds/survival-notes.txt', hash(1)),
+    live('worlds/survival/level.dat', hash(1))
+  ]);
+  for (const pathValue of ['bin/custom-bootstrap.cfg', 'custom/region/r.0.0.mca', 'worlds/survival/level.dat']) {
+    assert.deepEqual(decision(unchanged, pathValue), ['unchanged', 'user-content-unchanged', true], pathValue);
+  }
+  assert.deepEqual(decision(unchanged, 'worlds/survival-notes.txt'), ['unchanged', 'live-equals-installed-baseline', false]);
+  assert.deepEqual(decision(unchanged, 'mods/corrupt.jar'), ['replace', 'managed-file-corrupt', false]);
+});
+
 test('keep-both rejects protected, cross-directory, extension-changing, occupied, and alias targets', () => {
   const incoming = { schemaVersion: 1, installationId: 'new', entries: [managed('config/collision.toml', hash(2))] };
   const snapshot = { kind: 'existing', entries: [
