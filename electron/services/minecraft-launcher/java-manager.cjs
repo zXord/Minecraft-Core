@@ -147,6 +147,38 @@ async function measureLocalJavaArchive(archivePath, maximumBytes, signal) {
   };
 }
 
+function comparablePath(value) {
+  const resolved = path.resolve(value);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+// Server and client folders may be reached through a junction, symlink, SUBST or
+// mapped drive. Only the parent is resolved, so a link at the path itself is
+// never followed.
+function underCanonicalParent(value) {
+  const resolved = path.resolve(value);
+  return path.join(fs.realpathSync.native(path.dirname(resolved)), path.basename(resolved));
+}
+
+// The archive worker accepts only canonical paths, so the extraction folder keeps
+// its name under the canonical Java folder. A destination that is not directly
+// inside that folder is refused, never moved there.
+function javaExtractionDestination(rootPath, extractPath) {
+  const outside = cause => javaAcquisitionError(
+    'JAVA_EXTRACTION_FAILED',
+    'Java extraction destination is outside the Java directory',
+    cause
+  );
+  let destinationPath;
+  try {
+    destinationPath = underCanonicalParent(extractPath);
+  } catch (error) {
+    throw outside(error);
+  }
+  if (comparablePath(path.dirname(destinationPath)) !== comparablePath(rootPath)) throw outside();
+  return path.join(rootPath, path.basename(destinationPath));
+}
+
 function executableFromWorkerResult(extractPath, result) {
   const relative = result?.javaExecutableRelativePath;
   if (typeof relative !== 'string' || !relative || relative.includes('\\') || relative.includes(':') ||
@@ -157,17 +189,21 @@ function executableFromWorkerResult(extractPath, result) {
   if (!isPathInside(executablePath, extractPath)) {
     throw javaAcquisitionError('JAVA_EXTRACTION_FAILED', 'Java extraction did not return a valid executable');
   }
+  // The realpath rule is measured under the canonical extraction folder: the
+  // executable must resolve to exactly that path, so no link at or below the
+  // folder is followed. The caller's own spelling of the folder is returned.
+  let canonicalExecutablePath;
+  let resolvedExecutablePath;
   let stat;
   try {
-    stat = fs.lstatSync(executablePath, { bigint: true });
+    canonicalExecutablePath = path.resolve(underCanonicalParent(extractPath), ...relative.split('/'));
+    stat = fs.lstatSync(canonicalExecutablePath, { bigint: true });
+    resolvedExecutablePath = fs.realpathSync.native(executablePath);
   } catch (error) {
     throw javaAcquisitionError('JAVA_EXTRACTION_FAILED', 'Java extraction verification failed', error);
   }
-  const normalize = value => process.platform === 'win32'
-    ? path.resolve(value).toLowerCase()
-    : path.resolve(value);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n ||
-      normalize(fs.realpathSync.native(executablePath)) !== normalize(executablePath)) {
+      comparablePath(resolvedExecutablePath) !== comparablePath(canonicalExecutablePath)) {
     throw javaAcquisitionError('JAVA_EXTRACTION_FAILED', 'Java extraction verification failed');
   }
   return executablePath;
@@ -821,6 +857,7 @@ class JavaManager {
   }
     async extractZip(zipPath, extractPath, options = {}) {
     const rootPath = fs.realpathSync.native(this.javaBaseDir);
+    const destinationPath = javaExtractionDestination(rootPath, extractPath);
     const archivePath = fs.realpathSync.native(zipPath);
     const suppliedSize = options?.expectedArchiveSize;
     const suppliedSha256 = options?.expectedSha256;
@@ -837,7 +874,7 @@ class JavaManager {
     return runJavaArchiveWorker({
       rootPath,
       archivePath,
-      destinationPath: path.resolve(extractPath),
+      destinationPath,
       maxArchiveBytes: this.maxArchiveBytes,
       ...archiveEvidence,
       ...(options?.signal ? { signal: options.signal } : {})
