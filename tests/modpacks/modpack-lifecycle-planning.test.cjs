@@ -6,6 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
+const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
 const { OperationStore } = require('../../electron/services/modpack-lifecycle/operation-store.cjs');
 const { PlanRegistry } = require('../../electron/services/modpack-lifecycle/plan-registry.cjs');
 const { ModpackLifecycleService } = require('../../electron/services/modpack-lifecycle/modpack-lifecycle-service.cjs');
@@ -96,7 +97,7 @@ function inspectionResult(verifiedSet) {
   };
 }
 
-function fixture(t, { unsafePlanView = false } = {}) {
+function fixture(t, { unsafePlanView = false, planningAdapter: suppliedPlanningAdapter = null } = {}) {
   const userDataPath = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-lifecycle-plan-'));
   const serverPath = path.join(userDataPath, 'external-server');
   fs.mkdirSync(path.join(serverPath, 'world'), { recursive: true });
@@ -249,7 +250,7 @@ function fixture(t, { unsafePlanView = false } = {}) {
     artifactDownloader,
     archiveInspector,
     inspectionLoader: materializer,
-    planningAdapter,
+    planningAdapter: suppliedPlanningAdapter || planningAdapter,
     planRegistry,
     operationStore
   });
@@ -426,4 +427,164 @@ test('lifecycle disposal releases every active inspection owner, clears its sess
     error => error.code === 'PLAN_STALE'
   );
   assert.equal(await context.service.dispose(), 0);
+});
+
+function minimalLifecycle(overrides = {}) {
+  return new ModpackLifecycleService({
+    sourceResolver: { resolveArtifactSetPlan() {} },
+    artifactDownloader: { downloadSet() {} },
+    archiveInspector: { inspectArchive() {} },
+    inspectionLoader: { loadInspection() {} },
+    planningAdapter: { createPlan() {} },
+    planRegistry: { create() {}, get() {}, claim() {} },
+    operationStore: { get() {}, requestCancellation() {} },
+    ...overrides
+  });
+}
+
+// Production's strict router refuses an aliased server folder before it can conclude
+// that no modpack state exists.
+function strictRepository(reads) {
+  const assertCanonical = serverPath => {
+    reads.push(serverPath);
+    if (fs.realpathSync.native(serverPath) !== serverPath) {
+      throw new ModpackError('RECOVERY_REQUIRED', 'The modpack operation requires recovery');
+    }
+  };
+  return {
+    read(serverPath) { assertCanonical(serverPath); return null; },
+    listHistory(serverPath) { assertCanonical(serverPath); return { items: [], nextCursor: null }; }
+  };
+}
+
+// Mirrors the state observer contract: proven absence answers without the strict
+// router; anything else is delegated to it unchanged.
+function stateObserverFor(repository) {
+  const { proveEntriesAbsent } = require('../../electron/services/modpacks/instance-ownership.cjs');
+  return Object.freeze({
+    read(serverPath) {
+      return proveEntriesAbsent(serverPath, ['.minecraft-core-state/modpack.json']) ? null : repository.read(serverPath);
+    },
+    listHistory(serverPath, options) {
+      return proveEntriesAbsent(serverPath, ['.minecraft-core-state/history'])
+        ? { items: [], nextCursor: null }
+        : repository.listHistory(serverPath, options);
+    }
+  });
+}
+
+function junctionServer(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-lifecycle-observer-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const canonical = path.join(root, 'servers', 'Canonical Server');
+  fs.mkdirSync(path.join(canonical, 'world'), { recursive: true });
+  fs.writeFileSync(path.join(canonical, 'server.properties'), 'motd=unmanaged\n');
+  const alias = path.join(root, 'Junction Server');
+  fs.symlinkSync(canonical, alias, 'junction');
+  return { root, canonical, alias };
+}
+
+test('getState and listHistory answer a junction-registered unmanaged server through the state observer', async t => {
+  const { alias } = junctionServer(t);
+  const reads = [];
+  const stateRepository = strictRepository(reads);
+  const instanceResolver = { async resolveInstance(instanceId) { return { instanceId, serverPath: alias, priorRunning: false }; } };
+  const service = minimalLifecycle({ instanceResolver, stateRepository, stateObserver: stateObserverFor(stateRepository) });
+
+  const state = await service.getState('server-junction');
+  assert.equal(state.modpackManaged, false);
+  assert.equal(state.lifecycleMode, 'unmanaged');
+  assert.deepEqual(await service.listHistory('server-junction'), { instanceId: 'server-junction', items: [], nextCursor: null });
+  assert.deepEqual(reads, [], 'the strict router was never asked');
+
+  // The strict repository on its own still refuses the alias (the old observer-less wiring).
+  const strictOnly = minimalLifecycle({ instanceResolver, stateRepository });
+  await assert.rejects(strictOnly.getState('server-junction'), { code: 'RECOVERY_REQUIRED' });
+});
+
+test('every other lifecycle path keeps the strict state repository when an observer is configured', async t => {
+  const { alias } = junctionServer(t);
+  const strictReads = [];
+  const observed = [];
+  const stateRepository = strictRepository(strictReads);
+  const stateObserver = {
+    read(serverPath) { observed.push(serverPath); return null; },
+    listHistory(serverPath) { observed.push(serverPath); return { items: [], nextCursor: null }; }
+  };
+  const service = minimalLifecycle({
+    instanceResolver: { async resolveInstance(instanceId) { return { instanceId, serverPath: alias, priorRunning: false }; } },
+    planningAdapter: { createPlan() {}, async createManagementPlan() { assert.fail('the strict read refuses first'); } },
+    stateRepository,
+    stateObserver
+  });
+  await assert.rejects(service.createManagementPlan({ instanceId: 'server-junction', operationKind: 'detach' }),
+    { code: 'RECOVERY_REQUIRED' });
+  assert.deepEqual(strictReads, [alias]);
+  assert.deepEqual(observed, []);
+  await service.getState('server-junction');
+  assert.deepEqual(observed, [alias]);
+  assert.throws(() => minimalLifecycle({ stateObserver: { listHistory() {} } }), { code: 'INVALID_REQUEST' });
+});
+
+test('only getState and listHistory read through the state observer', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../../electron/services/modpack-lifecycle/modpack-lifecycle-service.cjs'), 'utf8');
+  const classBody = source.slice(source.indexOf('class ModpackLifecycleService {'));
+  const members = classBody.split(/\n(?= {2}(?:async |static |get |set )?#?[A-Za-z_$][\w$]*\s*\()/u);
+  const users = members.filter(member => member.includes('stateObserver'))
+    .map(member => /^ {2}(?:async |static |get |set )?(#?[A-Za-z_$][\w$]*)/u.exec(member)?.[1]);
+  assert.deepEqual(users.sort(), ['constructor', 'getState', 'listHistory']);
+  assert.match(source, /this\.stateObserver = stateObserver \?\? stateRepository;/);
+});
+
+test('install-existing on unsupported folder shapes is refused through the lifecycle before any preflight work', async t => {
+  const { canonical, alias } = junctionServer(t);
+  const nfd = path.join(path.dirname(path.dirname(canonical)), 'Cafe\u0301 Server');
+  fs.mkdirSync(nfd);
+  const { ProductionPlanningAdapter } = require('../../electron/services/modpacks/planning/production-planning-adapter.cjs');
+  const fakeDirectoryFs = folder => ({
+    lstatSync(target, options = {}) {
+      if (path.win32.resolve(target).toLocaleLowerCase('en-US') === folder.toLocaleLowerCase('en-US')) {
+        return { isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false };
+      }
+      if (options.throwIfNoEntry === false) return undefined;
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    },
+    statfsSync() { return { bavail: 1n << 30n, bsize: 4096n }; },
+    readdirSync() { return ['server.properties']; },
+    realpathSync: { native: target => target }
+  });
+  const work = [];
+  let current = null;
+  const context = fixture(t, { planningAdapter: { createPlan: input => current.createPlan(input) } });
+  await context.operationStore.initialize();
+  const inspected = await context.service.inspectSource(SOURCE_REQUEST);
+  for (const [label, serverPath, fsApi] of [
+    ['drive-root child', 'X:\\MinecraftServer', fakeDirectoryFs('X:\\MinecraftServer')],
+    ['junction alias', alias, fs],
+    ['UNC path', '\\\\nas\\share\\Minecraft\\Server', fakeDirectoryFs('\\\\nas\\share\\Minecraft\\Server')],
+    ['NFD folder name', nfd, fs]
+  ]) {
+    current = new ProductionPlanningAdapter({
+      instanceResolver: { async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: false }; } },
+      stateRepository: { read() { work.push(`${label}: state read`); throw new ModpackError('RECOVERY_REQUIRED', 'The modpack operation requires recovery'); } },
+      reparseInspector: { async isReparsePoint() { work.push(`${label}: target inspection`); return false; } },
+      fsApi,
+      availableBytes: async () => { work.push(`${label}: capacity`); return '100000000000'; },
+      validateServerPorts: async () => { work.push(`${label}: port check`); return { valid: true, errors: [] }; },
+      readContentRevision: () => { work.push(`${label}: revision`); return 0; },
+      preparePlanInputs: async () => { work.push(`${label}: download`); throw new Error('no preflight download'); },
+      snapshotServer: async () => { work.push(`${label}: server scan`); throw new Error('no server scan'); }
+    });
+    await assert.rejects(context.service.createPlan(planningRequest(inspected.inspectionId)), error => {
+      assert.equal(error.code, 'INVALID_REQUEST', label);
+      assert.match(error.safeMessage, /^Modpacks need the server in its own normal folder\. Move it into a subfolder/);
+      return true;
+    });
+  }
+  assert.deepEqual(work, []);
+  assert.equal(context.workspaceRegistry.resolveOwnedId({
+    ownerId: inspected.inspectionId,
+    id: context.lastInspection.artifactSetId,
+    kind: 'artifact-set'
+  }).id, context.lastInspection.artifactSetId, 'the refused review keeps its inspection for a retry after moving the folder');
 });

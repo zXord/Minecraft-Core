@@ -149,5 +149,27 @@ function isUnstartedLaunchFailure(job) {
     Object.keys(event.details).length === 2);
 }
 
+// The cancellation sibling for already-recorded jobs: cancelled while queued, or
+// in preflight before revalidate could create recovery evidence. Equally only a
+// candidate for the same complete reproof; live jobs settle from the executor.
+const UNSTARTED_CANCELLATION_STEPS = new Set(['acquire-mutation', 'suspend-auto-restart', 'quiesce', 'revalidate-plan']);
+
+function isUnstartedLaunchCancellation(job) {
+  const event = job?.events?.[0];
+  const details = event?.details;
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return false;
+  const detailKeys = Object.keys(details);
+  const queued = job.sequence === 4 && event.sequence === 3 && detailKeys.length === 1;
+  const preflight = job.sequence === 5 && event.sequence === 4 && detailKeys.length === 2 &&
+    UNSTARTED_CANCELLATION_STEPS.has(details.step);
+  return Boolean(job.phase === 'cancelled' && job.terminalAt != null &&
+    ['install-new', 'import-files-only-new'].includes(job.operationKind) && job.swapStep === null &&
+    job.cancellationRequested === true && job.outcome?.status === 'cancelled' &&
+    job.outcome.errorCode === 'CANCELLED' && job.outcome.cleanupPending === false &&
+    !job.outcome.failureReason && !job.outcome.runtimeDiagnostic && !job.outcome.cleanupErrorCode &&
+    Array.isArray(job.events) && job.events.length === 1 && event.jobId === job.jobId &&
+    event.channel === 'log' && event.phase === 'cancelling' && details.errorCode === 'CANCELLED' && (queued || preflight));
+}
+
 module.exports = { classifyRecoveryTerminalClosure, classifyLaunchDestination, newServerRegistrationState, hasExactLaunchRecoveryBinding,
-  coversLaunch, isDestinationRecoveryClosure, isUnstartedLaunchFailure };
+  coversLaunch, isDestinationRecoveryClosure, isUnstartedLaunchFailure, isUnstartedLaunchCancellation };

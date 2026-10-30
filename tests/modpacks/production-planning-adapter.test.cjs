@@ -16,6 +16,7 @@ const {
 const {
   createProductionServerSnapshot
 } = require('../../electron/services/modpacks/planning/production-server-snapshot.cjs');
+const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
 
 const SHA = 'a'.repeat(64);
 const SHA512 = 'b'.repeat(128);
@@ -1854,4 +1855,164 @@ test('rollback snapshot remains available after uninstall has made modpack state
     serverKind: 'existing',
     serverPath
   }), error => error?.code === 'PLAN_STALE');
+});
+
+// Folders the strict lifecycle can never own end to end are refused up front,
+// before any preflight download, extraction, scan or modpack-state read.
+function folderShapeFs(directories) {
+  const key = value => path.win32.resolve(value).toLocaleLowerCase('en-US');
+  const known = new Map(Object.entries(directories).map(([folder, realpath]) => [key(folder), realpath]));
+  const directory = {
+    isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false,
+    dev: 1n, ino: 1n, birthtimeNs: 1n
+  };
+  const missing = target => Object.assign(new Error(`ENOENT: ${target}`), { code: 'ENOENT' });
+  return {
+    lstatSync(target, options = {}) {
+      if (known.has(key(target))) return directory;
+      if (options.throwIfNoEntry === false) return undefined;
+      throw missing(target);
+    },
+    statSync(target) { if (known.has(key(target))) return directory; throw missing(target); },
+    statfsSync() { return { bavail: 1n << 30n, bsize: 4096n }; },
+    existsSync(target) { return known.has(key(target)); },
+    readdirSync(target) { if (known.has(key(target))) return ['server.properties']; throw missing(target); },
+    realpathSync: { native(target) { if (!known.has(key(target))) throw missing(target); return known.get(key(target)); } }
+  };
+}
+
+function shapeSpies() {
+  return { resolve: 0, read: 0, reparse: 0, revision: 0, ports: 0, prepare: 0, snapshot: 0, capacity: 0 };
+}
+
+function shapeAdapter(serverPath, spies, { fsApi = fs } = {}) {
+  return new ProductionPlanningAdapter({
+    instanceResolver: {
+      async resolveInstance(instanceId) { spies.resolve += 1; return { instanceId, serverPath, priorRunning: false }; }
+    },
+    // Production's strict router refuses every one of these shapes; before the
+    // up-front refusal that surfaced as a late PLAN_STALE after the download.
+    stateRepository: {
+      read() { spies.read += 1; throw new ModpackError('RECOVERY_REQUIRED', 'The modpack operation requires recovery'); }
+    },
+    reparseInspector: { async isReparsePoint() { spies.reparse += 1; return false; } },
+    fsApi,
+    availableBytes: async () => { spies.capacity += 1; return '100000000000'; },
+    validateServerPorts: async () => { spies.ports += 1; return { valid: true, errors: [] }; },
+    readContentRevision: () => { spies.revision += 1; return 0; },
+    preparePlanInputs: async () => { spies.prepare += 1; throw new Error('preflight download must not run'); },
+    snapshotServer: async () => { spies.snapshot += 1; throw new Error('server inspection must not run'); }
+  });
+}
+
+function shapePlanInput(operationKind) {
+  return {
+    request: {
+      inspectionId: 'inspection-one', instanceId: 'server-shape', operationKind,
+      selections: { optionalFileIds: [], conflictChoices: { paths: {}, categories: {} } }
+    },
+    inspection: inspection(),
+    source: { provider: 'modrinth', projectId: 'project-one', versionId: 'version-one', version: '1.0.0', title: 'Project One' }
+  };
+}
+
+async function assertSubfolderRefusal(action) {
+  await assert.rejects(action, error => {
+    assert.equal(error.code, 'INVALID_REQUEST');
+    assert.equal(error.safeMessage,
+      'Modpacks need the server in its own normal folder. Move it into a subfolder, such as a MyServer folder inside a Minecraft folder, then retry.');
+    assert.equal(error.toPublicResult().error.message, error.safeMessage);
+    return true;
+  });
+}
+
+function shapeFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-folder-shape-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const canonical = path.join(root, 'Real Server');
+  fs.mkdirSync(canonical);
+  fs.writeFileSync(path.join(canonical, 'server.properties'), 'motd=existing\n');
+  const junction = path.join(root, 'Alias Server');
+  fs.symlinkSync(canonical, junction, 'junction');
+  fs.mkdirSync(path.join(root, 'Real Parent'));
+  fs.symlinkSync(path.join(root, 'Real Parent'), path.join(root, 'Alias Parent'), 'junction');
+  const nfd = path.join(root, 'Cafe\u0301 Server');
+  fs.mkdirSync(nfd);
+  fs.writeFileSync(path.join(nfd, 'server.properties'), 'motd=existing\n');
+  return { root, canonical, junction, nfd };
+}
+
+test('install-existing on unsupported folder shapes is refused with the subfolder message before any preflight work', async t => {
+  const f = shapeFixture(t);
+  const cases = [
+    ['drive-root child', 'X:\\MinecraftServer', folderShapeFs({ 'X:\\MinecraftServer': 'X:\\MinecraftServer' })],
+    ['junction alias', f.junction, fs],
+    ['UNC path', '\\\\nas\\share\\Minecraft\\Server', folderShapeFs({ '\\\\nas\\share\\Minecraft\\Server': '\\\\nas\\share\\Minecraft\\Server' })],
+    ['NFD folder name', f.nfd, fs]
+  ];
+  for (const [label, serverPath, fsApi] of cases) {
+    const spies = shapeSpies();
+    await assertSubfolderRefusal(shapeAdapter(serverPath, spies, { fsApi }).createPlan(shapePlanInput('install-existing')));
+    assert.deepEqual(spies, { ...shapeSpies(), resolve: 1 }, label);
+  }
+});
+
+test('new-server destinations with unsupported folder shapes are refused before preflight work', async t => {
+  const f = shapeFixture(t);
+  const cases = [
+    ['drive root', 'X:\\', folderShapeFs({ 'X:\\': 'X:\\' })],
+    ['absent drive-root child', 'X:\\NewServer', folderShapeFs({ 'X:\\': 'X:\\' })],
+    ['absent target under a junction parent', path.join(f.root, 'Alias Parent', 'New Server'), fs],
+    ['device path', '\\\\?\\C:\\Minecraft\\NewServer', folderShapeFs({})],
+    ['leading space', 'X:\\Minecraft\\ NewServer', folderShapeFs({ 'X:\\Minecraft': 'X:\\Minecraft' })],
+    ['trailing space', 'X:\\Minecraft\\NewServer ', folderShapeFs({ 'X:\\Minecraft': 'X:\\Minecraft' })],
+    ['substituted drive', 'S:\\Minecraft\\NewServer', folderShapeFs({ 'S:\\Minecraft': 'D:\\Data\\Minecraft' })]
+  ];
+  for (const operationKind of ['install-new', 'import-files-only-new', 'install-existing']) {
+    for (const [label, serverPath, fsApi] of cases) {
+      const spies = shapeSpies();
+      await assertSubfolderRefusal(shapeAdapter(serverPath, spies, { fsApi }).createPlan(shapePlanInput(operationKind)));
+      assert.deepEqual(spies, { ...shapeSpies(), resolve: 1 }, `${operationKind} ${label}`);
+    }
+  }
+});
+
+test('ordinary nested destinations keep planning, including a case-only spelling difference', async t => {
+  const f = shapeFixture(t);
+  for (const serverPath of [path.join(f.root, 'Real Parent', 'New Server'), f.canonical.toLocaleUpperCase('en-US')]) {
+    const adapter = adapterFor(serverPath);
+    assert.equal(adapter.assertDestinationShape(serverPath), true);
+  }
+  const reserved = path.join(f.root, 'Real Parent', 'Reserved Server');
+  fs.mkdirSync(reserved);
+  const result = await adapterFor(reserved).createPlan(newServerPlanInput('server-nested', 25574));
+  assert.equal(result.plan.operation.serverKind, 'new');
+});
+
+test('the folder-shape refusal stays scoped to install and new-server destinations', async () => {
+  const spies = shapeSpies();
+  const adapter = shapeAdapter('X:\\ManagedServer', spies, { fsApi: folderShapeFs({ 'X:\\ManagedServer': 'X:\\ManagedServer' }) });
+  // Existing managed-server operations keep the strict state read and its PLAN_STALE.
+  await assert.rejects(adapter.createPlan(shapePlanInput('update')), error => error?.code === 'PLAN_STALE');
+  assert.equal(spies.read, 1);
+});
+
+test('the shared folder-shape predicate refuses each unsupported shape without writing', () => {
+  const { assertModpackFolderShape } = require('../../electron/services/modpacks/planning/production-planning-adapter.cjs');
+  const writes = [];
+  const base = folderShapeFs({ 'X:\\': 'X:\\', 'X:\\Minecraft': 'X:\\Minecraft', 'X:\\Minecraft\\Server': 'X:\\Minecraft\\Server',
+    'X:\\Linked': 'X:\\Elsewhere\\Linked', 'Y:\\Mapped': '\\\\nas\\share\\Mapped' });
+  const fsApi = new Proxy(base, { get(target, name) {
+    if (/write|mkdir|rm|rename|unlink|copy|open/i.test(String(name))) writes.push(name);
+    return target[name];
+  } });
+  for (const supported of ['X:\\Minecraft\\Server', 'x:\\minecraft\\server', 'X:\\Minecraft\\Absent\\Deeper']) {
+    assert.equal(assertModpackFolderShape(supported, { fsApi }), true, supported);
+  }
+  for (const unsupported of ['X:\\', 'X:\\Minecraft', '\\\\nas\\share', '\\\\nas\\share\\Minecraft\\Server', '\\\\?\\X:\\Minecraft\\Server',
+    'X:\\Linked\\Server', 'Y:\\Mapped\\Server', 'X:\\Minecraft\\Cafe\u0301', 'X:\\Minecraft\\ Server', 'X:\\Minecraft\\Server ',
+    'X:\\Minecraft\\CON', 'relative\\Server', '', null]) {
+    assert.throws(() => assertModpackFolderShape(unsupported, { fsApi }), error => error.code === 'INVALID_REQUEST', String(unsupported));
+  }
+  assert.deepEqual(writes, []);
 });

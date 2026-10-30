@@ -13,7 +13,12 @@ const { validatePublicJob } = require('./operation-store.cjs');
 const { isDeepStrictEqual } = require('node:util');
 const { randomUUID } = require('node:crypto');
 const { normalizeRecoveryTargetPath } = require('./recovery-target-envelope.cjs');
-const { classifyLaunchDestination, isDestinationRecoveryClosure, isUnstartedLaunchFailure } = require('./new-server-launch-closure.cjs');
+const {
+  classifyLaunchDestination,
+  isDestinationRecoveryClosure,
+  isUnstartedLaunchCancellation,
+  isUnstartedLaunchFailure
+} = require('./new-server-launch-closure.cjs');
 const { readLaunchRecoveryEvidence } = require('./operation-recovery-reconciler.cjs');
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -57,6 +62,7 @@ const PREFLIGHT_PROGRESS_ACTIVITIES = new Set([
   'extracting', 'verifying-archive', 'downloading-pack-files', 'assembling-files', 'hashing-candidate-files'
 ]);
 const MAX_INSPECTION_PROGRESS_BYTES = 16 * 1024 * 1024 * 1024;
+const SHAPE_CHECKED_CAPTURES = new WeakSet();
 
 function invalid(cause) {
   if (cause instanceof ModpackError && cause.code === 'INVALID_REQUEST') return cause;
@@ -774,6 +780,8 @@ function assertResolvedInstance(value, expectedInstanceId) {
 class ModpackLifecycleService {
   #planResults = new WeakMap();
   #unrecordedLaunchClosures = new Map();
+  #admittedTaskIds = new WeakMap();
+  #admittedTaskSequence = 0;
   constructor({
     sourceResolver,
     artifactDownloader,
@@ -787,6 +795,7 @@ class ModpackLifecycleService {
     instanceResolver = null,
     resolveServerSelection = null,
     stateRepository = null,
+    stateObserver = null,
     stateEventSink = null,
     outcomeActionIssuer = null,
     assertAdmission = () => {},
@@ -810,6 +819,8 @@ class ModpackLifecycleService {
         !planRegistry || typeof planRegistry.create !== 'function' || typeof planRegistry.get !== 'function' ||
         typeof planRegistry.claim !== 'function' ||
         !operationStore || typeof operationStore.get !== 'function' || typeof operationStore.requestCancellation !== 'function' ||
+        (stateObserver !== null && (!stateObserver || typeof stateObserver.read !== 'function' ||
+          typeof stateObserver.listHistory !== 'function')) ||
         (stateEventSink !== null && typeof stateEventSink !== 'function') ||
         (outcomeActionIssuer !== null && (!outcomeActionIssuer || typeof outcomeActionIssuer.issue !== 'function')) ||
         (workspaceRegistry !== null && (!workspaceRegistry || typeof workspaceRegistry.releaseOwner !== 'function')) ||
@@ -832,6 +843,9 @@ class ModpackLifecycleService {
     if (resolveServerSelection !== null && typeof resolveServerSelection !== 'function') throw invalid();
     this.resolveServerSelection = resolveServerSelection;
     this.stateRepository = stateRepository;
+    // Read-only classification for getState and listHistory only. Planning,
+    // verification and every mutation keep the strict repository.
+    this.stateObserver = stateObserver ?? stateRepository;
     this.stateEventSink = stateEventSink;
     this.outcomeActionIssuer = outcomeActionIssuer;
     this.workspaceRegistry = workspaceRegistry;
@@ -859,10 +873,24 @@ class ModpackLifecycleService {
     this.launchSettlements = new Map();
     this.launchSnapshots = new Map();
     this.launchCursors = new Map();
-    if (destinationReservations) destinationReservations.beforeUnlaunchedRelease = instanceId => {
-      this.localAdmissionGeneration++;
-      return this.planRegistry.invalidateReservation(instanceId);
-    };
+    if (destinationReservations) {
+      destinationReservations.beforeUnlaunchedRelease = instanceId => {
+        this.localAdmissionGeneration++;
+        return this.planRegistry.invalidateReservation(instanceId);
+      };
+      // A new-server destination gets the preflight folder-shape refusal when it
+      // is picked, before any preflight download or inspection is reviewed.
+      const captureReservation = destinationReservations.captureReservation;
+      if (typeof planningAdapter.assertDestinationShape === 'function' && typeof captureReservation === 'function' &&
+          !SHAPE_CHECKED_CAPTURES.has(captureReservation)) {
+        const captureSupportedDestination = function captureSupportedDestination(request) {
+          planningAdapter.assertDestinationShape(request?.targetPath);
+          return captureReservation.call(this, request);
+        };
+        SHAPE_CHECKED_CAPTURES.add(captureSupportedDestination);
+        destinationReservations.captureReservation = captureSupportedDestination;
+      }
+    }
   }
 
   get admissionGeneration() { return this.localAdmissionGeneration + (this.planRegistry.fenceGeneration ?? 0); }
@@ -884,6 +912,36 @@ class ModpackLifecycleService {
         launch.binding.targetPath !== normalizeRecoveryTargetPath(targetPath)) throw recoveryRequired();
     this.#unrecordedLaunchClosures.set(jobId, { epoch, binding: launch.binding });
     return true;
+  }
+
+  // The executor's own knowledge, not a shape inferred later: this new-server
+  // attempt stopped before revalidate (the first runtime step that may create
+  // recovery evidence or touch the target), holds no recovery record, candidate or
+  // restore point, proved its runtime and cleanup, and its destination is still
+  // physically the captured reservation. Its terminal can then carry the release.
+  // Recovery refusals keep their own handling and never record this closure.
+  async #recordPreLeaseLaunchClosure({ claimed, operationKind, state, error, cleanupError }) {
+    const jobId = claimed.jobId;
+    if (!NEW_SERVER_OPERATION_KINDS.has(operationKind) || state.revalidateStarted || state.recoveryRecordPrepared ||
+        state.candidateBuilt || state.restorePointAttempted || state.restorePoint !== null || cleanupError !== null ||
+        error?.runtimeWritersUnproven === true || safeErrorCode(error) === 'RECOVERY_REQUIRED' ||
+        this.mutationCoordinator?.globalRecoveryBlock === true || !this.newServerLaunchIds.has(jobId) ||
+        !this.launchRecoveryRegistry || typeof this.launchRegistrationState !== 'function' ||
+        typeof this.launchUnstartedTargetVerifier !== 'function') return false;
+    try {
+      const epoch = this.launchOwner.epoch;
+      this.launchOwner.assertCurrent(epoch, { allowClosing: true });
+      const launch = await this.operationStore.getNewServerLaunch(jobId, epoch);
+      this.launchOwner.assertCurrent(epoch, { allowClosing: true });
+      if (!launch || launch.job.operationKind !== operationKind || launch.binding.destinationDisposition !== 'held' ||
+          launch.binding.instanceId !== claimed.plan.operation.instanceId) return false;
+      if (await this.launchUnstartedTargetVerifier(launch) !== true) return false;
+      this.launchOwner.assertCurrent(epoch, { allowClosing: true });
+      this.#unrecordedLaunchClosures.set(jobId, { epoch, binding: launch.binding, preLease: true });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   settleJobDestination({ jobId, disposition, terminalUpdate } = {}) {
@@ -914,7 +972,8 @@ class ModpackLifecycleService {
         const live = this.#unrecordedLaunchClosures.get(jobId);
         const liveClosure = terminalUpdate && disposition === 'released' && live?.epoch === epoch &&
           isDeepStrictEqual({ ...launch.binding, destinationDisposition: 'held' }, { ...live.binding, destinationDisposition: 'held' }) &&
-          evidence.cleanEvidence && registrationState === 'absent';
+          evidence.cleanEvidence && registrationState === 'absent' &&
+          (!live.preLease || await this.#reproveUnstartedTarget(launch, assertCurrent));
         const destinationRecovery = isDestinationRecoveryClosure(launch.job, evidence, registrationState);
         const unstartedClosure = !terminalUpdate && disposition === 'released' && launch.binding.destinationDisposition === 'held' &&
           await this.#verifyUnstartedLaunchClosure(launch, evidence, registrationState, assertCurrent);
@@ -946,23 +1005,41 @@ class ModpackLifecycleService {
         if (!confirmed || confirmed.binding.destinationDisposition !== disposition ||
             !isDeepStrictEqual({ ...confirmed.binding, destinationDisposition: 'held' },
               { ...initial.binding, destinationDisposition: 'held' })) throw recoveryRequired(lastError);
-        if (disposition === 'released' && registrationState === 'absent' &&
-            typeof this.mutationCoordinator.retireAbandonedIncarnation === 'function') {
-          this.mutationCoordinator.retireAbandonedIncarnation({ instanceId: confirmed.binding.instanceId,
-            serverPath: confirmed.binding.targetPath }, { operationId: jobId });
-        }
+        // The durable disposition is confirmed: settle memory before anything that
+        // can still refuse, so a caller never sees a held folder that disk released.
         this.destinationReservations.removeConfirmedJobHold({ jobId, instanceId: confirmed.binding.instanceId, disposition });
         this.#unrecordedLaunchClosures.delete(jobId);
         this.launchSettlements.set(jobId, classifyLaunchDestination({ ...confirmed, registrationState,
           recoveryEvidence: { owned: this.hasActiveJob(jobId) } }));
+        if (disposition === 'released' && registrationState === 'absent' &&
+            typeof this.mutationCoordinator?.retireAbandonedIncarnation === 'function') {
+          try {
+            this.mutationCoordinator.retireAbandonedIncarnation({ instanceId: confirmed.binding.instanceId,
+              serverPath: confirmed.binding.targetPath }, { operationId: jobId });
+          } catch {
+            // Best effort: an unretired alias keeps refusing that folder (fail closed) until a restart.
+            console.warn('Modpack setup: a released destination keeps its server alias until Minecraft Core restarts');
+          }
+        }
         return confirmed;
       }
       throw recoveryRequired(lastError);
     });
   }
 
+  // A pre-lease closure was recorded outside the destination gate; reprove the
+  // untouched target inside it before the terminal and its release are published.
+  async #reproveUnstartedTarget(launch, assertCurrent) {
+    let verified = false;
+    try { verified = await this.launchUnstartedTargetVerifier(launch) === true; }
+    catch { verified = false; }
+    assertCurrent();
+    return verified;
+  }
+
   async #verifyUnstartedLaunchClosure(launch, evidence, registrationState, assertCurrent) {
-    if (!isUnstartedLaunchFailure(launch.job) || !evidence.cleanEvidence || registrationState !== 'absent' ||
+    if (!(isUnstartedLaunchFailure(launch.job) || isUnstartedLaunchCancellation(launch.job)) ||
+        !evidence.cleanEvidence || registrationState !== 'absent' ||
         typeof this.launchUnstartedTargetVerifier !== 'function' ||
         typeof this.mutationCoordinator?.assertUnstartedMutation !== 'function') return false;
     const assertUnowned = () => {
@@ -1197,8 +1274,28 @@ class ModpackLifecycleService {
     catch (error) { return Promise.reject(error); }
   }
 
+  // drain()'s own predicate: admitted work (including recovery that has not yet
+  // reached its coordinator reservation), running jobs and preflight inspections.
+  hasActiveWork() {
+    return this.admittedTasks.size > 0 || this.activeOperations.size > 0 || this.planningInspections.size > 0;
+  }
+
+  listActiveOperationIds() {
+    const ids = new Set([...this.activeOperations.keys(), ...this.planningInspections.keys()]);
+    for (const task of this.admittedTasks) {
+      // Admitted work has no job identity yet; give it a stable process-local one.
+      let id = this.#admittedTaskIds.get(task);
+      if (!id) {
+        id = `admitted-work-${++this.#admittedTaskSequence}`;
+        this.#admittedTaskIds.set(task, id);
+      }
+      ids.add(id);
+    }
+    return Object.freeze([...ids]);
+  }
+
   async drain() {
-    while (this.admittedTasks.size || this.activeOperations.size || this.planningInspections.size) {
+    while (this.hasActiveWork()) {
       await Promise.allSettled([...this.admittedTasks, ...[...this.activeOperations.values()].map(owner => owner.settled),
         ...[...this.planningInspections.values()].map(owner => owner.settled)]);
     }
@@ -1557,8 +1654,8 @@ class ModpackLifecycleService {
   async getState(instanceIdValue) {
     const instanceId = assertIdentifier(instanceIdValue);
     const resolved = await this.#resolveStateInstance(instanceId);
-    if (!this.stateRepository || typeof this.stateRepository.read !== 'function') throw invalid();
-    const current = this.stateRepository.read(resolved.serverPath);
+    if (!this.stateObserver || typeof this.stateObserver.read !== 'function') throw invalid();
+    const current = this.stateObserver.read(resolved.serverPath);
     if (!current) {
       return deepFreeze({
         type: 'modpack-state',
@@ -1599,8 +1696,8 @@ class ModpackLifecycleService {
     if ((cursor !== null && (typeof cursor !== 'string' || cursor.length < 1 || cursor.length > 512)) ||
         !Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw invalid();
     const resolved = await this.#resolveStateInstance(instanceId);
-    if (!this.stateRepository || typeof this.stateRepository.listHistory !== 'function') throw invalid();
-    const page = this.stateRepository.listHistory(resolved.serverPath, { cursor, limit });
+    if (!this.stateObserver || typeof this.stateObserver.listHistory !== 'function') throw invalid();
+    const page = this.stateObserver.listHistory(resolved.serverPath, { cursor, limit });
     return deepFreeze({
       instanceId,
       items: page.items.map(publicHistoryEntry),
@@ -1714,7 +1811,9 @@ class ModpackLifecycleService {
         // getJob waits for terminal settlement, which may need this same path
         // gate. Hydrate first, never while holding the destination gate.
         const job = await this.getJob(hold.jobId);
-        if (job?.phase !== 'failed' || (job.outcome?.failureReason !== 'destination-recovery' && !isUnstartedLaunchFailure(job))) return false;
+        const releasable = isUnstartedLaunchCancellation(job) || (job?.phase === 'failed' &&
+          (job.outcome?.failureReason === 'destination-recovery' || isUnstartedLaunchFailure(job)));
+        if (!releasable) return false;
         return Boolean(await this.settleJobDestination({ jobId: hold.jobId, disposition: 'released' }));
       }
       const record = reservations.peek(instanceId);
@@ -1737,21 +1836,33 @@ class ModpackLifecycleService {
     let claimed = null;
     let retain = false;
     let heldAdmission = false;
+    let reservationLapsed = false;
     const reservations = this.destinationReservations;
+    // An expired unheld or missing reservation can never admit this one-use plan.
+    const resolveReservation = instanceId => {
+      let value;
+      try { value = reservations.resolve(instanceId); }
+      catch (error) {
+        if (error?.code === 'PLAN_STALE') reservationLapsed = true;
+        throw error;
+      }
+      if (!value) reservationLapsed = true;
+      return value;
+    };
     try {
       const reviewed = await this.planRegistry.get({ planId, fingerprint: planFingerprint });
       this.launchOwner.assertCurrent(epoch);
       const instanceId = reviewed.reservationInstanceId;
       if (!instanceId || reviewed.plan.operation?.instanceId !== instanceId) throw stale();
       entry.instanceId = instanceId;
-      const reservation = reservations.resolve(instanceId);
+      const reservation = resolveReservation(instanceId);
       if (!reservation) throw stale();
       return await reservations.withDestinationGate(reservation.targetPath, async () => {
         this.launchOwner.assertCurrent(epoch);
         const current = await this.planRegistry.get({ planId, fingerprint: planFingerprint });
         this.launchOwner.assertCurrent(epoch);
         if (current.plan !== reviewed.plan || current.reservationInstanceId !== instanceId ||
-            reservations.resolve(instanceId) !== reservation || reservations.isDestinationHeld(instanceId)) throw stale();
+            resolveReservation(instanceId) !== reservation || reservations.isDestinationHeld(instanceId)) throw stale();
         const operationKind = mutationOperationKind(current.plan);
         if (!NEW_SERVER_OPERATION_KINDS.has(operationKind)) throw stale();
         if (EULA_REQUIRED_OPERATION_KINDS.has(operationKind) && choices.acceptEula !== true) {
@@ -1814,6 +1925,13 @@ class ModpackLifecycleService {
       if (!retain) {
         try { if (claimed) await this.#releaseClaim(claimed.jobId); }
         catch (cause) { retain = true; throw recoveryRequired(cause); }
+        if (!claimed && reservationLapsed) {
+          // Never admitted and its reservation lapsed: fence the plan so exact reads
+          // report not-started instead of a usable plan that later reads as pending
+          // forever. The fence is synchronous; workspace cleanup must not delay this
+          // reply, and a failed cleanup is retried when the registry is disposed.
+          Promise.resolve(this.planRegistry.invalidate(planId)).catch(() => {});
+        }
       }
       throw error;
     } finally {
@@ -1965,6 +2083,7 @@ class ModpackLifecycleService {
       recoveryRecordPrepared: false,
       restorePoint: null,
       restorePointAttempted: false,
+      revalidateStarted: false,
       failureStep: null
     };
     try {
@@ -2054,14 +2173,23 @@ class ModpackLifecycleService {
 
   async #tryPublishTerminal(resolution) {
     if (!resolution || resolution.kind !== TERMINAL_RESOLUTION_KIND) throw invalid();
-    if (this.#unrecordedLaunchClosures.has(resolution.jobId) && ['failed', 'cancelled'].includes(resolution.request.nextPhase)) {
+    const closure = this.#unrecordedLaunchClosures.get(resolution.jobId);
+    if (closure && ['failed', 'cancelled'].includes(resolution.request.nextPhase)) {
       // Settlement owns the single complete-reproof retry. Do not multiply it
       // with the generic terminal publisher's retry loop or accept phase alone.
       try {
         const settled = await this.settleJobDestination({ jobId: resolution.jobId,
           disposition: 'released', terminalUpdate: resolution.request });
+        if (!settled) throw recoveryRequired();
         return { job: settled.job, error: null };
-      } catch (error) { return { job: null, error }; }
+      } catch (error) {
+        if (!closure.preLease) return { job: null, error };
+        // A pre-lease closure only adds the release. When it cannot be proven
+        // again, publish the ordinary held terminal, never recovery-required.
+        if (this.#unrecordedLaunchClosures.get(resolution.jobId) === closure) {
+          this.#unrecordedLaunchClosures.delete(resolution.jobId);
+        }
+      }
     }
     let lastError = null;
     let latest = null;
@@ -2137,6 +2265,8 @@ class ModpackLifecycleService {
   async #executeUnderLease(context) {
     const { claimed, choices, operationKind, selectedRestorePoint, signal, lease, resolved, restartToken, state } = context;
     await this.#throwIfCancelled(claimed.jobId, signal);
+    // From here the runtime may create recovery evidence or touch the target.
+    state.revalidateStarted = true;
     await this.mutationRuntime.revalidate({
       jobId: claimed.jobId,
       plan: claimed.plan,
@@ -2544,6 +2674,9 @@ class ModpackLifecycleService {
         job = await this.operationStore.requestCancellation(claimed.jobId);
       }
       const terminalPhase = runtimeUnproven ? 'recovery-required' : wasCancelled ? 'cancelled' : 'failed';
+      if (deferTerminal && terminalPhase !== 'recovery-required') {
+        await this.#recordPreLeaseLaunchClosure({ claimed, operationKind, state, error, cleanupError });
+      }
       const errorCode = runtimeUnproven && typeof error?.runtimeFailureCode === 'string'
         ? safeErrorCode({ code: error.runtimeFailureCode }) : safeErrorCode(error);
       const failureDiagnostic = wasCancelled ? null : failureDiagnosticFromError(error);

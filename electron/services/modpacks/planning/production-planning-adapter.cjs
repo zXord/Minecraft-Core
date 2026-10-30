@@ -12,6 +12,7 @@ const {
 const { readContentRevision: defaultReadContentRevision } = require('../../server-content-revision.cjs');
 const { computePreflightReserve } = require('../limits.cjs');
 const { compileAssetPatternForInspection } = require('../providers/github-asset-pattern.cjs');
+const { isSafeWindowsBasename } = require('../windows-basename.cjs');
 const { canonicalPath, planOwnership } = require('./ownership-planner.cjs');
 const { computePreflightPlanFingerprint } = require('./plan-fingerprint.cjs');
 const { buildPreflightPlan } = require('./preflight-planner.cjs');
@@ -30,6 +31,8 @@ const OPERATION_MAP = Object.freeze({
   'files-only': 'files-only',
   'import-files-only-new': 'files-only'
 });
+// Requests that adopt an existing folder or create a server in a new destination.
+const DESTINATION_OPERATION_KINDS = new Set(['install-new', 'install-existing', 'import-files-only-new', 'files-only']);
 const NON_DOWNGRADE_MANAGED_REPLACEMENTS = new Set(['install', 'upgrade', 'switch']);
 const GITHUB_METADATA_RETAINING_REPLACEMENTS = new Set(['upgrade', 'downgrade']);
 const PUBLIC_CONFLICT_CHOICES = new Set(['keep-mine', 'use-pack', 'keep-both', 'disable-addon', 'remove-addon']);
@@ -91,6 +94,57 @@ function selectedPortCheckFailed(cause) {
     'The selected Minecraft server port could not be checked. Retry the review.',
     { cause, details: { field: 'selections.serverPort' }, retryable: true }
   );
+}
+
+function unsupportedFolderShape() {
+  // Public error text may not contain path separators or drive letters.
+  return new ModpackError(
+    'INVALID_REQUEST',
+    'Modpacks need the server in its own normal folder. Move it into a subfolder, such as a MyServer folder inside a Minecraft folder, then retry.'
+  );
+}
+
+function sameFolderSpelling(left, right) {
+  return process.platform === 'win32'
+    ? left.toLocaleLowerCase('en-US') === right.toLocaleLowerCase('en-US')
+    : left === right;
+}
+
+// Resolves the folder, or its nearest existing ancestor when it does not exist
+// yet. A junction, symlink, SUBST or mapped-drive component makes the real path
+// differ by more than letter case. An unexpected filesystem error gives no
+// verdict here; the strict lifecycle checks that follow still fail closed.
+function isAliasedFolder(folder, fsApi) {
+  for (let candidate = folder; ; candidate = path.dirname(candidate)) {
+    let stat;
+    try { stat = fsApi.lstatSync(candidate, { throwIfNoEntry: false }); }
+    catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error?.code)) return false;
+    }
+    if (stat) {
+      try { return !sameFolderSpelling(fsApi.realpathSync.native(candidate), candidate); }
+      catch { return stat.isSymbolicLink?.() === true; }
+    }
+    if (path.dirname(candidate) === candidate) return false;
+  }
+}
+
+// Folder shapes the modpack lifecycle can never own end to end. They are refused
+// before any download, inspection or modpack-state read, instead of failing late
+// with a stale review: a drive root, a folder directly under a drive root, a UNC
+// or device path, an aliased path, and names that are not NFC or that Windows
+// would trim. Read-only; plain registered servers in these folders are untouched.
+function assertModpackFolderShape(folder, { fsApi = fs } = {}) {
+  if (!fsApi || typeof fsApi.lstatSync !== 'function' || typeof fsApi.realpathSync?.native !== 'function') throw invalid();
+  if (typeof folder !== 'string' || folder.length === 0 || folder.includes('\0') || !path.isAbsolute(folder) ||
+      /^[\\/]{2}/u.test(folder)) throw unsupportedFolderShape();
+  const resolved = path.resolve(folder);
+  const { root } = path.parse(resolved);
+  if (/^[\\/]{2}/u.test(root) || resolved === root || path.dirname(resolved) === root) throw unsupportedFolderShape();
+  const names = resolved.slice(root.length).split(/[\\/]/u);
+  if (names.some(name => name !== name.normalize('NFC') || !isSafeWindowsBasename(name)) ||
+      isAliasedFolder(resolved, fsApi)) throw unsupportedFolderShape();
+  return true;
 }
 
 function sha256(value) {
@@ -625,6 +679,11 @@ class ProductionPlanningAdapter {
     this.executionRecords = new Map();
   }
 
+  // Also used by the lifecycle when a new-server destination is reserved.
+  assertDestinationShape(serverPath) {
+    return assertModpackFolderShape(serverPath, { fsApi: this.fs });
+  }
+
   async listRollbackOptions({ instanceId } = {}) {
     if (typeof instanceId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(instanceId) ||
         typeof this.stateRepository.listHistory !== 'function' ||
@@ -670,6 +729,7 @@ class ProductionPlanningAdapter {
     const resolved = await this.instanceResolver.resolveInstance(request.instanceId);
     if (!resolved || resolved.instanceId !== request.instanceId || typeof resolved.serverPath !== 'string') throw stale();
     const serverPath = path.resolve(resolved.serverPath);
+    if (DESTINATION_OPERATION_KINDS.has(request.operationKind)) this.assertDestinationShape(serverPath);
     const exists = targetExists(this.fs, serverPath);
     let currentState = null;
     if (exists) {
@@ -1175,4 +1235,4 @@ class ProductionPlanningAdapter {
   }
 }
 
-module.exports = { ProductionPlanningAdapter, inspectionForPlan, sameRepairSource, sourceForPlan };
+module.exports = { ProductionPlanningAdapter, assertModpackFolderShape, inspectionForPlan, sameRepairSource, sourceForPlan };

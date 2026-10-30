@@ -154,7 +154,7 @@ async function fixture(t, { physicalTarget = false } = {}) {
     serviceDependencies, get executions() { return executions; }, advance(ms) { now += ms; }, loseOwner() { current = false; } };
 }
 
-async function seedFailedAdmission(f, { step = 'acquire-mutation', extraEvent = false } = {}) {
+async function seedFailedAdmission(f, { step = 'acquire-mutation', extraEvent = false, cleanupPending = false } = {}) {
   const { job } = await seedLaunch(f);
   await f.store.transition(job.jobId, { expectedPhase: 'queued', nextPhase: 'preflight', patch: {
     progress: { percent: 5, message: 'Revalidating the reviewed plan', currentItem: null }
@@ -166,7 +166,8 @@ async function seedFailedAdmission(f, { step = 'acquire-mutation', extraEvent = 
     details: { errorCode: 'INVALID_REQUEST', step } });
   if (extraEvent) await f.store.appendEvent(job.jobId, { channel: 'log', message: 'Later diagnostic', details: {} });
   await f.store.transition(job.jobId, { expectedPhase: 'preflight', nextPhase: 'failed', patch: {
-    outcome: { status: 'failed', message: 'The operation failed before the server changed', errorCode: 'INVALID_REQUEST', cleanupPending: false }
+    outcome: { status: 'failed', message: 'The operation failed before the server changed', errorCode: 'INVALID_REQUEST',
+      cleanupPending, ...(cleanupPending ? { cleanupErrorCode: 'COMMIT_FAILED' } : {}) }
   } });
   const launch = await f.store.getNewServerLaunch(job.jobId, f.owner.epoch);
   f.service.rememberNewServerLaunch(launch); f.reservations.restoreJobHold({ jobId: job.jobId, binding: launch.binding });
@@ -1154,4 +1155,521 @@ test('launch restoration refuses a different live incarnation at the same path',
     instanceId: 'server-old', targetPath: 'c:\\launchfixture\\pack', capturedReservation: { kind: 'absent' },
     displayName: 'Pack', destinationDisposition: 'held' } }), { code: 'PLAN_STALE' });
   assert.equal(f.reservations.isDestinationHeld(reserved.instanceId), false);
+});
+
+function realCoordinator({ completeRecovery = true } = {}) {
+  const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
+  const { createServerMutationContext } = require('../../electron/services/server-mutation-context.cjs');
+  const coordinator = new ServerMutationCoordinator({ context: createServerMutationContext(), readContentRevision: () => 0,
+    bumpContentRevision() { assert.fail('an unstarted new-server launch never bumps a live revision'); } });
+  if (completeRecovery) coordinator.completeStartupRecovery([]);
+  return coordinator;
+}
+
+// A real executor run against a physical empty destination, the real coordinator,
+// clean recovery evidence and an unregistered target. revalidate is the first
+// runtime step that may touch the target; here it stops right after the lease.
+async function liveLaunchFixture(t) {
+  const f = await fixture(t, { physicalTarget: true });
+  f.service.launchRecoveryRegistry = cleanRecoveryRegistry();
+  f.service.launchRegistrationState = () => 'absent';
+  f.service.mutationCoordinator = realCoordinator();
+  const runtime = f.service.mutationRuntime;
+  runtime.resolveInstance = async ({ plan }) => ({ instanceId: plan.operation.instanceId,
+    serverPath: f.reservations.resolve(plan.operation.instanceId).targetPath, priorRunning: false });
+  const leases = [];
+  runtime.revalidate = async ({ jobId, lease }) => {
+    leases.push({ jobId, kind: lease.kind });
+    throw new ModpackError('PLAN_STALE', 'stop after the mutation lease was granted');
+  };
+  return Object.assign(f, {
+    runtime,
+    leases,
+    targetPath: path.join(f.root, 'destination'),
+    async launch() {
+      const reserved = await f.reservations.reserveWithNativeDialog({});
+      const queued = await f.service.startOperation(await f.plan(reserved.instanceId));
+      return { reserved, queued };
+    },
+    async settled(jobId) {
+      await f.service.drain();
+      return f.store.getNewServerLaunch(jobId, f.owner.epoch);
+    }
+  });
+}
+
+function armUnstartedExit(f, exit) {
+  const entered = deferred(); const gate = deferred();
+  const { resolveInstance, quiesce } = f.runtime;
+  const coordinator = f.service.mutationCoordinator;
+  const runMutation = coordinator.runMutation;
+  if (exit === 'queued-cancel') {
+    f.runtime.resolveInstance = async request => { entered.resolve(); await gate.promise; return resolveInstance(request); };
+  } else if (exit === 'quiesce-cancel') {
+    f.runtime.quiesce = async () => { entered.resolve(); await gate.promise; };
+  } else if (exit === 'callback-start-cancel') {
+    // A persisted cancellation without an aborted signal lets the coordinator grant
+    // the lease; the callback's first cancellation check stops before revalidate.
+    f.runtime.quiesce = async ({ jobId }) => { await f.store.requestCancellation(jobId); entered.resolve(); };
+  } else {
+    coordinator.runMutation = () => {
+      entered.resolve();
+      return Promise.reject(new ModpackError('INVALID_REQUEST', 'The server mutation request is invalid'));
+    };
+  }
+  return {
+    async act(queued) {
+      await entered.promise;
+      if (['queued-cancel', 'quiesce-cancel'].includes(exit)) {
+        await f.service.cancelJob(queued.jobId);
+        gate.resolve();
+      }
+    },
+    disarm() {
+      Object.assign(f.runtime, { resolveInstance, quiesce });
+      coordinator.runMutation = runMutation;
+    }
+  };
+}
+
+for (const exit of ['queued-cancel', 'quiesce-cancel', 'callback-start-cancel', 'acquire-invalid-request']) {
+  test(`launch unstarted ${exit} releases its untouched destination in the same session and the folder reaches a fresh lease`, async t => {
+    const f = await liveLaunchFixture(t);
+    const armed = armUnstartedExit(f, exit);
+    const { reserved, queued } = await f.launch();
+    await armed.act(queued);
+    const launch = await f.settled(queued.jobId);
+    assert.equal(launch.job.phase, exit === 'acquire-invalid-request' ? 'failed' : 'cancelled');
+    assert.equal(launch.job.outcome.errorCode, exit === 'acquire-invalid-request' ? 'INVALID_REQUEST' : 'CANCELLED');
+    assert.equal(launch.job.outcome.cleanupPending, false);
+    assert.equal(launch.binding.destinationDisposition, 'released');
+    assert.equal(f.reservations.isDestinationHeld(reserved.instanceId), false);
+    assert.equal(f.service.launchSettlements.get(queued.jobId).disposition, 'released');
+    assert.deepEqual(fs.readdirSync(f.targetPath), [], 'nothing was written to the destination');
+    assert.deepEqual(f.leases, [], 'revalidate never ran');
+
+    armed.disarm();
+    const next = await f.launch();
+    assert.notEqual(next.reserved.instanceId, reserved.instanceId);
+    await f.settled(next.queued.jobId);
+    assert.deepEqual(f.leases, [{ jobId: next.queued.jobId, kind: 'mutation' }]);
+  });
+}
+
+test('launch unstarted settlement does not depend on best-effort progress or diagnostic writes', async t => {
+  const f = await liveLaunchFixture(t);
+  const armed = armUnstartedExit(f, 'quiesce-cancel');
+  f.store.updateProgress = async () => { throw new Error('optional progress write failed'); };
+  f.store.appendEvent = async () => { throw new Error('optional diagnostic write failed'); };
+  const { reserved, queued } = await f.launch();
+  await armed.act(queued);
+  const launch = await f.settled(queued.jobId);
+  assert.equal(launch.job.phase, 'cancelled');
+  assert.deepEqual(launch.job.events, [], 'no diagnostic event was recorded');
+  assert.equal(launch.binding.destinationDisposition, 'released');
+  assert.equal(f.reservations.isDestinationHeld(reserved.instanceId), false);
+});
+
+test('launch refused by a stale coordinator alias releases its untouched destination in the same session', async t => {
+  const f = await liveLaunchFixture(t);
+  // A deleted registered server leaves its idle instance/path alias (R1, R3).
+  await f.service.mutationCoordinator.runMutation({ instanceId: 'deleted-server', serverPath: f.targetPath },
+    { operation: 'delete-instance', operationId: 'delete-instance-1', revisionMode: 'none' }, async () => null);
+  const { reserved, queued } = await f.launch();
+  const launch = await f.settled(queued.jobId);
+  assert.equal(launch.job.phase, 'failed');
+  assert.equal(launch.job.outcome.errorCode, 'INVALID_REQUEST');
+  assert.equal(launch.binding.destinationDisposition, 'released');
+  assert.equal(f.reservations.isDestinationHeld(reserved.instanceId), false);
+  assert.deepEqual(f.leases, []);
+  assert.equal(f.service.mutationCoordinator.instanceAliases.has('deleted-server'), true,
+    'settling this launch never retires another instance alias');
+});
+
+for (const variant of ['revalidate-started', 'recovery-record', 'runtime-unproven', 'registered', 'non-empty', 'replaced',
+  'cleanup-error', 'settlement-fault', 'coordinator-global-block']) {
+  test(`launch unstarted settlement stays held for ${variant}`, async t => {
+    const f = await liveLaunchFixture(t);
+    let jobId = null;
+    if (variant !== 'revalidate-started') {
+      f.runtime.quiesce = async context => {
+        jobId = context.jobId;
+        if (variant === 'runtime-unproven') {
+          throw Object.assign(new ModpackError('COMMIT_FAILED', 'Runtime writers could not be proven stopped'), { runtimeWritersUnproven: true });
+        }
+        if (variant === 'non-empty') fs.writeFileSync(path.join(f.targetPath, 'user-file.txt'), 'retain');
+        if (variant === 'replaced') { fs.rmdirSync(f.targetPath); fs.mkdirSync(f.targetPath); }
+        await f.store.requestCancellation(context.jobId);
+        throw new ModpackError('CANCELLED', 'The operation was cancelled');
+      };
+    }
+    if (variant === 'recovery-record') {
+      f.service.launchRecoveryRegistry.load = async id => closureRecord({ jobId: id, phase: 'queued', outcome: null,
+        target: { kind: 'new', stableServerId: 'held-server', path: f.targetPath } });
+    }
+    if (variant === 'registered') f.service.launchRegistrationState = () => 'registered';
+    if (variant === 'cleanup-error') f.plans.releaseClaim = async () => false;
+    let settlementAttempts = 0;
+    if (variant === 'settlement-fault') {
+      f.store.settleNewServerDestination = async () => {
+        settlementAttempts++;
+        throw new Error('settlement write failed before publication');
+      };
+    }
+    if (variant === 'coordinator-global-block') {
+      f.service.mutationCoordinator = realCoordinator({ completeRecovery: false });
+      f.service.mutationCoordinator.completeStartupRecovery([], { globalBlock: true });
+    }
+    const { reserved, queued } = await f.launch();
+    const launch = await f.settled(queued.jobId);
+    if (variant !== 'revalidate-started' && variant !== 'coordinator-global-block') assert.equal(jobId, queued.jobId);
+    const expectedPhase = variant === 'runtime-unproven' ? 'recovery-required'
+      : ['revalidate-started', 'coordinator-global-block'].includes(variant) ? 'failed' : 'cancelled';
+    assert.equal(launch.job.phase, expectedPhase, JSON.stringify(launch.job.outcome));
+    assert.equal(launch.binding.destinationDisposition, 'held');
+    assert.equal(f.reservations.isDestinationHeld(reserved.instanceId), true);
+    if (variant === 'cleanup-error') assert.equal(launch.job.outcome.cleanupPending, true);
+    if (variant === 'revalidate-started') assert.deepEqual(f.leases, [{ jobId: queued.jobId, kind: 'mutation' }]);
+    if (variant === 'settlement-fault') {
+      assert.equal(settlementAttempts, 2, 'the release was attempted once plus its single reproved retry');
+      assert.equal(launch.job.outcome.errorCode, 'CANCELLED', 'a failed release falls back to the ordinary held terminal');
+    }
+  });
+}
+
+test('launch settlement finishes the in-memory release before best-effort retirement under a coordinator global block', async t => {
+  const f = await fixture(t); const { job, launch } = await seedLaunch(f); await recordedAbandonment(f, launch);
+  const coordinator = realCoordinator({ completeRecovery: false });
+  const selector = { instanceId: launch.binding.instanceId, serverPath: launch.binding.targetPath };
+  coordinator.installRecoveryBlocks([{ operationId: job.jobId, selector }]);
+  coordinator.completeStartupRecovery([], { globalBlock: true });
+  assert.deepEqual(await coordinator.runRecoveryMutation(selector, { operationId: job.jobId }, async () => ({ resolved: true })),
+    { resolved: true });
+  f.service.mutationCoordinator = coordinator;
+  const settled = await f.service.settleJobDestination({ jobId: job.jobId, disposition: 'released' });
+  assert.equal(settled.binding.destinationDisposition, 'released');
+  assert.equal((await f.store.getNewServerLaunch(job.jobId, f.owner.epoch)).binding.destinationDisposition, 'released');
+  assert.equal(f.reservations.isDestinationHeld(job.serverId), false);
+  assert.equal(f.service.launchSettlements.get(job.jobId).settlementStatus, 'settled');
+  assert.equal(coordinator.instanceAliases.size, 1, 'an unretired alias stays in place and fails closed');
+});
+
+function legacyFailedLaunchJob(change = () => {}) {
+  const job = { jobId: 'legacy-job', phase: 'failed', sequence: 4, terminalAt: '2026-10-11T00:00:00.000Z',
+    operationKind: 'install-new', swapStep: null, cancellationRequested: false,
+    outcome: { status: 'failed', message: 'The operation failed before the server changed', errorCode: 'INVALID_REQUEST', cleanupPending: false },
+    events: [{ jobId: 'legacy-job', channel: 'log', phase: 'preflight', sequence: 3, message: 'The server mutation request is invalid',
+      details: { errorCode: 'INVALID_REQUEST', step: 'acquire-mutation' } }] };
+  change(job);
+  return job;
+}
+
+test('launch legacy unstarted failure predicate rejects every changed term', () => {
+  const { isUnstartedLaunchFailure: matches } = require('../../electron/services/modpack-lifecycle/new-server-launch-closure.cjs');
+  assert.equal(matches(legacyFailedLaunchJob()), true);
+  assert.equal(matches(legacyFailedLaunchJob(job => { job.operationKind = 'import-files-only-new'; })), true);
+  const changes = {
+    phase: job => { job.phase = 'cancelled'; },
+    sequence: job => { job.sequence = 5; },
+    terminalAt: job => { job.terminalAt = null; },
+    operationKind: job => { job.operationKind = 'install-existing'; },
+    swapStep: job => { job.swapStep = 'none'; },
+    cancellationRequested: job => { job.cancellationRequested = true; },
+    outcomeStatus: job => { job.outcome.status = 'cancelled'; },
+    outcomeErrorCode: job => { job.outcome.errorCode = 'PLAN_STALE'; },
+    cleanupPending: job => { job.outcome.cleanupPending = true; },
+    cleanupErrorCode: job => { job.outcome.cleanupErrorCode = 'COMMIT_FAILED'; },
+    failureReason: job => { job.outcome.failureReason = 'destination-recovery'; },
+    runtimeDiagnostic: job => { job.outcome.runtimeDiagnostic = { stage: 'quiesce', reason: 'unproven' }; },
+    noEvents: job => { job.events = []; },
+    extraEvent: job => { job.events.push({ ...job.events[0], sequence: 4 }); },
+    eventJob: job => { job.events[0].jobId = 'other-job'; },
+    eventChannel: job => { job.events[0].channel = 'progress'; },
+    eventPhase: job => { job.events[0].phase = 'queued'; },
+    eventSequence: job => { job.events[0].sequence = 2; },
+    eventStep: job => { job.events[0].details.step = 'quiesce'; },
+    eventErrorCode: job => { job.events[0].details.errorCode = 'CANCELLED'; },
+    extraDetail: job => { job.events[0].details.field = 'plan'; }
+  };
+  for (const [term, change] of Object.entries(changes)) assert.equal(matches(legacyFailedLaunchJob(change)), false, term);
+  for (const value of [null, undefined, {}, { phase: 'failed' }]) assert.equal(matches(value), false);
+});
+
+function legacyCancelledLaunchJob(step, change = () => {}) {
+  const job = { jobId: 'legacy-job', phase: 'cancelled', sequence: step ? 5 : 4, terminalAt: '2026-10-11T00:00:00.000Z',
+    operationKind: 'install-new', swapStep: null, cancellationRequested: true,
+    outcome: { status: 'cancelled', message: 'The operation was cancelled before the server changed', errorCode: 'CANCELLED', cleanupPending: false },
+    events: [{ jobId: 'legacy-job', channel: 'log', phase: 'cancelling', sequence: step ? 4 : 3, message: 'The modpack operation was cancelled',
+      details: { errorCode: 'CANCELLED', ...(step ? { step } : {}) } }] };
+  change(job);
+  return job;
+}
+
+test('launch legacy unstarted cancellation predicate accepts only the exact pre-revalidate shapes', () => {
+  const { isUnstartedLaunchCancellation: matches, isUnstartedLaunchFailure } =
+    require('../../electron/services/modpack-lifecycle/new-server-launch-closure.cjs');
+  for (const step of [null, 'acquire-mutation', 'suspend-auto-restart', 'quiesce', 'revalidate-plan']) {
+    assert.equal(matches(legacyCancelledLaunchJob(step)), true, String(step));
+    assert.equal(isUnstartedLaunchFailure(legacyCancelledLaunchJob(step)), false);
+  }
+  assert.equal(matches(legacyCancelledLaunchJob('quiesce', job => { job.operationKind = 'import-files-only-new'; })), true);
+  const changes = {
+    phase: job => { job.phase = 'failed'; },
+    queuedSequence: job => { job.sequence = 5; },
+    preflightSequence: job => { job.events[0].details.step = 'quiesce'; },
+    terminalAt: job => { job.terminalAt = null; },
+    operationKind: job => { job.operationKind = 'update'; },
+    swapStep: job => { job.swapStep = 'none'; },
+    cancellationRequested: job => { job.cancellationRequested = false; },
+    outcomeStatus: job => { job.outcome.status = 'failed'; },
+    outcomeErrorCode: job => { job.outcome.errorCode = 'INVALID_REQUEST'; },
+    cleanupPending: job => { job.outcome.cleanupPending = true; },
+    cleanupErrorCode: job => { job.outcome.cleanupErrorCode = 'COMMIT_FAILED'; },
+    failureReason: job => { job.outcome.failureReason = 'destination-recovery'; },
+    runtimeDiagnostic: job => { job.outcome.runtimeDiagnostic = { stage: 'quiesce', reason: 'unproven' }; },
+    noEvents: job => { job.events = []; },
+    extraEvent: job => { job.events.push({ ...job.events[0], sequence: 4 }); },
+    eventJob: job => { job.events[0].jobId = 'other-job'; },
+    eventChannel: job => { job.events[0].channel = 'progress'; },
+    eventPhase: job => { job.events[0].phase = 'queued'; },
+    eventSequence: job => { job.events[0].sequence = 2; },
+    eventErrorCode: job => { job.events[0].details.errorCode = 'INVALID_REQUEST'; },
+    extraDetail: job => { job.events[0].details.field = 'plan'; }
+  };
+  for (const [term, change] of Object.entries(changes)) assert.equal(matches(legacyCancelledLaunchJob(null, change)), false, term);
+  for (const step of ['staging', 'publish']) assert.equal(matches(legacyCancelledLaunchJob(step)), false, step);
+  assert.equal(matches(legacyCancelledLaunchJob('quiesce', job => { job.sequence = 4; })), false);
+  assert.equal(matches(legacyCancelledLaunchJob('quiesce', job => { job.events[0].details.field = 'plan'; })), false);
+  for (const value of [null, undefined, {}, { phase: 'cancelled' }]) assert.equal(matches(value), false);
+});
+
+async function seedCancelledAdmission(f, { step = null } = {}) {
+  const { job } = await seedLaunch(f);
+  if (step) {
+    await f.store.transition(job.jobId, { expectedPhase: 'queued', nextPhase: 'preflight', patch: {
+      progress: { percent: 5, message: 'Revalidating the reviewed plan', currentItem: null } } });
+  }
+  await f.store.requestCancellation(job.jobId);
+  await f.store.updateProgress(job.jobId, { expectedPhase: 'cancelling', progress: {
+    percent: step ? 5 : 0, message: 'Cancelling; verifying safe cleanup of the candidate.', currentItem: null } });
+  await f.store.appendEvent(job.jobId, { channel: 'log', message: 'The modpack operation was cancelled',
+    details: { errorCode: 'CANCELLED', ...(step ? { step } : {}) } });
+  await f.store.transition(job.jobId, { expectedPhase: 'cancelling', nextPhase: 'cancelled', patch: {
+    outcome: { status: 'cancelled', message: 'The operation was cancelled before the server changed', errorCode: 'CANCELLED', cleanupPending: false }
+  } });
+  const launch = await f.store.getNewServerLaunch(job.jobId, f.owner.epoch);
+  f.service.rememberNewServerLaunch(launch); f.reservations.restoreJobHold({ jobId: job.jobId, binding: launch.binding });
+  f.service.launchRecoveryRegistry = cleanRecoveryRegistry(); f.service.launchRegistrationState = () => 'absent';
+  f.service.mutationCoordinator = realCoordinator();
+  return launch;
+}
+
+for (const step of [null, 'quiesce', 'revalidate-plan']) for (const startup of [false, true]) {
+  test(`launch legacy unstarted cancellation step=${step} releases only its unchanged empty reservation startup=${startup}`, async t => {
+    const f = await fixture(t, { physicalTarget: true }); const launch = await seedCancelledAdmission(f, { step });
+    const { isUnstartedLaunchCancellation } = require('../../electron/services/modpack-lifecycle/new-server-launch-closure.cjs');
+    assert.equal(isUnstartedLaunchCancellation(launch.job), true, JSON.stringify(launch.job));
+    const before = fs.lstatSync(launch.binding.targetPath, { bigint: true });
+    if (startup) {
+      const { reconcileNewServerLaunches } = require('../../electron/services/modpack-lifecycle/operation-recovery-reconciler.cjs');
+      await reconcileNewServerLaunches({ operationStore: f.store, recoveryRegistry: f.service.launchRecoveryRegistry,
+        lifecycleService: f.service, launchOwner: f.owner, jobs: [launch.job], launches: [launch], registrationState: () => 'absent' });
+    } else assert.equal(await f.service.releaseServerDestination(launch.binding.instanceId), true);
+    const current = await f.store.getNewServerLaunch(launch.job.jobId, f.owner.epoch);
+    assert.equal(current.job.phase, 'cancelled'); assert.equal(current.binding.destinationDisposition, 'released');
+    assert.equal(f.reservations.isDestinationHeld(launch.binding.instanceId), false);
+    assert.equal(fs.lstatSync(launch.binding.targetPath, { bigint: true }).ino, before.ino);
+    assert.deepEqual(fs.readdirSync(launch.binding.targetPath), []);
+    assert.equal(f.executions, 0);
+  });
+}
+
+for (const invalidProof of ['contents', 'registered', 'recovery-record', 'own-coordinator-alias']) {
+  test(`launch legacy unstarted cancellation stays held for ${invalidProof}`, async t => {
+    const f = await fixture(t, { physicalTarget: true }); const launch = await seedCancelledAdmission(f, { step: 'quiesce' });
+    if (invalidProof === 'contents') fs.writeFileSync(path.join(launch.binding.targetPath, 'user-file.txt'), 'retain');
+    else if (invalidProof === 'registered') f.service.launchRegistrationState = () => 'registered';
+    else if (invalidProof === 'recovery-record') f.service.launchRecoveryRegistry.load = async () => closureRecord({ jobId: launch.job.jobId });
+    else {
+      // The job's own idle incarnation proves it reached the coordinator in this process.
+      await f.service.mutationCoordinator.runMutation({ instanceId: launch.binding.instanceId, serverPath: launch.binding.targetPath },
+        { operation: 'install-new', operationId: launch.job.jobId, revisionMode: 'none' }, async () => null);
+    }
+    await assert.rejects(f.service.settleJobDestination({ jobId: launch.job.jobId, disposition: 'released' }));
+    assert.equal(await f.service.releaseServerDestination(launch.binding.instanceId).catch(() => false), false);
+    assert.equal((await f.store.getNewServerLaunch(launch.job.jobId, f.owner.epoch)).binding.destinationDisposition, 'held');
+    assert.equal(f.reservations.isDestinationHeld(launch.binding.instanceId), true);
+  });
+}
+
+for (const invalidProof of ['cleanup-pending', 'coordinator-active-mutation', 'coordinator-global-block']) {
+  test(`launch rejected admission stays held for ${invalidProof}`, async t => {
+    const f = await fixture(t, { physicalTarget: true });
+    const launch = await seedFailedAdmission(f, { cleanupPending: invalidProof === 'cleanup-pending' });
+    const gate = deferred(); const entered = deferred();
+    let foreign = null;
+    if (invalidProof === 'coordinator-active-mutation') {
+      f.service.mutationCoordinator.readContentRevision = () => 0;
+      foreign = f.service.mutationCoordinator.runMutation({ instanceId: 'foreign-server', serverPath: launch.binding.targetPath },
+        { operation: 'install-new', operationId: 'foreign-job', revisionMode: 'none',
+          quiesce: async () => { entered.resolve(); await gate.promise; } }, async () => null);
+      await entered.promise;
+    } else if (invalidProof === 'coordinator-global-block') {
+      f.service.mutationCoordinator.beginStartupRecovery();
+      f.service.mutationCoordinator.completeStartupRecovery([], { globalBlock: true });
+    }
+    try {
+      await assert.rejects(f.service.settleJobDestination({ jobId: launch.job.jobId, disposition: 'released' }));
+      assert.equal(f.reservations.isDestinationHeld(launch.binding.instanceId), true);
+      assert.equal((await f.store.getNewServerLaunch(launch.job.jobId, f.owner.epoch)).binding.destinationDisposition, 'held');
+      assert.deepEqual(fs.readdirSync(launch.binding.targetPath), []);
+    } finally { gate.resolve(); await foreign; }
+  });
+}
+
+test('launch Start whose reservation lapsed fences the plan: not-started now and after plan expiry, folder reusable', async t => {
+  const f = await fixture(t);
+  const reserved = await f.reservations.reserveWithNativeDialog({});
+  const request = await f.plan(reserved.instanceId);
+  const credentials = { planId: request.planId, planFingerprint: request.planFingerprint };
+  f.advance(1000); // the reservation TTL lapsed; the plan (2 h) is still claimable
+  await assert.rejects(f.service.startOperation(request), { code: 'PLAN_STALE' });
+  assert.equal((await f.service.reconcileNewServerLaunch(credentials)).status, 'not-started');
+  f.advance(2 * 60 * 60 * 1000);
+  assert.equal((await f.service.reconcileNewServerLaunch(credentials)).status, 'not-started');
+  assert.equal(f.service.pendingNewServerAdmissions.size, 0);
+  assert.equal((await f.store.listNewServerLaunchBindings(f.owner.epoch)).length, 0);
+  assert.equal(f.executions, 0);
+  assert.equal(await f.service.releaseServerDestination(reserved.instanceId), true);
+  assert.notEqual((await f.reservations.reserveWithNativeDialog({})).instanceId, reserved.instanceId);
+});
+
+test('launch reservation lapsing inside the destination gate also fences the plan', async t => {
+  const f = await fixture(t);
+  const reserved = await f.reservations.reserveWithNativeDialog({});
+  const request = await f.plan(reserved.instanceId);
+  f.advance(999);
+  const get = f.plans.get.bind(f.plans); let calls = 0;
+  f.plans.get = async value => { const result = await get(value); if (++calls === 2) f.advance(1); return result; };
+  await assert.rejects(f.service.startOperation(request), { code: 'PLAN_STALE' });
+  assert.equal(calls, 2, 'the lapse happened inside the destination gate');
+  assert.equal((await f.service.reconcileNewServerLaunch({ planId: request.planId, planFingerprint: request.planFingerprint })).status, 'not-started');
+  assert.equal(f.executions, 0);
+});
+
+test('launch lapsed-reservation fence never delays the Start reply behind plan workspace cleanup', async t => {
+  const f = await fixture(t);
+  const reserved = await f.reservations.reserveWithNativeDialog({});
+  const request = await f.plan(reserved.instanceId);
+  f.advance(1000);
+  const cleanup = deferred(); let cleanupRequested = false;
+  const releaseOwner = f.workspace.releaseOwner;
+  f.workspace.releaseOwner = async owner => {
+    if (owner === request.planId) { cleanupRequested = true; await cleanup.promise; }
+    return releaseOwner(owner);
+  };
+  try {
+    const start = f.service.startOperation(request).then(() => 'started', error => error);
+    const reply = await Promise.race([start, new Promise(resolve => setTimeout(() => resolve('still-pending'), 500))]);
+    assert.equal(reply?.code, 'PLAN_STALE', 'Start replies while the fenced plan workspace is still being cleaned');
+    assert.equal(cleanupRequested, true, 'the fence started workspace cleanup');
+    assert.equal((await f.service.reconcileNewServerLaunch({ planId: request.planId, planFingerprint: request.planFingerprint })).status,
+      'not-started', 'the fence is visible while its cleanup is still pending');
+  } finally { cleanup.resolve(); }
+  await f.service.drain();
+});
+
+test('launch pre-admission failure with a live reservation leaves the exact plan usable', async t => {
+  const f = await fixture(t);
+  const reserved = await f.reservations.reserveWithNativeDialog({});
+  const request = await f.plan(reserved.instanceId);
+  const credentials = { planId: request.planId, planFingerprint: request.planFingerprint };
+  await assert.rejects(f.service.startOperation({ ...request, choices: { acceptEula: false } }), { code: 'INVALID_REQUEST' });
+  assert.equal((await f.service.reconcileNewServerLaunch(credentials)).status, 'not-observed');
+  const job = await f.service.startOperation(request);
+  assert.equal((await f.service.reconcileNewServerLaunch(credentials)).job.jobId, job.jobId);
+  assert.equal(f.executions, 1);
+});
+
+test('launch not-observed then guarded release fences the plan and no later Start can run', async t => {
+  const f = await fixture(t);
+  const reserved = await f.reservations.reserveWithNativeDialog({});
+  const request = await f.plan(reserved.instanceId);
+  const credentials = { planId: request.planId, planFingerprint: request.planFingerprint };
+  await assert.rejects(f.service.startOperation({ ...request, choices: { acceptEula: false } }), { code: 'INVALID_REQUEST' });
+  assert.equal((await f.service.reconcileNewServerLaunch(credentials)).status, 'not-observed');
+  assert.equal(await f.service.releaseServerDestination(reserved.instanceId), true);
+  assert.equal((await f.service.reconcileNewServerLaunch(credentials)).status, 'not-started');
+  await assert.rejects(f.service.startOperation(request), { code: 'PLAN_STALE' });
+  assert.equal(f.executions, 0);
+  assert.equal((await f.store.listNewServerLaunchBindings(f.owner.epoch)).length, 0);
+});
+
+for (const order of ['release-first', 'start-first']) {
+  test(`launch release racing an in-flight Start never coexists with an admitted job order=${order}`, async t => {
+    const f = await fixture(t);
+    const reserved = await f.reservations.reserveWithNativeDialog({});
+    const request = await f.plan(reserved.instanceId);
+    const gate = deferred();
+    const get = f.plans.get.bind(f.plans); let calls = 0;
+    f.plans.get = async value => { calls++; if (calls === 1) await gate.promise; return get(value); };
+    const start = f.service.startOperation(request).then(job => ({ job }), error => ({ error }));
+    await new Promise(resolve => setImmediate(resolve));
+    let release;
+    if (order === 'release-first') {
+      release = await f.service.releaseServerDestination(reserved.instanceId);
+      gate.resolve();
+    } else {
+      gate.resolve();
+      await new Promise(resolve => setTimeout(resolve, 20));
+      release = await f.service.releaseServerDestination(reserved.instanceId);
+    }
+    const outcome = await start;
+    const launches = await f.store.listNewServerLaunchBindings(f.owner.epoch);
+    assert.equal(release === true && Boolean(outcome.job), false, 'a true release never coexists with an admitted job');
+    assert.equal(launches.length, outcome.job ? 1 : 0);
+    if (order === 'release-first') { assert.equal(release, true); assert.equal(outcome.error.code, 'PLAN_STALE'); }
+  });
+}
+
+test('lifecycle destination reservation refuses unsupported new-server folder shapes before any capture', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'modpack-launch-shape-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'real-parent'));
+  fs.symlinkSync(path.join(root, 'real-parent'), path.join(root, 'alias-parent'), 'junction');
+  const { ProductionPlanningAdapter } = require('../../electron/services/modpacks/planning/production-planning-adapter.cjs');
+  const planningAdapter = new ProductionPlanningAdapter({
+    instanceResolver: { async resolveInstance() { assert.fail('reservation checks need no instance resolution'); } },
+    stateRepository: { read() { assert.fail('reservation checks never read modpack state'); } },
+    reparseInspector: { async isReparsePoint() { return false; } },
+    preparePlanInputs: async () => assert.fail('no preflight preparation'),
+    snapshotServer: async () => assert.fail('no server snapshot'),
+    validateServerPorts: async () => assert.fail('no port validation')
+  });
+  let selected = null; const captured = [];
+  const reservations = new ServerDestinationReservationService({
+    dialog: { async showOpenDialog() { return { canceled: false, filePaths: [selected] }; } },
+    reparseInspector: { async isReparsePoint() { return false; } },
+    captureReservation: async ({ targetPath }) => { captured.push(targetPath); return { kind: 'absent' }; },
+    randomUUID: (() => { let id = 0; return () => `00000000-0000-4000-8000-${String(++id).padStart(12, '0')}`; })()
+  });
+  const service = new ModpackLifecycleService({ sourceResolver: { resolveArtifactSetPlan() {} }, artifactDownloader: { downloadSet() {} },
+    archiveInspector: { inspectArchive() {} }, inspectionLoader: { loadInspection() {} }, planningAdapter,
+    planRegistry: new PlanRegistry({ workspaceRegistry: { transferOwnership() {}, async releaseOwner() { return true; } }, allowNewServerLaunchBindings: true }),
+    operationStore: { get() {}, requestCancellation() {} }, destinationReservations: reservations });
+  t.after(() => service.dispose());
+  for (const unsupported of ['Q:\\NewPack', '\\\\nas\\minecraft\\NewPack', path.join(root, 'alias-parent', 'NewPack'),
+    path.join(root, 'Cafe\u0301 Server'), path.join(root, ' Leading Space')]) {
+    selected = unsupported;
+    await assert.rejects(reservations.reserveWithNativeDialog({}), error => {
+      assert.equal(error.code, 'INVALID_REQUEST');
+      assert.match(error.safeMessage, /own normal folder.*subfolder/);
+      return true;
+    }, unsupported);
+  }
+  assert.deepEqual(captured, [], 'unsupported shapes never reach the destination capture');
+  assert.equal(reservations.records.size, 0);
+  selected = path.join(root, 'real-parent', 'NewPack');
+  assert.equal((await reservations.reserveWithNativeDialog({})).displayName, 'NewPack');
+  assert.deepEqual(captured, [selected]);
 });
