@@ -1606,6 +1606,11 @@ import { acknowledgedDeps, modSyncStatus as modSyncStatusStore } from '../../sto
     isChecking = true;
     
     try {
+      // App versions are otherwise only read on connect; re-read them so a host
+      // that has updated since is noticed when the friend presses Refresh.
+      if ($clientState.appVersionMismatch) {
+        await checkAppVersionCompatibility(scope);
+      }
   // Immediate direct status probe for accuracy
   await fetchImmediateStatus(scope);
       // Use silent refresh to prevent content flickering, but keep button feedback

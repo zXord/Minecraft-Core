@@ -13,6 +13,9 @@ const {
   safeBaseName,
   safeFilePath
 } = require('../utils/security-boundaries.cjs');
+const { getInstallIdentity } = require('../utils/install-identity.cjs');
+const { compareAppVersions } = require('../utils/app-version.cjs');
+const { EVIDENCE_ENTRIES_BY_KIND, proveEntriesAbsentAsync } = require('./modpacks/instance-ownership.cjs');
 let devConfig = {};
 try {
   // Optional dev overrides for update behavior
@@ -39,6 +42,52 @@ try {
 } catch {
   // Fallback to console; we still emit update-log events downstream
   log = console;
+}
+
+const NOT_INSTALLED_COPY_MESSAGE = 'This copy of Minecraft Core is not the installed app, so it cannot install updates. Install updates from the installed Minecraft Core, or download the installer from GitHub.';
+const WORK_IN_PROGRESS_MESSAGE = 'Minecraft Core is still finishing a change (modpack install/update/repair or a server change). Wait for it to finish, then install the update.';
+
+// Modpack data that versions before the modpack lifecycle cannot read: any
+// entry in these folders under userData, or any registered instance folder
+// with lifecycle evidence, rules out moving this PC to an older version.
+const MODPACK_DATA_DIRECTORIES = Object.freeze([
+  Object.freeze(['modpack-lifecycle', 'active']),
+  Object.freeze(['modpack-lifecycle', 'history']),
+  Object.freeze(['client-packs', 'transactions'])
+]);
+const INSTANCE_EVIDENCE_ENTRIES = Object.freeze([...EVIDENCE_ENTRIES_BY_KIND.server, ...EVIDENCE_ENTRIES_BY_KIND.client]);
+
+// Reports the work Minecraft Core still has in flight: modpack jobs, exclusive
+// coordinator holders and client-pack guard holders. The installer kills the
+// app within seconds of starting, so no update installs while any is reported.
+let installActivityProbe = null;
+
+/**
+ * Registers the probe the update install guard asks for in-flight work.
+ * @param {(() => Iterable<string|{operationId?: string, id?: string}>)|null} probe
+ *   answers synchronously with the active work; null removes it. A probe that
+ *   throws or answers anything else is logged and ignored, so it never blocks
+ *   an update.
+ */
+function setInstallActivityProbe(probe) {
+  if (probe !== null && typeof probe !== 'function') {
+    throw new TypeError('The install activity probe must be a function or null');
+  }
+  installActivityProbe = probe;
+}
+
+function describeActiveWork(item) {
+  if (typeof item === 'string') return item;
+  if (item && typeof item === 'object') {
+    for (const key of ['operationId', 'jobId', 'id']) {
+      if (typeof item[key] === 'string' && item[key]) return item[key];
+    }
+  }
+  return 'active-work';
+}
+
+function versionLabel(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 64 ? value : 'unknown';
 }
 
 class UpdateService extends EventEmitter {
@@ -400,29 +449,18 @@ class UpdateService extends EventEmitter {
   // Check if we're in development mode or have invalid config
   isDevelopmentMode() {
     try {
-      // Allow forcing updates in development with environment variable
+      // Allow forcing update checks and downloads with an environment variable
       if (process.env.FORCE_UPDATES === 'true') {
         return false;
       }
 
-      // Allow updates in dev when explicitly enabled in config
-      if (devConfig && devConfig.enableDevUpdates === true) {
+      // Packaged builds are production whatever NODE_ENV or --dev say (as in v26.6.1)
+      if (app.isPackaged) {
         return false;
       }
-      
-      // First check if we're running from source (npm run dev)
-      if (process.env.NODE_ENV === 'development' || process.argv.includes('--dev')) {
-        return true;
-      }
 
-      // Check if app is packaged - if not packaged, we're in development
-      const { app } = require('electron');
-      if (!app.isPackaged) {
-        return true;
-      }
-
-      // For packaged apps, assume production mode
-      return false;
+      // Source runs stay off the live updater unless config/dev-config.cjs opts in
+      return devConfig?.enableDevUpdates !== true;
     } catch {
       // If we can't determine, assume development for safety
       return true;
@@ -593,24 +631,21 @@ class UpdateService extends EventEmitter {
       this.activeDownloadAttemptId = null;
       this.emit('update-downloaded', info);
       
-      // Auto-install user-started downloads with visible installer progress, unless a server is running.
+      // Auto-install user-started downloads with visible installer progress, unless the install guard refuses.
       if (this.autoInstallEnabled || this.installAfterCurrentDownload) {
-        const installCheck = this.canInstallUpdatesNow();
-        if (!installCheck.success) {
+        const installResult = this.requestInstall();
+        if (!installResult.success) {
           this.installAfterCurrentDownload = false;
-          this.logUpdate('warn', 'Auto-install skipped because a Minecraft server is running', {
+          this.logUpdate('warn', 'Auto-install skipped', {
             version: info.version,
-            runningServers: installCheck.runningServers || []
+            reason: installResult.code || null
           });
           this.emit('update-error', {
             title: 'Cannot Install Update',
-            message: installCheck.error,
-            details: 'Stop the server and install the downloaded update again.'
+            message: installResult.error,
+            details: 'The update has been downloaded. Install it again once this is resolved.'
           });
-          return;
         }
-
-        this.quitAndInstall();
       }
     });
   }
@@ -723,6 +758,14 @@ class UpdateService extends EventEmitter {
 
   // Start downloading the update
   async downloadUpdate(options = {}) {
+    const downloadCheck = this.canDownloadUpdates();
+    if (!downloadCheck.success) {
+      this.logUpdate('warn', 'Update download refused: this copy is not the installed app', {
+        reason: downloadCheck.reason
+      });
+      return downloadCheck;
+    }
+
     const installAfterDownload = options?.installAfterDownload === true;
     const previousDisableDifferential = autoUpdater.disableDifferentialDownload;
     let appliedDifferentialOverride = false;
@@ -781,10 +824,61 @@ class UpdateService extends EventEmitter {
     }
   }
 
+  // Whether this process is the NSIS-installed copy. Only that copy may install
+  // updates: the installer always installs into the registered install folder,
+  // so a QA, portable or development copy would replace the real installation.
+  getInstallCapability() {
+    let identity = null;
+    try {
+      identity = getInstallIdentity();
+    } catch {
+      identity = null;
+    }
+    const installed = identity?.installed === true;
+    return Object.freeze({
+      allowed: installed,
+      installed,
+      reason: typeof identity?.reason === 'string' ? identity.reason : 'identity-unavailable',
+      message: installed ? null : NOT_INSTALLED_COPY_MESSAGE
+    });
+  }
+
+  // Only the installed copy can use a downloaded update. FORCE_UPDATES lets a
+  // test copy download one to exercise the updater; installing stays refused.
+  canDownloadUpdates() {
+    const capability = this.getInstallCapability();
+    if (capability.allowed || process.env.FORCE_UPDATES === 'true') {
+      return { success: true };
+    }
+    return { success: false, code: 'NOT_INSTALLED_COPY', reason: capability.reason, error: capability.message };
+  }
+
+  // Start installing the downloaded update, unless the install guard refuses.
+  requestInstall() {
+    const installCheck = this.canInstallUpdatesNow();
+    if (!installCheck.success) {
+      this.logUpdate('warn', 'Update install refused', {
+        reason: installCheck.code || null,
+        runningServers: installCheck.runningServers || [],
+        activeOperations: installCheck.activeOperations || []
+      });
+      return installCheck;
+    }
+    return this.quitAndInstall();
+  }
+
   // Install the downloaded update
   quitAndInstall() {
     this.installAfterCurrentDownload = false;
+    const capability = this.getInstallCapability();
+    if (!capability.allowed) {
+      this.logUpdate('warn', 'Update install refused: this copy is not the installed app', {
+        reason: capability.reason
+      });
+      return { success: false, code: 'NOT_INSTALLED_COPY', reason: capability.reason, error: capability.message };
+    }
     autoUpdater.quitAndInstall(false, true);
+    return { success: true, message: 'Installing update...' };
   }
 
   // Ignore current available version
@@ -1325,14 +1419,55 @@ class UpdateService extends EventEmitter {
     }
   }
 
+  // Work the activity probe reports as still in flight. The probe fails open: if
+  // it throws or answers anything but a list, the failure is logged and the
+  // install is not blocked by it.
+  readInstallActivity() {
+    if (!installActivityProbe) return [];
+    try {
+      const reported = installActivityProbe();
+      if (reported === null || reported === undefined) return [];
+      if (typeof reported.then === 'function') {
+        void Promise.resolve(reported).catch(() => {});
+        throw new TypeError('The install activity probe must answer synchronously');
+      }
+      if (typeof reported === 'string' || typeof reported[Symbol.iterator] !== 'function') {
+        throw new TypeError('The install activity probe must answer with a list of active work');
+      }
+      const activeOperations = new Set();
+      for (const item of reported) {
+        if (item !== null && item !== undefined) activeOperations.add(describeActiveWork(item));
+      }
+      return [...activeOperations];
+    } catch (error) {
+      this.logUpdate('warn', 'Update install activity check failed; it does not block the install', {
+        error: error?.message || String(error)
+      });
+      return [];
+    }
+  }
+
+  // The one install guard for every install path, in order: the installed copy,
+  // running servers, then work Minecraft Core is still finishing.
   canInstallUpdatesNow() {
+    const capability = this.getInstallCapability();
+    if (!capability.allowed) {
+      return { success: false, code: 'NOT_INSTALLED_COPY', reason: capability.reason, error: capability.message };
+    }
+
     const runningServers = this.getRunningMinecraftServersForUpdateInstall();
     if (runningServers.length > 0) {
       return {
         success: false,
+        code: 'SERVER_RUNNING',
         error: 'Please stop the Minecraft server before installing the update to prevent data corruption.',
         runningServers
       };
+    }
+
+    const activeOperations = this.readInstallActivity();
+    if (activeOperations.length > 0) {
+      return { success: false, code: 'WORK_IN_PROGRESS', error: WORK_IN_PROGRESS_MESSAGE, activeOperations };
     }
 
     return { success: true };
@@ -1451,6 +1586,18 @@ class UpdateService extends EventEmitter {
       return validation;
     }
 
+    // An older installer may only run while this PC still has no modpack data.
+    const direction = await this.assessSpecificVersionTarget(validation.version);
+    if (!direction.success) {
+      return direction;
+    }
+
+    // Validating hashed the installer; work may have started in the meantime.
+    const finalCheck = this.canInstallUpdatesNow();
+    if (!finalCheck.success) {
+      return finalCheck;
+    }
+
     const { args, silent, forceRunAfter } = this.buildSpecificVersionInstallerArgs(options);
 
     try {
@@ -1460,7 +1607,8 @@ class UpdateService extends EventEmitter {
         fileName: path.basename(validation.filePath),
         silent,
         forceRunAfter,
-        checksumVerified: validation.checksumVerified
+        checksumVerified: validation.checksumVerified,
+        isDowngrade: direction.isDowngrade === true
       });
       this.requestAppQuitForSpecificVersionInstall();
 
@@ -1485,8 +1633,107 @@ class UpdateService extends EventEmitter {
     }
   }
 
-  // Check for a specific version (for server compatibility)
-  async checkForSpecificVersion(targetVersion) {
+  // True only when this PC provably has no modpack data: no lifecycle recovery
+  // records, no client-pack journals, and every registered instance folder is a
+  // plain folder without lifecycle evidence. Anything unreadable counts as data.
+  async inspectDowngradeSafety() {
+    let userDataPath = null;
+    try {
+      userDataPath = app.getPath('userData');
+    } catch {
+      userDataPath = null;
+    }
+    if (typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath)) {
+      return { safe: false, evidence: ['userData: unavailable'] };
+    }
+
+    const evidence = [];
+    for (const segments of MODPACK_DATA_DIRECTORIES) {
+      const label = segments.join('/');
+      try {
+        if ((await fs.promises.readdir(path.join(userDataPath, ...segments))).length > 0) {
+          evidence.push(`${label}: entries`);
+        }
+      } catch (error) {
+        if (error?.code !== 'ENOENT') evidence.push(`${label}: ${error?.code || 'unreadable'}`);
+      }
+    }
+    if (evidence.length > 0) return { safe: false, evidence };
+
+    let instances = null;
+    try {
+      instances = require('../utils/app-store.cjs').get('instances');
+    } catch {
+      instances = null;
+    }
+    if (!Array.isArray(instances)) {
+      return { safe: false, evidence: ['instances: unreadable'] };
+    }
+
+    const instanceEvidence = await Promise.all(instances.map(async (instance, index) => {
+      const folder = instance && typeof instance === 'object' ? instance.path : null;
+      let plain = false;
+      try {
+        plain = await proveEntriesAbsentAsync(folder, INSTANCE_EVIDENCE_ENTRIES);
+      } catch {
+        plain = false;
+      }
+      return plain ? null : `instance ${typeof instance?.id === 'string' && instance.id ? instance.id : index}`;
+    }));
+    evidence.push(...instanceEvidence.filter(Boolean));
+    return { safe: evidence.length === 0, evidence };
+  }
+
+  // Whether this copy may move to targetVersion. A newer version is an update.
+  // An older one is a downgrade, allowed only on a PC without modpack data.
+  async assessSpecificVersionTarget(targetVersion) {
+    const currentVersion = this.getCurrentVersion();
+    const order = compareAppVersions(targetVersion, currentVersion);
+    if (order === null) {
+      return {
+        success: false,
+        needsUpdate: false,
+        currentVersion,
+        targetVersion,
+        code: 'VERSION_UNCOMPARABLE',
+        error: `Minecraft Core cannot tell whether version ${versionLabel(targetVersion)} is older or newer than this copy (${versionLabel(currentVersion)}), so it will not switch to it.`
+      };
+    }
+    if (order >= 0) {
+      return { success: true, currentVersion, targetVersion, isDowngrade: false };
+    }
+
+    const safety = await this.inspectDowngradeSafety();
+    if (!safety.safe) {
+      this.logUpdate('warn', 'Older version refused because this PC has modpack data', {
+        currentVersion,
+        targetVersion,
+        evidence: safety.evidence
+      });
+      return {
+        success: false,
+        needsUpdate: false,
+        olderThanCurrent: true,
+        currentVersion,
+        targetVersion,
+        code: 'DOWNGRADE_REFUSED',
+        error: `The host is on Minecraft Core ${targetVersion}, older than yours (${currentVersion}), and this PC has modpack data that version cannot read safely. Ask the host to update instead.`
+      };
+    }
+
+    return {
+      success: true,
+      currentVersion,
+      targetVersion,
+      isDowngrade: true,
+      warning: `Minecraft Core ${targetVersion} is older than this copy (${currentVersion}). Using it replaces Minecraft Core ${currentVersion} on this PC. Your servers, clients and settings are kept, and Minecraft Core will offer ${currentVersion} again as an update. If the host can update instead, that is the better fix.`
+    };
+  }
+
+  // Check for a specific version (for server compatibility). With
+  // options.lookupRelease === false it only answers whether this copy may move
+  // to that version, without asking GitHub.
+  async checkForSpecificVersion(targetVersion, options = {}) {
     try {
       // Handle development mode
       if (this.isDevelopmentMode()) {
@@ -1509,6 +1756,23 @@ class UpdateService extends EventEmitter {
           targetVersion: targetVersion,
           needsUpdate: false,
           message: `Already on version ${targetVersion}`
+        };
+      }
+
+      // Refuse before any lookup: an older version on a PC with modpack data,
+      // or a version that cannot be compared with this one.
+      const direction = await this.assessSpecificVersionTarget(targetVersion);
+      if (!direction.success) {
+        return direction;
+      }
+      const downgrade = direction.isDowngrade ? { isDowngrade: true, warning: direction.warning } : {};
+      if (options?.lookupRelease === false) {
+        return {
+          success: true,
+          currentVersion: currentVersion,
+          targetVersion: targetVersion,
+          needsUpdate: true,
+          ...downgrade
         };
       }
 
@@ -1538,6 +1802,7 @@ class UpdateService extends EventEmitter {
             currentVersion: currentVersion,
             targetVersion: targetVersion,
             needsUpdate: true,
+            ...downgrade,
             releaseInfo: {
               name: targetRelease.name,
               tag_name: targetRelease.tag_name,
@@ -1585,6 +1850,15 @@ class UpdateService extends EventEmitter {
         };
       }
 
+      const downloadCheck = this.canDownloadUpdates();
+      if (!downloadCheck.success) {
+        this.logUpdate('warn', 'Version download refused: this copy is not the installed app', {
+          targetVersion,
+          reason: downloadCheck.reason
+        });
+        return downloadCheck;
+      }
+
       // Set flag to prevent auto-updater progress conflicts
       this.isDownloadingSpecificVersion = true;
       
@@ -1611,7 +1885,9 @@ class UpdateService extends EventEmitter {
         this.isDownloadingSpecificVersion = false; // Clear flag before returning
         return {
           success: false,
-          error: versionCheck.error || `Version ${targetVersion} not available`
+          error: versionCheck.error || `Version ${targetVersion} not available`,
+          ...(versionCheck.code ? { code: versionCheck.code } : {}),
+          ...(versionCheck.olderThanCurrent ? { olderThanCurrent: true } : {})
         };
       }
 
@@ -1940,4 +2216,4 @@ function getUpdateService() {
   return updateServiceInstance;
 }
 
-module.exports = { UpdateService, getUpdateService }; 
+module.exports = { UpdateService, getUpdateService, setInstallActivityProbe };

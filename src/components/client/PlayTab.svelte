@@ -2,9 +2,10 @@
   import { clientState, setAppVersions } from '../../stores/clientStore.js';
   import { showDownloads } from '../../stores/modStore.js';
   import { toast } from 'svelte-sonner';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import DownloadProgress from '../mods/components/DownloadProgress.svelte';
   import { initDownloadManager } from '../../utils/mods/modDownloadManager.js';
+  import { relateAppVersions } from '../../utils/version/appVersionRelation.js';
   export let authStatus;
   export let packState = null;
   $: legacyContentAllowed = packState?.status === 'unmanaged';
@@ -65,6 +66,11 @@
   let stagedVersionHydrationPending =
     typeof window !== 'undefined' && !!window.electron?.invoke;
   
+  // Whether the main process lets this PC switch to the host's older version.
+  // It refuses, with a reason, when this PC has modpack data.
+  let hostVersionSwitch = { allowed: false, warning: null, reason: null };
+  let hostVersionSwitchRequest = 0;
+
   // Debug terminal toggle setting
   let showDebugTerminal = false;
   
@@ -83,6 +89,15 @@
     (legacyContentAllowed ? clientSyncStatus === 'ready' && downloadStatus === 'ready' : managedReady) &&
     !stagedVersionHydrationPending &&
     $clientState.appVersionCompatible;
+
+  // Play still needs exactly equal versions; the relation only decides what the
+  // friend is told and offered while they differ.
+  $: appVersionRelation = relateAppVersions($clientState.clientAppVersion, $clientState.serverAppVersion);
+  $: appVersionBlocked = !$clientState.appVersionCompatible && $clientState.appVersionMismatch;
+  $: hostVersionSwitchTarget = appVersionBlocked && appVersionRelation === 'client-newer'
+    ? $clientState.serverAppVersion
+    : null;
+  $: requestHostVersionSwitch(hostVersionSwitchTarget);
 
   $: isCheckingMods =
     downloadStatus === 'checking' || downloadStatus === 'checking-updates';
@@ -122,6 +137,42 @@
   // Modified launch function that passes debug terminal setting and memory allocation
   function launchMinecraftWithDebug() {
     launchMinecraft(showDebugTerminal, maxMemory);
+  }
+
+  // Asks the main process, without a GitHub lookup, whether this PC may switch
+  // to the host's older version. Only its answer can offer the switch.
+  async function requestHostVersionSwitch(hostVersion) {
+    const request = ++hostVersionSwitchRequest;
+    hostVersionSwitch = { allowed: false, warning: null, reason: null };
+    if (!hostVersion || typeof window === 'undefined' || !window.electron?.invoke) {
+      return;
+    }
+
+    try {
+      const result = await window.electron.invoke('check-for-specific-version', hostVersion, { lookupRelease: false });
+      if (request !== hostVersionSwitchRequest) {
+        return;
+      }
+      if (result?.success && result.needsUpdate && result.isDowngrade) {
+        hostVersionSwitch = { allowed: true, warning: result.warning || null, reason: null };
+      } else if (result?.code === 'DOWNGRADE_REFUSED') {
+        hostVersionSwitch = { allowed: false, warning: null, reason: result.error || null };
+      }
+    } catch {
+      // Without an answer the switch is not offered; Refresh still works.
+    }
+  }
+
+  // Re-reads the host's version. A changed host version is asked about by the
+  // reactive request above; an unchanged one is asked again, since this PC's
+  // modpack data may have changed.
+  async function refreshHostVersion() {
+    const previousTarget = hostVersionSwitchTarget;
+    await handleRefreshFromDashboard?.();
+    await tick();
+    if (hostVersionSwitchTarget === previousTarget) {
+      requestHostVersionSwitch(hostVersionSwitchTarget);
+    }
   }
 
   // Download specific server version
@@ -489,15 +540,21 @@
               <!-- Dynamic Status Header with User Info -->
               <div class="ready-header">
                 <h2 class="status-header {
-                  !$clientState.appVersionCompatible && $clientState.appVersionMismatch ? 'needs-update' :
+                  appVersionBlocked ? 'needs-update' :
                   stagedVersionHydrationPending ? 'waiting' :
                   !legacyContentAllowed ? (managedReady ? 'ready' : 'waiting') :
                   clientSyncStatus !== 'ready' ? 'needs-client' :
                   isCheckingMods || isDownloadingMods ? 'waiting' :
                   downloadStatus !== 'ready' ? 'needs-mods' : 'ready'
                 }">
-                  {#if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
-                    🔄 App Update Required
+                  {#if appVersionBlocked}
+                    {#if appVersionRelation === 'client-newer'}
+                      🔄 Host Update Required
+                    {:else if appVersionRelation === 'client-older'}
+                      🔄 App Update Required
+                    {:else}
+                      ⚠️ App Version Mismatch
+                    {/if}
                   {:else if stagedVersionHydrationPending}
                     ⏳ Checking App Update...
                   {:else if !legacyContentAllowed}
@@ -1069,8 +1126,14 @@
                     {/if}
                   {:else}
                     <button class="play-button-main disabled" disabled>
-                      {#if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
-                        🔄 UPDATE REQUIRED
+                      {#if appVersionBlocked}
+                        {#if appVersionRelation === 'client-newer'}
+                          🔄 HOST UPDATE REQUIRED
+                        {:else if appVersionRelation === 'client-older'}
+                          🔄 UPDATE REQUIRED
+                        {:else}
+                          ⚠️ VERSION MISMATCH
+                        {/if}
                       {:else if stagedVersionHydrationPending}
                         ⏳ CHECKING APP UPDATE...
                       {:else if !legacyContentAllowed}
@@ -1091,17 +1154,39 @@
                       <div class="status-message">
                         Checking app update state before launch.
                       </div>
-                    {:else if !$clientState.appVersionCompatible && $clientState.appVersionMismatch}
+                    {:else if appVersionBlocked}
                       <div class="status-message version-mismatch">
-                        <div class="version-warning">
-                          ⚠️ <strong>App Version Mismatch</strong>
-                        </div>
-                        <div class="version-details">
-                          Your app version ({$clientState.clientAppVersion}) doesn't match the server version ({$clientState.serverAppVersion}).
-                        </div>
-                        <div class="version-action">
-                          Please update your app to continue playing.
-                        </div>
+                        {#if appVersionRelation === 'client-newer'}
+                          <div class="version-warning">
+                            ⚠️ <strong>Host Update Required</strong>
+                          </div>
+                          <div class="version-details">
+                            The host is running Minecraft Core {$clientState.serverAppVersion}; you have {$clientState.clientAppVersion}. You both need the same version to play.
+                          </div>
+                          <div class="version-action">
+                            Ask the host to update Minecraft Core, then press Refresh.
+                          </div>
+                        {:else if appVersionRelation === 'client-older'}
+                          <div class="version-warning">
+                            ⚠️ <strong>App Version Mismatch</strong>
+                          </div>
+                          <div class="version-details">
+                            Your app version ({$clientState.clientAppVersion}) doesn't match the server version ({$clientState.serverAppVersion}).
+                          </div>
+                          <div class="version-action">
+                            Please update your app to continue playing.
+                          </div>
+                        {:else}
+                          <div class="version-warning">
+                            ⚠️ <strong>App Version Mismatch</strong>
+                          </div>
+                          <div class="version-details">
+                            Your app version ({$clientState.clientAppVersion}) doesn't match the host's version ({$clientState.serverAppVersion}).
+                          </div>
+                          <div class="version-action">
+                            You both need the same version of Minecraft Core to play.
+                          </div>
+                        {/if}
                         
                         <!-- Show download progress if downloading -->
                         {#if specificVersionDownload.isDownloading}
@@ -1147,32 +1232,65 @@
                               </button>
                             </div>
                           </div>
-                        {:else if specificVersionDownload.error}
-                          <!-- Show error message -->
-                          <div class="version-download-error">
-                            <div class="error-message">
-                              ❌ <strong>Download Failed</strong>
+                        {:else if appVersionRelation === 'client-older'}
+                          {#if specificVersionDownload.error}
+                            <!-- Show error message -->
+                            <div class="version-download-error">
+                              <div class="error-message">
+                                ❌ <strong>Download Failed</strong>
+                              </div>
+                              <div class="error-details">
+                                {specificVersionDownload.error}
+                              </div>
+                              <div class="version-update-actions">
+                                {#if $clientState.serverAppVersion && $clientState.serverAppVersion !== $clientState.clientAppVersion}
+                                  <button class="update-action-btn server-version" on:click={() => downloadServerVersion($clientState.serverAppVersion)}>
+                                    🔄 Retry Download
+                                  </button>
+                                {/if}
+                              </div>
                             </div>
-                            <div class="error-details">
-                              {specificVersionDownload.error}
-                            </div>
+                          {:else}
+                            <!-- Show initial download button -->
                             <div class="version-update-actions">
                               {#if $clientState.serverAppVersion && $clientState.serverAppVersion !== $clientState.clientAppVersion}
                                 <button class="update-action-btn server-version" on:click={() => downloadServerVersion($clientState.serverAppVersion)}>
-                                  🔄 Retry Download
+                                  📥 Download Server Version ({$clientState.serverAppVersion})
                                 </button>
                               {/if}
                             </div>
-                          </div>
-                        {:else}
-                          <!-- Show initial download button -->
+                          {/if}
+                        {:else if appVersionRelation === 'client-newer'}
+                          {#if specificVersionDownload.error}
+                            <div class="version-download-error">
+                              <div class="error-message">
+                                ❌ <strong>Download Failed</strong>
+                              </div>
+                              <div class="error-details">
+                                {specificVersionDownload.error}
+                              </div>
+                            </div>
+                          {/if}
                           <div class="version-update-actions">
-                            {#if $clientState.serverAppVersion && $clientState.serverAppVersion !== $clientState.clientAppVersion}
-                              <button class="update-action-btn server-version" on:click={() => downloadServerVersion($clientState.serverAppVersion)}>
-                                📥 Download Server Version ({$clientState.serverAppVersion})
-                              </button>
-                            {/if}
+                            <button class="update-action-btn" on:click={refreshHostVersion} disabled={isChecking}>
+                              🔄 Refresh
+                            </button>
                           </div>
+                          {#if hostVersionSwitch.allowed}
+                            <!-- Offered only when the main process found no modpack data on this PC -->
+                            <div class="version-switch">
+                              {#if hostVersionSwitch.warning}
+                                <div class="version-switch-warning">{hostVersionSwitch.warning}</div>
+                              {/if}
+                              <div class="version-update-actions">
+                                <button class="update-action-btn server-version secondary" on:click={() => downloadServerVersion($clientState.serverAppVersion)}>
+                                  Use version {$clientState.serverAppVersion} on this PC
+                                </button>
+                              </div>
+                            </div>
+                          {:else if hostVersionSwitch.reason}
+                            <div class="version-switch version-switch-refused">{hostVersionSwitch.reason}</div>
+                          {/if}
                         {/if}
                       </div>
                     {:else if clientSyncStatus !== 'ready'}
@@ -2026,6 +2144,29 @@
     background: rgba(16, 185, 129, 0.25);
     border-color: rgba(16, 185, 129, 0.5);
     color: #059669;
+  }
+
+  .update-action-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+    transform: none;
+  }
+
+  .update-action-btn.server-version.secondary {
+    background: transparent;
+  }
+
+  .version-switch {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid rgba(245, 158, 11, 0.2);
+  }
+
+  .version-switch-warning,
+  .version-switch-refused {
+    color: #d1d5db;
+    font-size: 0.8rem;
+    line-height: 1.4;
   }
 
   /* Version Download Progress Styles */

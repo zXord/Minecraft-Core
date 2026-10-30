@@ -8,19 +8,36 @@ const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
 
+// Identities as electron/utils/install-identity.cjs reports them. Unless a test
+// says otherwise the harness runs as the NSIS-installed copy, which is the only
+// copy allowed to install updates.
+const INSTALLED_IDENTITY = Object.freeze({ installed: true, reason: 'uninstaller-present', platform: 'win32', isPackaged: true });
+const NOT_INSTALLED_IDENTITY = Object.freeze({ installed: false, reason: 'not-installed-copy', platform: 'win32', isPackaged: true });
+const QUIET_LOG = { info() {}, warn() {}, error() {}, debug() {} };
+
 async function withUpdateService(fn, options = {}) {
   const modulePath = path.resolve(__dirname, '../electron/services/update-service.cjs');
   const originalLoad = Module._load;
+  const originalFetch = global.fetch;
   const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'minecraft-core-update-hardening-'));
+  const userDataPath = path.join(tempRoot, 'user-data');
+  await fsp.mkdir(userDataPath, { recursive: true });
+  const storeValues = { instances: [], ...(options.storeValues || {}) };
+  const fetchCalls = [];
 
   const autoUpdater = new EventEmitter();
   autoUpdater.checkForUpdates = async () => {};
-  autoUpdater.downloadUpdate = async () => {};
+  autoUpdater.downloadUpdateCalls = 0;
+  autoUpdater.downloadUpdate = async () => {
+    autoUpdater.downloadUpdateCalls += 1;
+  };
+  autoUpdater.quitAndInstallCalls = 0;
   autoUpdater.quitAndInstall = (...args) => {
+    autoUpdater.quitAndInstallCalls += 1;
     autoUpdater.quitAndInstallArgs = args;
   };
 
-    const fakeApp = {
+  const fakeApp = {
     isPackaged: options.isPackaged !== undefined ? options.isPackaged : true,
     quitCalled: false,
     quit() {
@@ -33,7 +50,7 @@ async function withUpdateService(fn, options = {}) {
       return 'Minecraft Core';
     },
     getPath(name) {
-      if (name === 'temp') return tempRoot;
+      if (name === 'userData') return userDataPath;
       return tempRoot;
     }
   };
@@ -56,7 +73,19 @@ async function withUpdateService(fn, options = {}) {
     }
 
     if (request.includes('app-store.cjs')) {
-      return { get() { return null; }, set() {}, delete() {} };
+      return {
+        get(key) { return Object.prototype.hasOwnProperty.call(storeValues, key) ? storeValues[key] : null; },
+        set() {},
+        delete() {}
+      };
+    }
+
+    if (request.endsWith('install-identity.cjs')) {
+      return { getInstallIdentity: () => options.installIdentity || INSTALLED_IDENTITY };
+    }
+
+    if (options.devConfig && request.endsWith('dev-config.cjs')) {
+      return options.devConfig;
     }
 
     if (request === './server-manager.cjs' || request.endsWith('server-manager.cjs')) {
@@ -67,25 +96,54 @@ async function withUpdateService(fn, options = {}) {
     }
 
     if (request === 'electron-log') {
-      return console;
+      return options.quietLog ? QUIET_LOG : console;
     }
 
     return originalLoad(request, parent, isMain);
   };
 
+  // No test may reach GitHub: every fetch is recorded and answered only by the
+  // test's own stand-in.
+  global.fetch = async (url, ...rest) => {
+    fetchCalls.push(String(url));
+    if (typeof options.fetch === 'function') return options.fetch(url, ...rest);
+    throw new Error(`Network access is disabled in update-service tests: ${url}`);
+  };
+
   delete require.cache[modulePath];
 
   try {
-    const { UpdateService } = require(modulePath);
-    const service = new UpdateService();
+    const updateModule = require(modulePath);
+    const service = new updateModule.UpdateService();
     service.isDevelopmentMode = () => false;
-    service.getCurrentVersion = () => '1.0.0';
-    return await fn({ service, tempRoot, autoUpdater, fakeApp });
+    service.getCurrentVersion = () => options.currentVersion || '1.0.0';
+    return await fn({ service, tempRoot, userDataPath, storeValues, fetchCalls, autoUpdater, fakeApp, updateModule });
   } finally {
     delete require.cache[modulePath];
     Module._load = originalLoad;
+    global.fetch = originalFetch;
     await fsp.rm(tempRoot, { recursive: true, force: true });
   }
+}
+
+// Records an installer as downloaded and verified by this updater session, so
+// installSpecificVersionInstaller can reach its install decision.
+async function recordDownloadedInstaller(service, version) {
+  const downloadDir = service.getSpecificVersionDownloadDir();
+  await fsp.mkdir(downloadDir, { recursive: true });
+  const filePath = path.join(downloadDir, `Minecraft-Core-Setup-${version}.exe`);
+  const payload = Buffer.from(`installer payload ${version}`);
+  await fsp.writeFile(filePath, payload);
+  const hash = crypto.createHash('sha256').update(payload).digest('hex');
+  service.rememberSpecificVersionDownload(filePath, version, {
+    checksumVerified: true,
+    checksumAlgorithm: 'sha256',
+    checksumSource: 'github-asset-digest',
+    checksumEncoding: 'hex',
+    expectedHash: hash,
+    actualHash: hash
+  });
+  return filePath;
 }
 
 async function withUpdateHandlers(updateService, shell, fn, options = {}) {
@@ -114,13 +172,6 @@ async function withUpdateHandlers(updateService, shell, fn, options = {}) {
 
     if (request === 'electron') {
       return { shell };
-    }
-
-    if (request.endsWith('server-manager.cjs')) {
-      return {
-        getAllServerStates: () => options.serverStates || [],
-        getServerState: () => (options.serverState || { isRunning: false })
-      };
     }
 
     return originalLoad(request, parent, isMain);
@@ -653,29 +704,56 @@ test('NSIS include keeps update installs progress-only without finish or mode pa
 });
 
 test('install-update refuses to install while a Minecraft server is running', async () => {
-  const updateService = new EventEmitter();
-  updateService.quitAndInstallCalled = false;
-  updateService.quitAndInstall = () => {
-    updateService.quitAndInstallCalled = true;
-  };
-  const shell = {
-    async openPath() {
-      return '';
-    }
-  };
-
-  await withUpdateHandlers(
-    updateService,
-    shell,
-    async (handlers) => {
+  await withUpdateService(async ({ service, autoUpdater }) => {
+    await withUpdateHandlers(service, {}, async (handlers) => {
       const result = await handlers['install-update']();
 
       assert.equal(result.success, false);
       assert.match(result.error, /stop the Minecraft server/i);
-      assert.equal(updateService.quitAndInstallCalled, false);
-    },
-    { serverStates: [{ instanceId: 'server-1', isRunning: true }] }
-  );
+      assert.deepEqual(result.runningServers, [{ instanceId: 'server-1', targetPath: null, status: 'running' }]);
+      assert.equal(autoUpdater.quitAndInstallCalls, 0);
+    });
+  }, { serverStates: [{ instanceId: 'server-1', isRunning: true }], quietLog: true });
+});
+
+test('install-update returns the update service decision and keeps no install guard of its own', async () => {
+  const decision = { success: false, code: 'WORK_IN_PROGRESS', error: 'busy' };
+  const updateService = new EventEmitter();
+  let requests = 0;
+  updateService.requestInstall = () => {
+    requests += 1;
+    return decision;
+  };
+  updateService.quitAndInstall = () => assert.fail('the handler must not install around the service guard');
+
+  await withUpdateHandlers(updateService, {}, async (handlers) => {
+    assert.equal(await handlers['install-update'](), decision);
+    assert.equal(requests, 1);
+  });
+
+  const handlerSource = fs.readFileSync(path.resolve(__dirname, '../electron/ipc/update-handlers.cjs'), 'utf8');
+  assert.doesNotMatch(handlerSource, /canInstallUpdateNow|getRunningServersForUpdateInstall|server-manager/u);
+});
+
+test('check-for-specific-version forwards only the release-lookup switch', async () => {
+  const calls = [];
+  const updateService = new EventEmitter();
+  updateService.checkForSpecificVersion = async (...args) => {
+    calls.push(args);
+    return { success: true };
+  };
+
+  await withUpdateHandlers(updateService, {}, async (handlers) => {
+    await handlers['check-for-specific-version']({}, '26.6.1');
+    await handlers['check-for-specific-version']({}, '26.6.1', { lookupRelease: false, installAfterDownload: true });
+    await handlers['check-for-specific-version']({}, '26.6.1', 'not-an-options-object');
+  });
+
+  assert.deepEqual(calls, [
+    ['26.6.1', { lookupRelease: true }],
+    ['26.6.1', { lookupRelease: false }],
+    ['26.6.1', { lookupRelease: true }]
+  ]);
 });
 
 test('updater IPC cannot start periodic checks when the startup policy disables the updater', async () => {
@@ -699,4 +777,508 @@ test('updater IPC preserves periodic checks in normal production policy', async 
     assert.deepEqual(await handlers['start-periodic-checks'](), { success: true });
     assert.equal(starts, 1);
   }, { updatePolicy: { updaterEnabled: true } });
+});
+
+// A9: the installer kills the app seconds after it starts, so no install may
+// begin while Minecraft Core is still finishing a change.
+const ACTIVE_WORK_MESSAGE = 'Minecraft Core is still finishing a change (modpack install/update/repair or a server change). Wait for it to finish, then install the update.';
+const NOT_INSTALLED_MESSAGE = 'This copy of Minecraft Core is not the installed app, so it cannot install updates. Install updates from the installed Minecraft Core, or download the installer from GitHub.';
+
+// What the activity probe (startup.listActiveWork) reports for each kind of work.
+const ACTIVE_WORK_REPORTS = [
+  ['an active modpack operation', () => Object.freeze(['job-modpack-install-1'])],
+  ['a coordinator exclusive holder', () => [{ operationId: 'op-coordinator-exclusive', kind: 'mutation' }]],
+  ['a client-pack exclusive guard holder', () => new Set(['client-pack-recover-7'])]
+];
+
+for (const [label, probe] of ACTIVE_WORK_REPORTS) {
+  test(`with no server running, ${label} blocks install-update, install-specific-version and auto-install`, async () => {
+    await withUpdateService(async ({ service, autoUpdater, fakeApp, updateModule }) => {
+      const spawned = [];
+      service.spawnSpecificVersionInstaller = (installerPath, args) => { spawned.push({ installerPath, args }); };
+      const installerPath = await recordDownloadedInstaller(service, '9.9.9');
+      const updateErrors = [];
+      service.on('update-error', error => updateErrors.push(error));
+      updateModule.setInstallActivityProbe(probe);
+
+      await withUpdateHandlers(service, {}, async (handlers) => {
+        const install = await handlers['install-update']();
+        assert.equal(install.success, false);
+        assert.equal(install.code, 'WORK_IN_PROGRESS');
+        assert.equal(install.error, ACTIVE_WORK_MESSAGE);
+        assert.equal(install.activeOperations.length, 1);
+
+        const specific = await handlers['install-specific-version']({}, installerPath);
+        assert.equal(specific.success, false);
+        assert.equal(specific.error, ACTIVE_WORK_MESSAGE);
+      });
+
+      autoUpdater.disableDifferentialDownload = true;
+      assert.equal((await service.downloadUpdate({ installAfterDownload: true })).success, true);
+      autoUpdater.emit('update-downloaded', { version: '9.9.9' });
+      assert.equal(updateErrors.length, 1);
+      assert.equal(updateErrors[0].message, ACTIVE_WORK_MESSAGE);
+
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(autoUpdater.quitAndInstallCalls, 0);
+      assert.deepEqual(spawned, []);
+      assert.equal(fakeApp.quitCalled, false);
+
+      // The refusals came from the reported work: once it ends, the same install runs.
+      updateModule.setInstallActivityProbe(() => []);
+      assert.equal((await service.installSpecificVersionInstaller(installerPath)).success, true);
+      assert.equal(spawned.length, 1);
+    }, { quietLog: true });
+  });
+}
+
+test('a failing activity probe never blocks an update install, and the failure is logged', async () => {
+  await withUpdateService(async ({ service, autoUpdater, updateModule }) => {
+    const warnings = [];
+    service.on('update-log', entry => {
+      if (entry.level === 'warn') warnings.push(entry.message);
+    });
+    const brokenProbes = [
+      () => { throw new Error('PROBE_FAILED'); },
+      () => Promise.resolve(['job-1']),
+      () => 42
+    ];
+
+    for (const brokenProbe of brokenProbes) {
+      updateModule.setInstallActivityProbe(brokenProbe);
+      assert.equal(service.requestInstall().success, true);
+    }
+
+    assert.equal(autoUpdater.quitAndInstallCalls, brokenProbes.length);
+    assert.equal(warnings.filter(message => /activity check failed/i.test(message)).length, brokenProbes.length);
+  }, { quietLog: true });
+});
+
+test('setInstallActivityProbe accepts a function, or null to clear it', async () => {
+  await withUpdateService(async ({ service, updateModule }) => {
+    for (const invalid of [undefined, 'probe', {}, ['job-1']]) {
+      assert.throws(() => updateModule.setInstallActivityProbe(invalid), TypeError);
+    }
+    updateModule.setInstallActivityProbe(() => ['job-1']);
+    assert.equal(service.canInstallUpdatesNow().code, 'WORK_IN_PROGRESS');
+    updateModule.setInstallActivityProbe(null);
+    assert.deepEqual(service.canInstallUpdatesNow(), { success: true });
+  }, { quietLog: true });
+});
+
+test('the install guard checks the installed copy first, then running servers, then in-flight work', async () => {
+  await withUpdateService(async ({ service, updateModule }) => {
+    updateModule.setInstallActivityProbe(() => ['job-1']);
+    const result = service.canInstallUpdatesNow();
+    assert.equal(result.code, 'NOT_INSTALLED_COPY');
+    assert.equal(result.error, NOT_INSTALLED_MESSAGE);
+  }, { installIdentity: NOT_INSTALLED_IDENTITY, serverStates: [{ instanceId: 'server-1', isRunning: true }], quietLog: true });
+
+  await withUpdateService(async ({ service, updateModule }) => {
+    let probes = 0;
+    updateModule.setInstallActivityProbe(() => {
+      probes += 1;
+      return ['job-1'];
+    });
+    const result = service.canInstallUpdatesNow();
+    assert.equal(result.success, false);
+    assert.match(result.error, /stop the Minecraft server/i);
+    assert.equal(probes, 0);
+  }, { serverStates: [{ instanceId: 'server-1', isRunning: true }], quietLog: true });
+});
+
+// A60: only the NSIS-installed copy may install. A QA, portable or development
+// copy would otherwise run the installer over the real installation.
+test('a packaged copy that is not the installed app cannot install, download or launch an installer', async () => {
+  await withUpdateService(async ({ service, autoUpdater, fakeApp, fetchCalls }) => {
+    const spawned = [];
+    service.spawnSpecificVersionInstaller = (installerPath, args) => { spawned.push({ installerPath, args }); };
+    let specificChecks = 0;
+    service.checkForSpecificVersion = async () => {
+      specificChecks += 1;
+      return { success: true, needsUpdate: true, releaseInfo: makeReleaseInfo({ name: 'Minecraft-Core-Setup-9.9.9.exe' }) };
+    };
+    const installerPath = await recordDownloadedInstaller(service, '9.9.9');
+    const updateErrors = [];
+    service.on('update-error', error => updateErrors.push(error));
+
+    assert.deepEqual(service.getInstallCapability(), {
+      allowed: false,
+      installed: false,
+      reason: 'not-installed-copy',
+      message: NOT_INSTALLED_MESSAGE
+    });
+
+    const quit = service.quitAndInstall();
+    assert.equal(quit.success, false);
+    assert.equal(quit.error, NOT_INSTALLED_MESSAGE);
+
+    await withUpdateHandlers(service, {}, async (handlers) => {
+      const install = await handlers['install-update']();
+      assert.equal(install.success, false);
+      assert.equal(install.code, 'NOT_INSTALLED_COPY');
+      assert.equal(install.error, NOT_INSTALLED_MESSAGE);
+
+      const specificInstall = await handlers['install-specific-version']({}, installerPath);
+      assert.equal(specificInstall.success, false);
+      assert.equal(specificInstall.error, NOT_INSTALLED_MESSAGE);
+    });
+
+    autoUpdater.disableDifferentialDownload = true;
+    const download = await service.downloadUpdate({ installAfterDownload: true });
+    assert.equal(download.success, false);
+    assert.equal(download.error, NOT_INSTALLED_MESSAGE);
+    assert.equal(autoUpdater.downloadUpdateCalls, 0);
+
+    const specificDownload = await service.downloadSpecificVersion('9.9.9', { installAfterDownload: true });
+    assert.equal(specificDownload.success, false);
+    assert.equal(specificDownload.error, NOT_INSTALLED_MESSAGE);
+    assert.equal(specificChecks, 0);
+
+    service.setAutoInstall(true);
+    autoUpdater.emit('update-downloaded', { version: '9.9.9' });
+    assert.equal(updateErrors.length, 1);
+    assert.equal(updateErrors[0].message, NOT_INSTALLED_MESSAGE);
+
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(autoUpdater.quitAndInstallCalls, 0);
+    assert.deepEqual(spawned, []);
+    assert.equal(fakeApp.quitCalled, false);
+    assert.deepEqual(fetchCalls, []);
+  }, { installIdentity: NOT_INSTALLED_IDENTITY, quietLog: true });
+});
+
+test('the installed copy reports that it may install updates', async () => {
+  await withUpdateService(async ({ service }) => {
+    assert.deepEqual(service.getInstallCapability(), {
+      allowed: true,
+      installed: true,
+      reason: 'uninstaller-present',
+      message: null
+    });
+  }, { quietLog: true });
+});
+
+test('FORCE_UPDATES lets a copy that is not installed download updates but never install them', async () => {
+  const previous = process.env.FORCE_UPDATES;
+  process.env.FORCE_UPDATES = 'true';
+  try {
+    await withUpdateService(async ({ service, autoUpdater, fakeApp }) => {
+      const spawned = [];
+      service.spawnSpecificVersionInstaller = (installerPath, args) => { spawned.push({ installerPath, args }); };
+      const payload = Buffer.from('installer payload');
+      const asset = {
+        name: 'Minecraft-Core-Setup-9.9.9.exe',
+        size: payload.length,
+        browser_download_url: 'https://example.test/installer.exe',
+        digest: `sha256:${crypto.createHash('sha256').update(payload).digest('hex')}`
+      };
+      service.checkForSpecificVersion = async () => ({ success: true, needsUpdate: true, releaseInfo: makeReleaseInfo(asset) });
+      service.downloadFileWithProgress = async (_url, filePath) => {
+        await fsp.writeFile(filePath, payload);
+        return { success: true, filePath };
+      };
+
+      autoUpdater.disableDifferentialDownload = true;
+      assert.equal((await service.downloadUpdate({ installAfterDownload: true })).success, true);
+      assert.equal(autoUpdater.downloadUpdateCalls, 1);
+      autoUpdater.emit('update-downloaded', { version: '9.9.9' });
+
+      const specific = await service.downloadSpecificVersion('9.9.9', { installAfterDownload: true });
+      assert.equal(specific.success, false);
+      assert.equal(specific.downloadComplete, true);
+      assert.equal(specific.installStarted, false);
+      assert.equal(specific.error, NOT_INSTALLED_MESSAGE);
+
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(autoUpdater.quitAndInstallCalls, 0);
+      assert.deepEqual(spawned, []);
+      assert.equal(fakeApp.quitCalled, false);
+    }, {
+      isPackaged: false,
+      installIdentity: { installed: false, reason: 'unpackaged', platform: 'win32', isPackaged: false },
+      quietLog: true
+    });
+  } finally {
+    if (previous === undefined) delete process.env.FORCE_UPDATES;
+    else process.env.FORCE_UPDATES = previous;
+  }
+});
+
+function withProcessOverrides({ env = {}, argv = [] }, fn) {
+  const keys = ['FORCE_UPDATES', 'NODE_ENV'];
+  const previousEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  const previousArgv = process.argv;
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(env, key)) process.env[key] = env[key];
+    else delete process.env[key];
+  }
+  process.argv = [...previousArgv, ...argv];
+  return Promise.resolve().then(fn).finally(() => {
+    process.argv = previousArgv;
+    for (const key of keys) {
+      if (previousEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = previousEnv[key];
+    }
+  });
+}
+
+test('isDevelopmentMode: packaged builds are production, and source runs need an explicit opt-in', async () => {
+  const cases = [
+    { name: 'packaged with NODE_ENV=development', isPackaged: true, env: { NODE_ENV: 'development' }, devConfig: { enableDevUpdates: false }, expected: false },
+    { name: 'packaged with --dev', isPackaged: true, argv: ['--dev'], devConfig: { enableDevUpdates: false }, expected: false },
+    { name: 'packaged', isPackaged: true, devConfig: { enableDevUpdates: false }, expected: false },
+    { name: 'packaged with the opt-in', isPackaged: true, devConfig: { enableDevUpdates: true }, expected: false },
+    { name: 'source run with the shipped config', isPackaged: false, expected: true },
+    { name: 'source run with NODE_ENV=production', isPackaged: false, env: { NODE_ENV: 'production' }, devConfig: { enableDevUpdates: false }, expected: true },
+    { name: 'source run with the opt-in', isPackaged: false, devConfig: { enableDevUpdates: true }, expected: false },
+    { name: 'source run with FORCE_UPDATES', isPackaged: false, env: { FORCE_UPDATES: 'true' }, devConfig: { enableDevUpdates: false }, expected: false }
+  ];
+
+  for (const testCase of cases) {
+    await withProcessOverrides(testCase, () => withUpdateService(async ({ service, updateModule }) => {
+      assert.equal(updateModule.UpdateService.prototype.isDevelopmentMode.call(service), testCase.expected, testCase.name);
+    }, { isPackaged: testCase.isPackaged, devConfig: testCase.devConfig, quietLog: true }));
+  }
+});
+
+test('the shipped dev config keeps source runs off the live updater', () => {
+  assert.equal(require('../config/dev-config.cjs').enableDevUpdates, false);
+});
+
+// A6: a friend newer than the host may switch to the host's older version only
+// when this PC has no modpack data that the older version cannot read.
+const DOWNGRADE_REFUSED_MESSAGE = 'The host is on Minecraft Core 26.6.1, older than yours (26.11.1), and this PC has modpack data that version cannot read safely. Ask the host to update instead.';
+
+function githubReleases(...releases) {
+  return async () => ({
+    ok: true,
+    status: 200,
+    statusText: 'OK',
+    json: async () => releases.map(release => (typeof release === 'string'
+      ? { name: `v${release}`, tag_name: `v${release}`, published_at: '2026-06-01T00:00:00.000Z', body: '', assets: [] }
+      : release))
+  });
+}
+
+// A profile as v26.6.1 leaves it, after a first start of the new version: a
+// plain server and a paired client, and the empty modpack folders.
+async function seedPlainProfile({ tempRoot, userDataPath, storeValues }) {
+  const serverPath = path.join(tempRoot, 'instances', 'Survival');
+  const clientPath = path.join(tempRoot, 'instances', 'Friend Client');
+  await fsp.mkdir(path.join(serverPath, 'world'), { recursive: true });
+  await fsp.writeFile(path.join(serverPath, 'server.properties'), 'server-port=25565\n');
+  await fsp.writeFile(path.join(serverPath, '.minecraft-core.json'), JSON.stringify({ version: '1.21.1', loader: 'fabric', contentRevision: 3 }));
+  await fsp.mkdir(path.join(serverPath, '.minecraft-core-state'), { recursive: true });
+  await fsp.writeFile(path.join(serverPath, '.minecraft-core-state', 'runtime.json'), '{}');
+  await fsp.mkdir(path.join(clientPath, 'minecraft-core-state'), { recursive: true });
+  await fsp.writeFile(path.join(clientPath, 'minecraft-core-state', 'expected-mods.json'), '[]');
+  for (const directory of [['modpack-lifecycle', 'active'], ['modpack-lifecycle', 'history'], ['client-packs', 'transactions']]) {
+    await fsp.mkdir(path.join(userDataPath, ...directory), { recursive: true });
+  }
+  storeValues.instances = [
+    { id: 'server-1', name: 'Survival', type: 'server', path: serverPath },
+    { id: 'client-1', name: 'Friend Client', type: 'client', path: clientPath }
+  ];
+  return { serverPath, clientPath };
+}
+
+const MODPACK_DATA_CASES = [
+  ['an active modpack lifecycle record', async ({ userDataPath }) => {
+    await fsp.writeFile(path.join(userDataPath, 'modpack-lifecycle', 'active', 'op-1.json'), '{}');
+  }],
+  ['a modpack lifecycle history record', async ({ userDataPath }) => {
+    await fsp.writeFile(path.join(userDataPath, 'modpack-lifecycle', 'history', 'op-1.json'), '{}');
+  }],
+  ['a client-pack journal', async ({ userDataPath }) => {
+    await fsp.writeFile(path.join(userDataPath, 'client-packs', 'transactions', 'client-1.json'), '{}');
+  }],
+  ['a server with modpack state', async ({ serverPath }) => {
+    await fsp.writeFile(path.join(serverPath, '.minecraft-core-state', 'modpack.json'), '{}');
+  }],
+  ['a server with modpack history', async ({ serverPath }) => {
+    await fsp.mkdir(path.join(serverPath, '.minecraft-core-state', 'history'));
+  }],
+  ['a client with a matching-pack manifest', async ({ clientPath }) => {
+    await fsp.writeFile(path.join(clientPath, '.minecraft-core-client-pack.json'), '{}');
+  }],
+  ['a registered folder that is missing', async ({ clientPath }) => {
+    await fsp.rm(clientPath, { recursive: true, force: true });
+  }],
+  ['a lifecycle folder that cannot be listed', async ({ userDataPath }) => {
+    await fsp.rm(path.join(userDataPath, 'modpack-lifecycle', 'active'), { recursive: true, force: true });
+    await fsp.writeFile(path.join(userDataPath, 'modpack-lifecycle', 'active'), 'not a directory');
+  }],
+  ['an instance list that cannot be read', async ({ storeValues }) => {
+    storeValues.instances = null;
+  }]
+];
+
+function downgradeFields(result) {
+  return {
+    success: result.success,
+    needsUpdate: result.needsUpdate,
+    olderThanCurrent: result.olderThanCurrent,
+    code: result.code,
+    error: result.error
+  };
+}
+
+test('checkForSpecificVersion offers an older host version with a warning on a PC without modpack data', async () => {
+  await withUpdateService(async (context) => {
+    const { service, fetchCalls } = context;
+    // A fresh profile has no modpack folders at all.
+    const fresh = await service.checkForSpecificVersion('26.6.1', { lookupRelease: false });
+    assert.equal(fresh.isDowngrade, true);
+    assert.deepEqual(fetchCalls, []);
+
+    await seedPlainProfile(context);
+    const result = await service.checkForSpecificVersion('26.6.1');
+    assert.equal(result.success, true);
+    assert.equal(result.needsUpdate, true);
+    assert.equal(result.isDowngrade, true);
+    assert.match(result.warning, /Minecraft Core 26\.6\.1 is older than this copy \(26\.11\.1\)/u);
+    assert.equal(result.releaseInfo.tag_name, 'v26.6.1');
+    assert.equal(fetchCalls.length, 1);
+
+    // The Play tab asks the same question without the GitHub lookup.
+    const offer = await service.checkForSpecificVersion('26.6.1', { lookupRelease: false });
+    assert.equal(offer.success, true);
+    assert.equal(offer.needsUpdate, true);
+    assert.equal(offer.isDowngrade, true);
+    assert.equal(offer.warning, result.warning);
+    assert.equal(offer.releaseInfo, undefined);
+    assert.equal(fetchCalls.length, 1);
+  }, { currentVersion: '26.11.1', fetch: githubReleases('26.6.1', '26.12.0'), quietLog: true });
+});
+
+test('an older host version is refused without any network lookup when this PC has modpack data', async () => {
+  for (const [label, seed] of MODPACK_DATA_CASES) {
+    await withUpdateService(async (context) => {
+      const folders = await seedPlainProfile(context);
+      await seed({ ...context, ...folders });
+
+      for (const options of [undefined, { lookupRelease: false }]) {
+        const result = await context.service.checkForSpecificVersion('26.6.1', options);
+        assert.deepEqual(downgradeFields(result), {
+          success: false,
+          needsUpdate: false,
+          olderThanCurrent: true,
+          code: 'DOWNGRADE_REFUSED',
+          error: DOWNGRADE_REFUSED_MESSAGE
+        }, label);
+      }
+      assert.deepEqual(context.fetchCalls, [], label);
+    }, { currentVersion: '26.11.1', fetch: githubReleases('26.6.1'), quietLog: true });
+  }
+});
+
+test('a newer host version is still offered as an update, even with modpack data', async () => {
+  await withUpdateService(async (context) => {
+    const { serverPath } = await seedPlainProfile(context);
+    await fsp.writeFile(path.join(serverPath, '.minecraft-core-state', 'modpack.json'), '{}');
+
+    const result = await context.service.checkForSpecificVersion('26.12.0');
+    assert.equal(result.success, true);
+    assert.equal(result.needsUpdate, true);
+    assert.equal(result.isDowngrade, undefined);
+    assert.equal(result.releaseInfo.tag_name, 'v26.12.0');
+    assert.equal(context.fetchCalls.length, 1);
+  }, { currentVersion: '26.11.1', fetch: githubReleases('26.6.1', '26.12.0'), quietLog: true });
+});
+
+test('a version that cannot be compared is refused before any lookup, and the same version needs nothing', async () => {
+  await withUpdateService(async ({ service, fetchCalls }) => {
+    for (const target of ['v26.6.1', '26.6', '26.06.1', '', null]) {
+      const result = await service.checkForSpecificVersion(target);
+      assert.equal(result.success, false, String(target));
+      assert.equal(result.needsUpdate, false, String(target));
+      assert.equal(result.code, 'VERSION_UNCOMPARABLE', String(target));
+    }
+
+    const same = await service.checkForSpecificVersion('26.11.1');
+    assert.equal(same.success, true);
+    assert.equal(same.needsUpdate, false);
+    assert.deepEqual(fetchCalls, []);
+  }, { currentVersion: '26.11.1', fetch: githubReleases('26.6.1'), quietLog: true });
+});
+
+test('downloadSpecificVersion inherits the downgrade refusal and downloads nothing', async () => {
+  await withUpdateService(async (context) => {
+    const { serverPath } = await seedPlainProfile(context);
+    await fsp.writeFile(path.join(serverPath, '.minecraft-core-state', 'modpack.json'), '{}');
+    let downloads = 0;
+    context.service.downloadFileWithProgress = async () => {
+      downloads += 1;
+      return { success: false, error: 'must not download' };
+    };
+
+    const result = await context.service.downloadSpecificVersion('26.6.1', { installAfterDownload: true });
+    assert.equal(result.success, false);
+    assert.equal(result.code, 'DOWNGRADE_REFUSED');
+    assert.equal(result.olderThanCurrent, true);
+    assert.equal(result.error, DOWNGRADE_REFUSED_MESSAGE);
+    assert.equal(downloads, 0);
+    assert.deepEqual(context.fetchCalls, []);
+  }, { currentVersion: '26.11.1', fetch: githubReleases('26.6.1'), quietLog: true });
+});
+
+test('installSpecificVersionInstaller re-checks the guard and refuses an older installer once modpack data exists', async () => {
+  await withUpdateService(async (context) => {
+    const { service, userDataPath, fakeApp } = context;
+    await seedPlainProfile(context);
+    const spawned = [];
+    service.spawnSpecificVersionInstaller = (installerPath, args) => { spawned.push({ installerPath, args }); };
+    const installerPath = await recordDownloadedInstaller(service, '26.6.1');
+    const record = path.join(userDataPath, 'modpack-lifecycle', 'active', 'op-1.json');
+    await fsp.writeFile(record, '{}');
+
+    const refused = await service.installSpecificVersionInstaller(installerPath);
+    assert.equal(refused.success, false);
+    assert.equal(refused.code, 'DOWNGRADE_REFUSED');
+    assert.equal(refused.error, DOWNGRADE_REFUSED_MESSAGE);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(spawned, []);
+    assert.equal(fakeApp.quitCalled, false);
+
+    // Without modpack data the same older installer may run.
+    await fsp.rm(record);
+    assert.equal((await service.installSpecificVersionInstaller(installerPath)).success, true);
+    assert.equal(spawned.length, 1);
+  }, { currentVersion: '26.11.1', quietLog: true });
+});
+
+test('a friend without modpack data can still switch to the host version end to end', async () => {
+  const payload = Buffer.from('installer payload 26.6.1');
+  const asset = {
+    name: 'Minecraft-Core-Setup-26.6.1.exe',
+    size: payload.length,
+    browser_download_url: 'https://example.test/Minecraft-Core-Setup-26.6.1.exe',
+    digest: `sha256:${crypto.createHash('sha256').update(payload).digest('hex')}`
+  };
+
+  await withUpdateService(async (context) => {
+    const { service, fakeApp } = context;
+    await seedPlainProfile(context);
+    const spawned = [];
+    service.spawnSpecificVersionInstaller = (installerPath, args) => { spawned.push({ installerPath, args }); };
+    service.downloadFileWithProgress = async (_url, filePath) => {
+      await fsp.writeFile(filePath, payload);
+      return { success: true, filePath };
+    };
+
+    const downloaded = await service.downloadSpecificVersion('26.6.1');
+    assert.equal(downloaded.success, true);
+    assert.equal(downloaded.checksumVerified, true);
+
+    const installed = await service.installSpecificVersionInstaller(downloaded.filePath);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(installed.success, true);
+    assert.deepEqual(spawned.map(entry => entry.args), [['--updated', '--force-run']]);
+    assert.equal(fakeApp.quitCalled, true);
+  }, {
+    currentVersion: '26.11.1',
+    fetch: githubReleases({ name: 'v26.6.1', tag_name: 'v26.6.1', published_at: '2026-06-01T00:00:00.000Z', body: '', assets: [asset] }),
+    quietLog: true
+  });
 });

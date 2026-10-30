@@ -1,39 +1,8 @@
 const { markStartupTrace } = require('../utils/startup-trace.cjs');
 const { getUpdateService } = require('../services/update-service.cjs');
 
-function getRunningServersForUpdateInstall() {
-  try {
-    const { getAllServerStates, getServerState } = require('../services/server-manager.cjs');
-    const allStates = typeof getAllServerStates === 'function' ? getAllServerStates() : [];
-    const states = Array.isArray(allStates) && allStates.length > 0
-      ? allStates
-      : [typeof getServerState === 'function' ? getServerState() : null];
-
-    return states
-      .filter((state) => state && state.isRunning)
-      .map((state) => ({
-        instanceId: state.instanceId || null,
-        targetPath: state.targetPath || null,
-        status: state.status || 'running'
-      }));
-  } catch {
-    return [];
-  }
-}
-
-function canInstallUpdateNow() {
-  const runningServers = getRunningServersForUpdateInstall();
-  if (runningServers.length > 0) {
-    return {
-      success: false,
-      error: 'Please stop the Minecraft server before installing the update to prevent data corruption.',
-      runningServers
-    };
-  }
-
-  return { success: true };
-}
-
+// Every install decision (installed copy, running servers, work in flight) is
+// made by the update service, so the IPC paths and the auto-install agree.
 function createUpdateHandlers(win, { updaterEnabled = true } = {}) {
   if (typeof updaterEnabled !== 'boolean') throw new TypeError('Updater IPC policy is invalid');
   markStartupTrace('update-service:get:start');
@@ -133,13 +102,7 @@ function createUpdateHandlers(win, { updaterEnabled = true } = {}) {
     // Install the downloaded update
     'install-update': async () => {
       try {
-        const installCheck = canInstallUpdateNow();
-        if (!installCheck.success) {
-          return installCheck;
-        }
-
-        updateService.quitAndInstall();
-        return { success: true, message: 'Installing update...' };
+        return updateService.requestInstall();
       } catch (error) {
         return { success: false, error: error.message };
       }
@@ -214,10 +177,14 @@ function createUpdateHandlers(win, { updaterEnabled = true } = {}) {
       }
     },
 
-    // Check for a specific version (for server compatibility)
-    'check-for-specific-version': async (_event, targetVersion) => {
+    // Check for a specific version (for server compatibility). The Play tab
+    // passes { lookupRelease: false } to ask, without GitHub, whether this PC
+    // may switch to an older host version.
+    'check-for-specific-version': async (_event, targetVersion, options) => {
       try {
-        const result = await updateService.checkForSpecificVersion(targetVersion);
+        const result = await updateService.checkForSpecificVersion(targetVersion, {
+          lookupRelease: options?.lookupRelease !== false
+        });
         return result;
       } catch (error) {
         return { success: false, error: error.message };
@@ -253,11 +220,6 @@ function createUpdateHandlers(win, { updaterEnabled = true } = {}) {
       try {
         // Wait a moment to ensure file system has synced
         await new Promise(resolve => setTimeout(resolve, 1000));
-
-        const installCheck = canInstallUpdateNow();
-        if (!installCheck.success) {
-          return installCheck;
-        }
 
         return await updateService.installSpecificVersionInstaller(filePath, {
           silent: false,

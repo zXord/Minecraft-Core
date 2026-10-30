@@ -2,6 +2,7 @@
 const appStore = require('../utils/app-store.cjs');
 const { app, BrowserWindow } = require('electron');
 const { ensureEncryptionAvailable, packSecret, unpackSecret, ENCRYPTED_PREFIX } = require('../utils/secure-store.cjs');
+const { getInstallIdentity } = require('../utils/install-identity.cjs');
 
 const STARTUP_LOGIN_ITEM_NAME = 'Minecraft Core';
 const STARTUP_MINIMIZED_ARGS = ['--start-minimized'];
@@ -14,10 +15,25 @@ function buildStartupLoginItemSettings(settings) {
   };
 }
 
+function isInstalledCopy() {
+  try {
+    return getInstallIdentity()?.installed === true;
+  } catch {
+    return false;
+  }
+}
+
+// The login item is one HKCU Run value shared by every copy of the app, so only
+// the installed copy may write or remove it; a test or development copy would
+// point it at itself or delete the real one.
 function applyStartupLoginItemSettings(settings) {
+  if (!isInstalledCopy()) {
+    return { applied: false, reason: 'not-installed-copy' };
+  }
+
   if (settings.startOnStartup) {
     app.setLoginItemSettings(buildStartupLoginItemSettings(settings));
-    return;
+    return { applied: true };
   }
 
   app.setLoginItemSettings({
@@ -30,6 +46,7 @@ function applyStartupLoginItemSettings(settings) {
     name: STARTUP_LOGIN_ITEM_NAME,
     args: [...STARTUP_MINIMIZED_ARGS]
   });
+  return { applied: true };
 }
 
 /**
@@ -112,9 +129,10 @@ function createAppSettingsHandlers() {
 
 
         // Handle startup setting
+        let startupLoginItem = null;
         if (Object.prototype.hasOwnProperty.call(settings, 'startOnStartup')) {
           try {
-            applyStartupLoginItemSettings(updatedSettings);
+            startupLoginItem = applyStartupLoginItemSettings(updatedSettings);
           } catch {
             // TODO: Add proper logging - Failed to update startup settings
             // Don't fail the entire operation for this
@@ -124,7 +142,7 @@ function createAppSettingsHandlers() {
         // Save settings to store
         appStore.set('appSettings', updatedSettings);
 
-        return { success: true, settings: updatedSettings };
+        return { success: true, settings: updatedSettings, ...(startupLoginItem ? { startupLoginItem } : {}) };
       } catch (err) {
         // TODO: Add proper logging - Error saving app settings
         return { success: false, error: err.message };

@@ -22,9 +22,10 @@ module.exports = {
   // Enable/disable development features
   enableDevShortcuts: false, // DISABLED FOR PRODUCTION
 
-  // Allow update checks while running `npm run dev`
-  // Use this to test auto-updater behavior without packaging
-  enableDevUpdates: true, // ENABLED FOR DEV TESTING
+  // Allow update checks and downloads while running from source (`npm run dev`).
+  // Packaged builds ignore this flag. Source runs never install updates: only the
+  // installed copy may, so a dev copy can never replace the real installation.
+  enableDevUpdates: false, // Source runs stay off the live GitHub updater
 
   // Add more dev features here as needed...
   // enableSomeOtherFeature: false,
