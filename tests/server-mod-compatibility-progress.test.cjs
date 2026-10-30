@@ -56,7 +56,7 @@ async function withServerModHandlers({ installed, disabled = [], versionsByProje
 
     if (typeof request === 'string' && request.includes('utils/server-loader.cjs')) {
       return {
-        resolveServerLoader() {
+        describeServerLoader() {
           return { loader: 'fabric', loaderVersion: '0.16.0' };
         }
       };

@@ -180,6 +180,44 @@ async function withInstallHandlers(work) {
 }
 
 const event = { sender: { id: 7 } };
+const MODPACK_RUNTIME_CHANGED = 'Modpack runtime files changed - use Modpack Verify and Repair';
+
+// A57(b): app-recorded runtime metadata that is present but no longer valid. The first case is the
+// downgrade path the audit describes: v26.6.1's Repair on a legacy Forge 1.12.2 pack rewrites a
+// recorded runtime library and downloads a vanilla server.jar. The others damage the record itself.
+const DRIFTED_RUNTIMES = [
+  {
+    name: 'a recorded legacy Forge library rewritten by another installer',
+    write(root) {
+      const { runtime, library } = writeLegacyRuntime(root);
+      writeJar(path.join(root, ...library.split('/')), ['Manifest-Version: 1.0', 'Created-By: 26.6.1', '', '']);
+      writeJar(path.join(root, 'server.jar'));
+      return { runtime, keptFile: library };
+    }
+  },
+  {
+    name: 'an unparsable runtime record',
+    write(root) {
+      const runtime = writeModernRuntime(root);
+      fs.writeFileSync(path.join(root, '.minecraft-core-state', 'runtime.json'), '{"formatVersion":1,');
+      return { runtime, keptFile: '.minecraft-core-state/runtime.json' };
+    }
+  },
+  {
+    name: 'a directory where the runtime record belongs',
+    write(root) {
+      const runtime = writeModernRuntime(root);
+      const recordPath = path.join(root, '.minecraft-core-state', 'runtime.json');
+      fs.rmSync(recordPath);
+      fs.mkdirSync(recordPath);
+      return { runtime, keptFile: 'libraries/net/minecraftforge/forge/1.20.1-47.4.18/win_args.txt' };
+    }
+  }
+];
+
+function readFixtureFile(root, relativePath) {
+  return fs.readFileSync(path.join(root, ...relativePath.split('/')));
+}
 
 test('managed legacy and modern Forge health trusts only validated runtime metadata', async t => {
   for (const writeRuntime of [writeLegacyRuntime, writeModernRuntime]) {
@@ -219,6 +257,73 @@ test('managed Forge Repair rejects corrupt runtime metadata before any Java or r
     );
     assert.deepEqual(calls, { downloads: [], installs: [], javaInspections: [] });
   });
+});
+
+test('A57: present but invalid runtime metadata gives the Modpack Verify and Repair item instead of throwing', async t => {
+  for (const drift of DRIFTED_RUNTIMES) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-drifted-runtime-health-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    drift.write(root);
+    assert.throws(() => loaderService.inspectPreparedRuntime(root), error => error.code === 'RUNTIME_INCOMPLETE', drift.name);
+
+    await withInstallHandlers(async ({ calls, handlers }) => {
+      assert.deepEqual(await handlers['check-health'](event, root), [MODPACK_RUNTIME_CHANGED], drift.name);
+      assert.deepEqual(calls.downloads, [], drift.name);
+      assert.deepEqual(calls.installs, [], drift.name);
+    });
+  }
+});
+
+test('A57: Repair refuses drifted runtime metadata with the Verify and Repair guidance and runs no v26.6.1-era installer', async t => {
+  for (const drift of DRIFTED_RUNTIMES) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-drifted-runtime-repair-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const { runtime, keptFile } = drift.write(root);
+    const keptBytes = readFixtureFile(root, keptFile);
+
+    await withInstallHandlers(async ({ calls, handlers, sent }) => {
+      // The payload the maintenance panels send: the configured loader and version.
+      await assert.rejects(
+        handlers['repair-health'](event, {
+          targetPath: root,
+          mcVersion: runtime.minecraftVersion,
+          loader: runtime.loaderFamily,
+          loaderVersion: runtime.loaderVersion,
+          fabricVersion: runtime.loaderVersion
+        }),
+        error => error.code === 'RUNTIME_INCOMPLETE' && error.message === MODPACK_RUNTIME_CHANGED,
+        drift.name
+      );
+      assert.deepEqual(calls, { downloads: [], installs: [], javaInspections: [] }, drift.name);
+      assert.deepEqual(sent, [
+        ['repair-log', `❌ Error: ${MODPACK_RUNTIME_CHANGED}`],
+        ['repair-status', 'error']
+      ], drift.name);
+    });
+    assert.deepEqual(readFixtureFile(root, keptFile), keptBytes, drift.name);
+  }
+});
+
+test('a v26.6.1 Forge layout with an empty .minecraft-core-state keeps health [] and Repair installs nothing', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-v26-forge-empty-state-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  writeV26ForgeLayout(root);
+  fs.mkdirSync(path.join(root, '.minecraft-core-state'));
+
+  await withInstallHandlers(async ({ calls, handlers, sent }) => {
+    assert.deepEqual(await handlers['check-health'](event, root), []);
+    assert.deepEqual(await handlers['repair-health'](event, {
+      targetPath: root,
+      mcVersion: '1.20.1',
+      loader: 'forge',
+      loaderVersion: '47.2.0',
+      fabricVersion: '47.2.0'
+    }), []);
+    assert.deepEqual(calls.downloads, []);
+    assert.deepEqual(calls.installs, []);
+    assert.deepEqual(sent, [['repair-status', 'done']]);
+  });
+  assert.deepEqual(fs.readdirSync(path.join(root, '.minecraft-core-state')), []);
 });
 
 test('unmanaged Forge health and Repair retain the legacy heuristic repair path', async t => {

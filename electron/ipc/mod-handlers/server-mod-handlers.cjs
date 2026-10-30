@@ -12,7 +12,7 @@ const {
 } = require('./mod-handler-utils.cjs');
 const { getLoggerHandlers } = require('../logger-handlers.cjs');
 const { serverErrorMonitor } = require('../error-monitoring-handlers.cjs');
-const { resolveServerLoader } = require('../../utils/server-loader.cjs');
+const { describeServerLoader } = require('../../utils/server-loader.cjs');
 const {
   assertSafeRemoteUrl,
   isPathInside,
@@ -286,7 +286,7 @@ function createServerModHandlers(win) {
         });
         throw new Error('Invalid server path');
       }
-      const { loader: detectedLoader, loaderVersion: detectedLoaderVersion } = resolveServerLoader(serverPath);
+      const { loader: detectedLoader, loaderVersion: detectedLoaderVersion } = describeServerLoader(serverPath);
       const normalizedLoader = detectedLoader && detectedLoader !== 'vanilla' ? detectedLoader : null;
       const loaderForApi = normalizedLoader;
       const effectiveLoaderVersion = detectedLoaderVersion || (normalizedLoader === 'fabric' ? fabricVersion : null);
@@ -2048,7 +2048,7 @@ function createServerModHandlers(win) {
           throw new Error('Minecraft version (mcVersion) is required to update a mod safely');
         }
 
-        const { loader: detectedLoader } = resolveServerLoader(serverPath);
+        const { loader: detectedLoader } = describeServerLoader(serverPath);
         const loaderForApi = detectedLoader && detectedLoader !== 'vanilla' ? detectedLoader : null;
 
         logger.debug('Resolved loader for mod update', {
@@ -2377,7 +2377,7 @@ function createServerModHandlers(win) {
           fs.unlinkSync(clientManifestPath);
         }
 
-        const { loader: detectedLoader } = resolveServerLoader(serverPath);
+        const { loader: detectedLoader } = describeServerLoader(serverPath);
         const loaderForApi = detectedLoader && detectedLoader !== 'vanilla' ? detectedLoader : null;
 
         logger.debug('Resolved loader for enable-and-update-mod', {
@@ -2567,7 +2567,7 @@ function createServerModHandlers(win) {
           return [];
         }
         
-        const { loader: detectedLoader } = resolveServerLoader(serverPath);
+        const { loader: detectedLoader } = describeServerLoader(serverPath);
         const loaderForApi = detectedLoader && detectedLoader !== 'vanilla' ? detectedLoader : null;
 
         logger.debug('Processing disabled mod update checks', {

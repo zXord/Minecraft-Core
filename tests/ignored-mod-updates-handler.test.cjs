@@ -61,7 +61,7 @@ function loadServerModHandlers({
     if (request === '../error-monitoring-handlers.cjs') return { serverErrorMonitor: {} };
     if (request === '../../utils/server-loader.cjs') {
       return {
-        resolveServerLoader(...args) {
+        describeServerLoader(...args) {
           calls.loader.push(args);
           return resolveLoader(...args);
         }
@@ -180,7 +180,7 @@ test('check-disabled-mod-updates propagates second inventory read failures witho
   assert.deepEqual(calls.versions, []);
 });
 
-test('check-disabled-mod-updates keeps runtime failures for nonempty work as failures', async () => {
+test('check-disabled-mod-updates reports loader lookup errors for nonempty work as failures', async () => {
   const { handlers, calls } = loadServerModHandlers({
     disabledMods: ['disabled.jar'],
     installedMods: [{ fileName: 'disabled.jar', projectId: 'project' }],

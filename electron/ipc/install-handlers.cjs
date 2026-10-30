@@ -21,6 +21,27 @@ const {
 
 const logger = getLoggerHandlers();
 
+const MODPACK_RUNTIME_CHANGED = 'Modpack runtime files changed - use Modpack Verify and Repair';
+
+// Reads the app-recorded runtime (.minecraft-core-state/runtime.json). v26.6.1 never writes that
+// record, so its servers always get null here. A record that is present but no longer validates
+// (for example after v26.6.1's Repair or Version Updater rewrote a recorded runtime file) is
+// reported as changed instead of thrown, so health can say how to recover.
+function inspectRecordedRuntime(targetPath) {
+  try {
+    return { preparedRuntime: inspectPreparedRuntime(targetPath), runtimeChanged: false };
+  } catch (error) {
+    if (error?.code !== 'RUNTIME_INCOMPLETE' && error?.code !== 'UNSUPPORTED_LOADER') throw error;
+    return { preparedRuntime: null, runtimeChanged: true };
+  }
+}
+
+function modpackRuntimeChangedError() {
+  const error = new Error(MODPACK_RUNTIME_CHANGED);
+  error.code = 'RUNTIME_INCOMPLETE';
+  return error;
+}
+
 async function ensureServerJavaReady(win, targetPath, mcVersion) {
   const serverJavaManager = new ServerJavaManager(targetPath);
   let javaRequirements = await serverJavaManager.getJavaRequirementsForMinecraft(mcVersion);
@@ -142,7 +163,20 @@ async function getLoaderHealthIssues(targetPath, loader, loaderVersion = null, m
 }
 
 async function buildHealthReport(targetPath) {
-  const preparedRuntime = inspectPreparedRuntime(targetPath);
+  const { preparedRuntime, runtimeChanged } = inspectRecordedRuntime(targetPath);
+  if (runtimeChanged) {
+    // The recorded runtime cannot be trusted, and the legacy loader and server.jar checks below
+    // would suggest repairs that rewrite recorded files. Modpack Verify and Repair is the way back,
+    // so it is the only item reported.
+    return {
+      loader: null,
+      loaderVersion: null,
+      managedRuntime: false,
+      runtimeChanged: true,
+      minecraftVersion: null,
+      missing: [MODPACK_RUNTIME_CHANGED]
+    };
+  }
   const config = readServerConfig(targetPath, getDefaultServerConfig()) || {};
   const loader = preparedRuntime?.runtime.loaderFamily || resolveEffectiveLoader(targetPath, config);
   const loaderVersion = preparedRuntime?.runtime.loaderVersion || resolveEffectiveLoaderVersion(targetPath, loader, config);
@@ -177,6 +211,7 @@ async function buildHealthReport(targetPath) {
     loader,
     loaderVersion,
     managedRuntime: Boolean(preparedRuntime),
+    runtimeChanged: false,
     minecraftVersion,
     missing
   };
@@ -587,6 +622,12 @@ function createInstallHandlers(win) {
 
         const repairedItems = [];
         const report = await buildHealthReport(targetPath);
+        if (report.runtimeChanged) {
+          // Refuse the whole repair before any Java, server.jar or loader work: the v26.6.1-era
+          // installers would rewrite recorded runtime files, and Modpack Verify and Repair has to
+          // restore them first.
+          throw modpackRuntimeChangedError();
+        }
         const effectiveLoader = report.managedRuntime
           ? report.loader
           : resolveEffectiveLoader(targetPath, payload);
