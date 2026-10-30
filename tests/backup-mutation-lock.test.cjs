@@ -31,6 +31,35 @@ function deferred() {
   return { promise, resolve };
 }
 
+function realpathFailure() {
+  return Object.assign(new Error('EISDIR: illegal operation on a directory, realpath'), { code: 'EISDIR' });
+}
+
+// Some RAM disks and virtual drives cannot report a final path, and libuv then
+// fails native realpath with EISDIR for a directory that exists.
+function failNativeRealpath(t) {
+  return t.mock.method(fs.realpathSync, 'native', () => { throw realpathFailure(); });
+}
+
+async function assertSharesOneLock(serverPath, spellings) {
+  const events = [];
+  const releaseHolder = deferred();
+  const holder = withBackupMutationLock(serverPath, async () => {
+    events.push('holder-start');
+    await releaseHolder.promise;
+    events.push('holder-end');
+  });
+  const waiters = spellings.map((spelling, index) => withBackupMutationLock(spelling, async () => {
+    events.push(`alias-${index}`);
+  }));
+  for (let tick = 0; tick < 5; tick += 1) await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ['holder-start']);
+
+  releaseHolder.resolve();
+  await Promise.all([holder, ...waiters]);
+  assert.deepEqual(events, ['holder-start', 'holder-end', ...spellings.map((_, index) => `alias-${index}`)]);
+}
+
 test('a server folder that is itself a junction takes the backup lock', async (t) => {
   const { root, serverPath } = fixture(t);
   const serverJunction = path.join(root, 'server-junction');
@@ -101,4 +130,55 @@ test('a missing folder, a file and a relative path are refused before the operat
   await assert.rejects(withBackupMutationLock(`${serverPath}\0`, operation), TypeError);
   await assert.rejects(withBackupMutationLock(serverPath, null), TypeError);
   assert.equal(ran, false);
+});
+
+test('a server folder takes the backup lock where native realpath fails', async (t) => {
+  const { serverPath } = fixture(t);
+  const nativeRealpath = failNativeRealpath(t);
+  let ran = false;
+
+  assert.equal(await withBackupMutationLock(serverPath, async () => {
+    ran = true;
+    return 'locked';
+  }), 'locked');
+  assert.equal(ran, true);
+  assert.ok(nativeRealpath.mock.callCount() > 0);
+});
+
+test('where native realpath fails, junction aliases and letter case still share one lock', async (t) => {
+  const { root, realParent, serverPath } = fixture(t);
+  const serverJunction = path.join(root, 'server-junction');
+  const parentJunction = path.join(root, 'parent-junction');
+  if (!directoryAlias(t, serverPath, serverJunction) || !directoryAlias(t, realParent, parentJunction)) return;
+  failNativeRealpath(t);
+
+  await assertSharesOneLock(serverPath, [
+    serverJunction,
+    path.join(parentJunction, 'server'),
+    process.platform === 'win32' ? serverPath.toUpperCase() : `${serverPath}${path.sep}`
+  ]);
+});
+
+test('where native realpath fails, a missing folder and a file are still refused before the operation runs', async (t) => {
+  const { root } = fixture(t);
+  const filePath = path.join(root, 'not-a-folder.txt');
+  fs.writeFileSync(filePath, 'file');
+  failNativeRealpath(t);
+  let ran = false;
+  const operation = async () => { ran = true; };
+
+  await assert.rejects(withBackupMutationLock(path.join(root, 'missing-server'), operation), { code: 'ENOENT' });
+  await assert.rejects(withBackupMutationLock(filePath, operation), TypeError);
+  assert.equal(ran, false);
+});
+
+test('where no realpath works, an existing folder locks by its resolved path', async (t) => {
+  const { serverPath } = fixture(t);
+  failNativeRealpath(t);
+  const jsRealpath = t.mock.method(fs, 'realpathSync', () => { throw realpathFailure(); });
+
+  await assertSharesOneLock(serverPath, [
+    process.platform === 'win32' ? serverPath.toUpperCase() : `${serverPath}${path.sep}`
+  ]);
+  assert.ok(jsRealpath.mock.callCount() > 0);
 });
