@@ -345,8 +345,15 @@ test('local client content edits bound the host requirement read with the compos
       timeouts.push(options.timeoutMs);
       return { statusCode: 200, body: { success: true } };
     } });
-  assert.equal(await f.composition.clientPackIntegration.runLocalMutation({ clientId: 'local-client', clientPath: f.clientPath },
-    () => 'local edit'), 'local edit');
-  assert.deepEqual(timeouts, [3000]);
+  const integration = f.composition.clientPackIntegration;
+  const request = { clientId: 'local-client', clientPath: f.clientPath };
+  assert.equal(await integration.runLocalMutation(request, () => 'local edit'), 'local edit');
+  assert.deepEqual(timeouts, [10000]);
+  // On the same clock, the host's answer spares the next edit a read until a settings change.
+  assert.equal(await integration.runLocalMutation(request, () => 'next edit'), 'next edit');
+  assert.deepEqual(timeouts, [10000]);
+  assert.equal(await integration.runPersonalMutation(request, () => 'saved'), 'saved');
+  assert.equal(await integration.runLocalMutation(request, () => 'edit after saving'), 'edit after saving');
+  assert.deepEqual(timeouts, [10000, 10000]);
   assert.deepEqual(f.composition.listActiveMutations(), []);
 });

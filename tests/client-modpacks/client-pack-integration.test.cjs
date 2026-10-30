@@ -12,7 +12,7 @@ const { ClientPackTransaction } = require('../../electron/services/client-modpac
 const { ManagementPackClient } = require('../../electron/services/client-modpacks/management-pack-client.cjs');
 const { ManagementSessionBroker } = require('../../electron/services/management-session-broker.cjs');
 const { createClientPackIntegration } = require('../../electron/services/client-modpacks/client-pack-integration.cjs');
-const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+const deferred = () => { let resolve, reject; const promise = new Promise((done, refuse) => { resolve = done; reject = refuse; }); return { promise, resolve, reject }; };
 const unreachable = () => Object.defineProperty(new ModpackError('CLIENT_PACK_UNAVAILABLE', 'The matching client requirement could not be read'),
   'reason', { value: 'host-unreachable' });
 // The exact /api/server/info key set a v26.6.1 host sends: it predates matching client packs.
@@ -249,24 +249,38 @@ test('local client content changes only when the host never answered', async t =
     transaction: { status: async () => f.state.journal }, stateStore: { read: async () => f.state.manifest },
     managementClient: { async readRequirement(id, options) { reads.push({ id, options }); return outcome(); } }, clientPackService: {}, clock: () => now });
   const run = () => integration.runLocalMutation({ clientId: 'client-a', clientPath: f.target.clientPath }, f.write);
+  const answered = () => ({ descriptor: null, binding: f.state.binding });
   outcome = () => { throw unreachable(); };
   assert.equal(await run(), 1);
-  assert.deepEqual(reads, [{ id: 'client-a', options: { deadline: 8000 } }]);
-  now = 9000; assert.equal(await run(), 2); assert.equal(reads.at(-1).options.deadline, 12000);
-  assert.deepEqual(f.state.proofs, ['none', 'none']);
-  outcome = () => ({ descriptor: null, binding: f.state.binding });
-  assert.equal(await run(), 3, 'an authenticated unmanaged host allows local edits');
+  assert.deepEqual(reads, [{ id: 'client-a', options: { deadline: 15000 } }], 'the read gets the broker\'s whole 10 s attempt');
+  // A host that gave no HTTP response is not asked again for 30 s.
+  now = 34999; assert.equal(await run(), 2); assert.equal(reads.length, 1);
+  now = 35000; assert.equal(await run(), 3); assert.deepEqual(reads.at(-1), { id: 'client-a', options: { deadline: 45000 } });
+  assert.deepEqual(f.state.proofs, ['none', 'none', 'none']);
+  now = 65000; outcome = answered;
+  assert.equal(await run(), 4, 'an authenticated unmanaged host allows local edits');
   for (const failure of [
     new ModpackError('CLIENT_PACK_UNAVAILABLE', 'The matching client requirement could not be read'),
     Object.assign(new Error('forged reason'), { code: 'CLIENT_PACK_UNAVAILABLE', reason: 'host-unreachable' }),
     new ModpackError('CLIENT_PACK_SERVER_CHANGED', 'The server changed'), new ModpackError('PLAN_STALE', 'The connection changed'),
     new ModpackError('CANCELLED', 'Cancelled')
   ]) {
-    outcome = () => { throw failure; };
-    await assert.rejects(run(), error => error === failure);
+    // The failure reaches the caller unchanged and ends the verdict another edit recorded while it was in flight.
+    now += 60000;
+    const pending = deferred(); const asked = deferred();
+    outcome = () => { asked.resolve(); return pending.promise; };
+    const refused = run(); await asked.promise;
+    outcome = answered; const count = reads.length;
+    await run(); await run();
+    assert.equal(reads.length, count + 1, 'the second edit used the recorded verdict');
+    pending.reject(failure);
+    await assert.rejects(refused, error => error === failure);
+    await run();
+    assert.equal(reads.length, count + 2, `${failure.code} ended the verdict`);
   }
+  const writes = f.state.writes;
   for (const descriptor of [{ status: 'ready' }, { status: 'unpaired' }]) {
-    outcome = () => ({ descriptor, binding: f.state.binding });
+    now += 60000; outcome = () => ({ descriptor, binding: f.state.binding });
     await assert.rejects(run(), { code: 'CLIENT_PACK_UNAVAILABLE' });
   }
   outcome = () => { throw unreachable(); };
@@ -274,7 +288,96 @@ test('local client content changes only when the host never answered', async t =
   await assert.rejects(run(), { code: 'CLIENT_PACK_UNAVAILABLE' });
   f.state.manifest = null; f.state.journal = { phase: 'ready' };
   await assert.rejects(run(), { code: 'RECOVERY_REQUIRED' });
-  assert.equal(f.state.writes, 3);
+  assert.equal(f.state.writes, writes);
+});
+
+test('a host verdict spares later local edits a read and ends with any refusal or settings change', async t => {
+  const f = fixture(t); let now = 1000; let outcome;
+  const reads = [];
+  const integration = createClientPackIntegration({ resolveClient: async () => f.target, resolveClientByPath: async () => f.target,
+    processGuard: { withMutation: async (_target, work) => work() },
+    transaction: { status: async () => f.state.journal }, stateStore: { read: async () => f.state.manifest },
+    managementClient: { async readRequirement(_id, options) { reads.push(options); return outcome(); } }, clientPackService: {}, clock: () => now });
+  const request = { clientId: 'client-a', clientPath: f.target.clientPath };
+  const run = () => integration.runLocalMutation(request, f.write);
+  const answered = () => ({ descriptor: null, binding: f.state.binding });
+  // A host without a requirement, a v26.6.1 host included, is not asked again for 60 s.
+  outcome = answered;
+  assert.equal(await run(), 1); now = 60999; assert.equal(await run(), 2); assert.equal(reads.length, 1);
+  now = 61000; assert.equal(await run(), 3); assert.equal(reads.length, 2);
+  now = 200000; outcome = () => ({ descriptor: null, binding: f.state.binding, legacyHost: true });
+  assert.equal(await run(), 4); now = 259999; assert.equal(await run(), 5); assert.equal(reads.length, 3);
+  // A host that requires a matching pack refuses, and the next edit asks again.
+  now = 400000; outcome = () => ({ descriptor: { status: 'ready' }, binding: f.state.binding });
+  await assert.rejects(run(), { code: 'CLIENT_PACK_UNAVAILABLE' });
+  outcome = answered; assert.equal(await run(), 6); assert.equal(reads.length, 5);
+  // Local evidence refuses every edit while a verdict stands, and ends it.
+  for (const [evidence, code] of [['manifest', 'CLIENT_PACK_UNAVAILABLE'], ['journal', 'RECOVERY_REQUIRED']]) {
+    now += 60000; await run();
+    const count = reads.length;
+    if (evidence === 'manifest') f.state.manifest = { descriptor: {} }; else f.state.journal = { phase: 'preparing' };
+    await assert.rejects(run(), { code }, evidence);
+    assert.equal(reads.length, count, `${evidence} refuses before any verdict or read`);
+    f.state.manifest = null; f.state.journal = null;
+    await run(); assert.equal(reads.length, count + 1, `${evidence} ended the verdict`);
+  }
+  // A personal settings change, such as a new server address, ends the verdict.
+  let count = reads.length;
+  assert.equal(await integration.runPersonalMutation(request, () => 'saved'), 'saved');
+  await run(); assert.equal(reads.length, count + 1);
+  // ...also one recorded by an edit while the change was being saved.
+  now += 60000;
+  const saving = deferred(); const inside = deferred();
+  const save = integration.runPersonalMutation(request, async () => { inside.resolve(); await saving.promise; return 'saved'; });
+  await inside.promise; await run();
+  saving.resolve(); assert.equal(await save, 'saved');
+  count = reads.length; await run(); assert.equal(reads.length, count + 1, 'the settings change ended the verdict recorded while it ran');
+  // A read that overlapped a newer refusal or settings change never records its verdict, though its own edit runs.
+  for (const overlap of ['refusal', 'settings']) {
+    now += 60000;
+    const pending = deferred(); const asked = deferred();
+    outcome = () => { asked.resolve(); return pending.promise; };
+    const late = run(); await asked.promise;
+    if (overlap === 'refusal') {
+      outcome = () => ({ descriptor: { status: 'ready' }, binding: f.state.binding });
+      await assert.rejects(run(), { code: 'CLIENT_PACK_UNAVAILABLE' });
+      pending.reject(unreachable());
+    } else {
+      assert.equal(await integration.runPersonalMutation(request, () => 'pointed at another host'), 'pointed at another host');
+      pending.resolve(answered());
+    }
+    const writes = f.state.writes; assert.equal(await late, writes + 1, overlap);
+    outcome = answered; count = reads.length; await run();
+    assert.equal(reads.length, count + 1, `a read that overlapped a ${overlap} recorded no verdict`);
+  }
+});
+
+test('a connected host still silent at the deadline gets an honest refusal', async t => {
+  const f = fixture(t); let now = 1000; let outcome;
+  const integration = createClientPackIntegration({ resolveClient: async () => f.target, resolveClientByPath: async () => f.target,
+    processGuard: { withMutation: async (_target, work) => work() }, transaction: { status: async () => null }, stateStore: { read: async () => null },
+    managementClient: { async readRequirement() { return outcome(); } }, clientPackService: {}, clock: () => now });
+  const run = () => integration.runLocalMutation({ clientId: 'client-a', clientPath: f.target.clientPath }, f.write);
+  const generic = () => new ModpackError('CLIENT_PACK_UNAVAILABLE', 'The matching client requirement could not be read');
+  // The clock moves while the read is in flight; the deadline timer can fire 1 ms before the clock reaches it.
+  const failAfter = (elapsed, failure) => { const started = now; outcome = () => { now = started + elapsed; throw failure; }; };
+  for (const elapsed of [10000, 9999, 25000]) {
+    now += 60000; const failure = generic(); failAfter(elapsed, failure);
+    await assert.rejects(run(), error => error instanceof ModpackError && error.code === 'CLIENT_PACK_UNAVAILABLE' &&
+      /did not answer in time/.test(error.message) && error.cause === failure && error.reason === undefined, String(elapsed));
+  }
+  // An earlier failure, and anything but a plain unavailable read, reaches the caller unchanged.
+  for (const [elapsed, failure] of [[9998, generic()],
+    [10000, Object.assign(new Error('forged reason'), { code: 'CLIENT_PACK_UNAVAILABLE' })],
+    [10000, new ModpackError('CLIENT_PACK_SERVER_CHANGED', 'The server changed')], [10000, new ModpackError('PLAN_STALE', 'The connection changed')],
+    [10000, new ModpackError('CANCELLED', 'Cancelled')]]) {
+    now += 60000; failAfter(elapsed, failure);
+    await assert.rejects(run(), error => error === failure, `${failure.code} after ${elapsed} ms`);
+  }
+  assert.equal(f.state.writes, 0);
+  // A host that never completed the connection gave no HTTP response, however long the read waited.
+  now += 60000; failAfter(10000, unreachable());
+  assert.equal(await run(), 1);
 });
 
 async function closedPort() {
@@ -304,6 +407,15 @@ test('a real unreachable host lets a local asset delete run', async t => {
   assert.equal(await f.deleteAsset(), 1);
 });
 
+test('a reachable host that answers within the 10 s budget lets a local asset delete run', async t => {
+  // Slower than a 3 s budget, as a host is while it hashes every client mod for /api/server/info.
+  const timers = new Set(); t.after(() => timers.forEach(clearTimeout));
+  const f = await realHostFixture(t, (_req, res) => {
+    timers.add(setTimeout(() => res.end(JSON.stringify({ success: true, clientModpack: null })), 3500));
+  });
+  assert.equal(await f.deleteAsset(), 1);
+});
+
 test('server info listing about 1000 client mods keeps legacy sync and an unmanaged launch available (A34)', async t => {
   const mods = Array.from({ length: 1000 }, (_, index) => ({ fileName: `synthetic-forge-mod-${String(index).padStart(4, '0')}-1.20.1-47.3.12.jar`,
     checksum: 'f'.repeat(32), size: 123456, required: true, downloadUrl: `/api/mods/download/client/synthetic-forge-mod-${index}.jar`,
@@ -324,12 +436,17 @@ test('a reachable host that reports a pack error, fails or stays silent refuses 
     (_req, res) => res.end(JSON.stringify({ success: true, clientModpack: { status: 'ready' } }))
   ]) {
     const f = await realHostFixture(t, handler);
-    await assert.rejects(f.deleteAsset(), error => error.code === 'CLIENT_PACK_UNAVAILABLE' && error.reason === undefined);
+    await assert.rejects(f.deleteAsset(), error => error.code === 'CLIENT_PACK_UNAVAILABLE' && error.reason === undefined &&
+      !/did not answer in time/.test(error.message));
     assert.equal(f.state.writes, 0);
   }
-  // Connected but slow: the 3 s requirement budget (here two thirds spent by the injected clock) expires well after the connection.
-  const silent = await realHostFixture(t, () => {}, { clock: () => Date.now() - 2000 });
-  await assert.rejects(silent.deleteAsset(), error => error.code === 'CLIENT_PACK_UNAVAILABLE' && error.reason === undefined);
+  // Connected but silent: the edit's clock reads 9 s behind until the host has the request, so about 1 s of the
+  // 10 s budget is left; from then on it reads the time the broker keeps, and the host never answers.
+  let behind = 9000;
+  const silent = await realHostFixture(t, () => { behind = 0; }, { clock: () => Date.now() - behind });
+  await assert.rejects(silent.deleteAsset(), error => error.code === 'CLIENT_PACK_UNAVAILABLE' && error.reason === undefined &&
+    /did not answer in time/.test(error.message));
+  assert.equal(behind, 0, 'the host had the request');
   assert.equal(silent.state.writes, 0);
 });
 

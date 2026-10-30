@@ -7,8 +7,18 @@ const pathKey = value => process.platform === 'win32' ? path.resolve(value).toLo
 const fail = code => new ModpackError(code, code === 'CLIENT_PACK_UNAVAILABLE'
   ? 'Use Matching modpack to install or update this client before continuing'
   : 'The client must be recovered or verified before continuing');
-// How long a client-local content edit waits to learn the host's requirement.
-const LOCAL_REQUIREMENT_DEADLINE_MS = 3000;
+// How long a client-local content edit waits to learn the host's requirement: the
+// broker's per-attempt cap (management-session-broker timeoutMs), so a slow but
+// reachable host, such as one hashing every client mod for /api/server/info, answers in time.
+const LOCAL_REQUIREMENT_DEADLINE_MS = 10000;
+// Node's timers count whole milliseconds on their own clock, so the broker's deadline
+// timer can fire up to 1 ms before the clock reaches the deadline.
+const DEADLINE_TIMER_ROUNDING_MS = 1;
+const HOST_SILENT_MESSAGE = 'The server did not answer in time, so this change was not made. Try again in a moment.';
+// How long a host's answer spares later local edits a read (and the host its hashing
+// pass): an answer without a requirement, or no HTTP response at all.
+const NO_REQUIREMENT_VERDICT_MS = 60000;
+const HOST_UNREACHABLE_VERDICT_MS = 30000;
 const LENIENT = Object.freeze({ proof: 'none' });
 const settled = journal => !journal || ['committed', 'abandoned'].includes(journal.phase);
 
@@ -20,6 +30,16 @@ async function folderMissing(folder) {
 function createClientPackIntegration({ resolveClient, resolveClientByPath, processGuard, transaction,
   stateStore, managementClient, clientPackService, clock = Date.now } = {}) {
   if (typeof resolveClient !== 'function' || typeof resolveClientByPath !== 'function' || typeof clock !== 'function') throw fail('INVALID_REQUEST');
+  // The host's last verdict on each client's local content, keyed by client and folder,
+  // so a run of toggles does not make the host hash every client mod for each one. Any
+  // refusal, failed read or personal settings change ends it and bumps the key's epoch;
+  // a read records its verdict only if the epoch did not move while it was in flight.
+  const verdicts = new Map(); const verdictEpochs = new Map();
+  const verdictKey = target => `${target.clientId}\u0000${pathKey(target.clientPath)}`;
+  function forgetVerdict(key) {
+    verdicts.delete(key);
+    verdictEpochs.set(key, (verdictEpochs.get(key) ?? 0) + 1);
+  }
   async function assertSettled(target) {
     if (!settled(await transaction.status(target))) throw fail('RECOVERY_REQUIRED');
   }
@@ -95,29 +115,50 @@ function createClientPackIntegration({ resolveClient, resolveClientByPath, proce
     async runPersonalMutation({ clientId, clientPath }, work) {
       const target = await resolveClient(clientId);
       if (!target || target.clientId !== clientId || pathKey(clientPath) !== pathKey(target.clientPath)) throw fail('INVALID_REQUEST');
-      return lenient(target, async () => {
-        // Personal settings are permitted for managed clients, but never race
-        // their pack's path reservation or an unfinished durable transaction.
-        await assertSettled(target);
-        return work();
-      });
+      // A settings change (save-client-config) can point the client at another host,
+      // so the host's verdict on local content ends both before and after it.
+      const key = verdictKey(target);
+      forgetVerdict(key);
+      try {
+        return await lenient(target, async () => {
+          // Personal settings are permitted for managed clients, but never race
+          // their pack's path reservation or an unfinished durable transaction.
+          await assertSettled(target);
+          return work();
+        });
+      } finally { forgetVerdict(key); }
     },
     // Client-local content (own mods, shaders, resource packs). It changes without
     // the host's requirement only when the host gave no HTTP response at all; any
     // reply, error body, refusal or slow connected host keeps refusing.
     async runLocalMutation({ clientId, clientPath }, work) {
       const target = await registeredTarget(clientId, clientPath);
+      const key = verdictKey(target);
       return lenient(target, async () => {
-        await assertSettled(target);
-        if (await stateStore.read(target.clientPath)) throw fail('CLIENT_PACK_UNAVAILABLE');
+        // Local evidence is checked on every edit, before any verdict.
+        try {
+          await assertSettled(target);
+          if (await stateStore.read(target.clientPath)) throw fail('CLIENT_PACK_UNAVAILABLE');
+        } catch (error) { forgetVerdict(key); throw error; }
+        if (clock() < (verdicts.get(key) ?? -Infinity)) return work();
+        const epoch = verdictEpochs.get(key) ?? 0;
+        const record = lifetime => { if ((verdictEpochs.get(key) ?? 0) === epoch) verdicts.set(key, clock() + lifetime); };
+        const deadline = clock() + LOCAL_REQUIREMENT_DEADLINE_MS;
         let requirement;
         try {
-          ({ descriptor: requirement } = await managementClient.readRequirement(target.clientId, { deadline: clock() + LOCAL_REQUIREMENT_DEADLINE_MS }));
+          ({ descriptor: requirement } = await managementClient.readRequirement(target.clientId, { deadline }));
         } catch (error) {
-          if (error instanceof ModpackError && error.code === 'CLIENT_PACK_UNAVAILABLE' && error.reason === HOST_UNREACHABLE_REASON) return work();
+          const unavailable = error instanceof ModpackError && error.code === 'CLIENT_PACK_UNAVAILABLE';
+          if (unavailable && error.reason === HOST_UNREACHABLE_REASON) { record(HOST_UNREACHABLE_VERDICT_MS); return work(); }
+          forgetVerdict(key);
+          // A connected host still silent when the budget ran out.
+          if (unavailable && clock() >= deadline - DEADLINE_TIMER_ROUNDING_MS) {
+            throw new ModpackError('CLIENT_PACK_UNAVAILABLE', HOST_SILENT_MESSAGE, { cause: error });
+          }
           throw error;
         }
-        if (requirement) throw fail('CLIENT_PACK_UNAVAILABLE');
+        if (requirement) { forgetVerdict(key); throw fail('CLIENT_PACK_UNAVAILABLE'); }
+        record(NO_REQUIREMENT_VERDICT_MS);
         return work();
       });
     },
