@@ -1272,9 +1272,9 @@ test('launcher network synchronization persists loopback binding with the select
   const properties = fs.readFileSync(path.join(root, 'server.properties'), 'utf8');
   assert.equal(properties, [
     '# preserve this comment',
-    'motd=Test',
+    'server-ip=127.0.0.1',
     'server-port=25571',
-    'server-ip=127.0.0.1'
+    'motd=Test'
   ].join('\r\n') + '\r\n');
 });
 

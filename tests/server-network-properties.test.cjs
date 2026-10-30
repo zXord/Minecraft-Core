@@ -4,6 +4,7 @@ const test = require('node:test');
 const {
   applyServerNetworkProperties,
   MAX_SERVER_PROPERTIES_BYTES,
+  overlayServerProperties,
   readEffectiveServerProperty
 } = require('../electron/utils/server-network-properties.cjs');
 
@@ -35,7 +36,7 @@ test('shared properties reader matches Java escaping at end of file', () => {
   assert.equal(readEffectiveServerProperty(unicodeValue, 'server-ip'), '[::1]');
 });
 
-test('network overlay removes every semantic network-key duplicate and preserves comments and CRLF style', () => {
+test('network overlay replaces the first semantic entry in place, removes later duplicates, and preserves CRLF style', () => {
   const properties = Buffer.from([
     '# publisher comment',
     'server-ip:192.0.2.10',
@@ -53,9 +54,9 @@ test('network overlay removes every semantic network-key duplicate and preserves
 
   assert.equal(overlaid.toString('utf8'), [
     '# publisher comment',
-    'motd=Keep me',
+    'server-ip=127.0.0.1',
     'server-port=25571',
-    'server-ip=127.0.0.1'
+    'motd=Keep me'
   ].join('\r\n') + '\r\n');
   assert.equal(readEffectiveServerProperty(overlaid, 'server-ip'), '127.0.0.1');
   assert.equal(readEffectiveServerProperty(overlaid, 'server-port'), '25571');
@@ -82,16 +83,62 @@ test('network overlay preserves exact unrelated comments, line endings, blanks, 
 
   assert.deepEqual(overlaid, Buffer.from(
     '# publisher comment\r\n' +
+    'server-ip=127.0.0.1\r' +
     'server-ip\\=shadow=value\n' +
     'server-ip\\u003dshadow=other\r' +
     'motd=Keep me\r\n' +
     '\r\n' +
     '! tail comment\n' +
     '\r\n' +
-    'server-port=25571\r\n' +
-    'server-ip=127.0.0.1\r\n',
+    'server-port=25571\r\n',
     'utf8'
   ));
+});
+
+test('network overlay keeps a Minecraft-shaped file byte-identical when nothing changes and edits a changed port in place', () => {
+  const minecraftShaped = Buffer.from([
+    '#Minecraft server properties',
+    '#Thu Oct 29 21:14:03 AST 2026',
+    'allow-flight=false',
+    'motd=A Minecraft Server',
+    'server-ip=',
+    'server-port=25565',
+    'view-distance=10'
+  ].join('\n') + '\n', 'utf8');
+
+  assert.deepEqual(applyServerNetworkProperties(minecraftShaped, { port: 25565, networkAccess: 'pack-default' }), minecraftShaped);
+  assert.equal(
+    applyServerNetworkProperties(minecraftShaped, { port: 25570, networkAccess: 'pack-default' }).toString('utf8'),
+    minecraftShaped.toString('utf8').replace('server-port=25565\n', 'server-port=25570\n')
+  );
+  const loopback = applyServerNetworkProperties(minecraftShaped, { port: 25565, networkAccess: 'loopback' });
+  assert.equal(
+    loopback.toString('utf8'),
+    minecraftShaped.toString('utf8').replace('server-ip=\n', 'server-ip=127.0.0.1\n')
+  );
+  assert.deepEqual(applyServerNetworkProperties(loopback, { port: 25565, networkAccess: 'loopback' }), loopback);
+});
+
+test('network overlay removes a later duplicate together with its continuation lines and keeps a final unterminated entry unterminated', () => {
+  const original = Buffer.from(
+    'server-port=25564\n' +
+    'motd=Keep me\n' +
+    'server\\u002dport 2556' + '\\' + '\n' +
+    '    5\n' +
+    'view-distance=9\n' +
+    'server-ip=192.0.2.10',
+    'utf8'
+  );
+
+  const overlaid = applyServerNetworkProperties(original, { port: 25571, networkAccess: 'loopback' });
+
+  assert.equal(overlaid.toString('utf8'),
+    'server-port=25571\n' +
+    'motd=Keep me\n' +
+    'view-distance=9\n' +
+    'server-ip=127.0.0.1');
+  assert.equal(readEffectiveServerProperty(overlaid, 'server-port'), '25571');
+  assert.equal(readEffectiveServerProperty(overlaid, 'server-ip'), '127.0.0.1');
 });
 
 test('network overlay separates appended properties from a Java continuation at end of file', () => {
@@ -144,7 +191,52 @@ test('shared properties reader is bounded and rejects invalid UTF-8 without repl
     error => error instanceof TypeError && /properties/i.test(error.message)
   );
   assert.throws(
-    () => applyServerNetworkProperties(invalidUtf8, { port: 25571, networkAccess: 'loopback' }),
+    () => readEffectiveServerProperty(invalidUtf8, 'server-ip'),
     error => error instanceof TypeError && /properties/i.test(error.message)
   );
+  assert.throws(
+    () => applyServerNetworkProperties(oversized, { port: 25571, networkAccess: 'loopback' }),
+    error => error instanceof TypeError && /properties/i.test(error.message)
+  );
+});
+
+test('network overlay keeps an ANSI (cp1252) MOTD byte-exact while replacing the port in place', () => {
+  const ansi = Buffer.concat([
+    Buffer.from('#Minecraft server properties\r\nmotd=', 'ascii'),
+    Buffer.from([0xa7, 0x36, 0x43, 0x61, 0x66, 0xe9]),
+    Buffer.from('\r\nserver-port=25565\r\nlevel-name=world\r\n', 'ascii')
+  ]);
+
+  const overlaid = applyServerNetworkProperties(ansi, { port: 25571, networkAccess: 'pack-default' });
+
+  assert.deepEqual(overlaid, Buffer.concat([
+    Buffer.from('#Minecraft server properties\r\nmotd=', 'ascii'),
+    Buffer.from([0xa7, 0x36, 0x43, 0x61, 0x66, 0xe9]),
+    Buffer.from('\r\nserver-port=25571\r\nlevel-name=world\r\n', 'ascii')
+  ]));
+  assert.deepEqual(applyServerNetworkProperties(overlaid, { port: 25571, networkAccess: 'pack-default' }), overlaid);
+  assert.throws(
+    () => readEffectiveServerProperty(ansi, 'level-name'),
+    error => error instanceof TypeError && /properties/i.test(error.message)
+  );
+});
+
+test('network overlay keeps UTF-8 text byte-exact and accepts only printable ASCII overlay values', () => {
+  const utf8 = Buffer.from('motd=§6Café ☃\nserver-port=25565\n', 'utf8');
+  assert.deepEqual(
+    overlayServerProperties(utf8, { 'server-port': 25570 }),
+    Buffer.from('motd=§6Café ☃\nserver-port=25570\n', 'utf8')
+  );
+  assert.deepEqual(
+    overlayServerProperties(utf8, { motd: 'minecraft-core-health:0123abcd', 'enable-query': false }),
+    Buffer.from('motd=minecraft-core-health:0123abcd\nserver-port=25565\nenable-query=false\n', 'utf8')
+  );
+
+  for (const value of ['Café', '§6', 'line\nbreak', 'tab\tvalue', 'nul\u0000', '\u007f']) {
+    assert.throws(
+      () => overlayServerProperties(utf8, { motd: value }),
+      error => error instanceof TypeError && /overlay/i.test(error.message),
+      JSON.stringify(value)
+    );
+  }
 });

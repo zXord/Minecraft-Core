@@ -11,9 +11,12 @@ const AdmZip = require('adm-zip');
 
 const {
   getLoaderVersions,
+  hasPreparedRuntimeMetadata,
+  inspectPreparedRuntime,
   installServerLoader,
   validatePreparedRuntime,
   __testUtils: {
+    RUNTIME_USER_AGENT,
     getForgeArtifactVersion,
     getForgeInstallerPath,
     isForgeInstallerOpenError,
@@ -73,6 +76,48 @@ function runtimeArtifact(root, relativePath) {
     size: bytes.length,
     sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
     sha512: crypto.createHash('sha512').update(bytes).digest('hex')
+  };
+}
+
+function writeFabricRuntimeMarker(root) {
+  writeFabricLauncherJar(path.join(root, 'fabric-server-launch.jar'));
+  writeMinimalJar(path.join(root, 'server.jar'));
+  const runtime = {
+    minecraftVersion: '1.20.1',
+    loaderFamily: 'fabric',
+    loaderVersion: '0.15.11',
+    javaMajor: 17,
+    os: 'win32',
+    architecture: 'x64'
+  };
+  fs.mkdirSync(path.join(root, '.minecraft-core-state'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.minecraft-core-state', 'runtime.json'), JSON.stringify({
+    formatVersion: 1,
+    runtime,
+    loader: { family: 'fabric', launcherJar: 'fabric-server-launch.jar' },
+    artifacts: [runtimeArtifact(root, 'fabric-server-launch.jar'), runtimeArtifact(root, 'server.jar')]
+  }));
+  return runtime;
+}
+
+// A real directory plus two junction spellings of it: one through a junctioned parent, one where the
+// server folder itself is the junction. Returns null when this machine cannot create junctions.
+function junctionSpellings(t, prefix) {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  t.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+  const realParent = path.join(fixture, 'real');
+  const serverPath = path.join(realParent, 'srv');
+  fs.mkdirSync(serverPath, { recursive: true });
+  try {
+    fs.symlinkSync(realParent, path.join(fixture, 'jparent'), 'junction');
+    fs.symlinkSync(serverPath, path.join(fixture, 'jsrv'), 'junction');
+  } catch (error) {
+    if (['EPERM', 'EACCES', 'ENOTSUP', 'EINVAL'].includes(error.code)) return null;
+    throw error;
+  }
+  return {
+    serverPath,
+    aliases: [path.join(fixture, 'jparent', 'srv'), path.join(fixture, 'jsrv')]
   };
 }
 
@@ -893,4 +938,82 @@ test('failed publish rollback retains the only backup when restore itself fails'
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('prepared runtime metadata presence is an lstat fact that counts every non-ENOENT outcome as present', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-runtime-presence-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const metadataPath = path.join(root, '.minecraft-core-state', 'runtime.json');
+
+  assert.equal(hasPreparedRuntimeMetadata(root), false);
+  assert.equal(hasPreparedRuntimeMetadata(path.join(root, 'missing-server')), false);
+  fs.mkdirSync(path.dirname(metadataPath));
+  assert.equal(hasPreparedRuntimeMetadata(root), false, 'an empty state folder is not runtime metadata');
+  fs.writeFileSync(metadataPath, 'not json');
+  assert.equal(hasPreparedRuntimeMetadata(root), true);
+  fs.rmSync(metadataPath);
+  fs.mkdirSync(metadataPath);
+  assert.equal(hasPreparedRuntimeMetadata(root), true, 'a directory-shaped record is present');
+  fs.rmSync(metadataPath, { recursive: true });
+  assert.equal(hasPreparedRuntimeMetadata('relative-server'), true, 'an unusable path cannot prove absence');
+
+  const originalLstatSync = fs.lstatSync;
+  fs.lstatSync = function injectedAccessFailure(target, ...args) {
+    if (String(target) === metadataPath) {
+      throw Object.assign(new Error(`EACCES: permission denied, lstat '${target}'`), { code: 'EACCES' });
+    }
+    return originalLstatSync.call(this, target, ...args);
+  };
+  try {
+    assert.equal(hasPreparedRuntimeMetadata(root), true);
+    assert.throws(() => inspectPreparedRuntime(root), error => error.code === 'RUNTIME_INCOMPLETE');
+  } finally {
+    fs.lstatSync = originalLstatSync;
+  }
+});
+
+test('an unprepared server reached through a junction is inspected as unprepared before any canonical-path check', t => {
+  const fixture = junctionSpellings(t, 'minecraft-core-runtime-junction-');
+  if (!fixture) {
+    t.skip('directory junctions are unavailable');
+    return;
+  }
+  for (const alias of fixture.aliases) {
+    assert.equal(inspectPreparedRuntime(alias), null, alias);
+    assert.throws(
+      () => validatePreparedRuntime(alias, {
+        minecraftVersion: '1.20.1',
+        loaderFamily: 'fabric',
+        loaderVersion: '0.15.11',
+        javaMajor: 17,
+        os: 'win32',
+        architecture: 'x64'
+      }),
+      error => error.code === 'RUNTIME_INCOMPLETE',
+      alias
+    );
+  }
+});
+
+test('a prepared runtime reached through a junction still fails closed', t => {
+  const fixture = junctionSpellings(t, 'minecraft-core-runtime-junction-prepared-');
+  if (!fixture) {
+    t.skip('directory junctions are unavailable');
+    return;
+  }
+  const runtime = writeFabricRuntimeMarker(fixture.serverPath);
+  assert.equal(inspectPreparedRuntime(fixture.serverPath).valid, true);
+  assert.equal(validatePreparedRuntime(fixture.serverPath, runtime).valid, true);
+  for (const alias of fixture.aliases) {
+    assert.equal(hasPreparedRuntimeMetadata(alias), true, alias);
+    assert.throws(() => inspectPreparedRuntime(alias), error => error.code === 'RUNTIME_INCOMPLETE', alias);
+    assert.throws(() => validatePreparedRuntime(alias, runtime), error => error.code === 'RUNTIME_INCOMPLETE', alias);
+  }
+});
+
+test('the runtime download User-Agent carries the package.json version instead of a hard-coded release', () => {
+  const { version } = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  assert.equal(RUNTIME_USER_AGENT, `Minecraft-Core/${version} RuntimeManager`);
+  const source = fs.readFileSync(require.resolve('../electron/services/loader-install-service.cjs'), 'utf8');
+  assert.doesNotMatch(source, /Minecraft-Core\/\d+\.\d+\.\d+/u);
 });

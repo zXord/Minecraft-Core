@@ -34,7 +34,16 @@ const {
   resolveSafeRedirectUrl
 } = require('../utils/security-boundaries.cjs');
 
-const RUNTIME_USER_AGENT = 'Minecraft-Core/26.6.1 RuntimeManager';
+function readAppVersion() {
+  try {
+    const { version } = JSON.parse(fs.readFileSync(path.join(__dirname, '../../package.json'), 'utf8'));
+    return typeof version === 'string' && /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/u.test(version) ? version : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+const RUNTIME_USER_AGENT = `Minecraft-Core/${readAppVersion()} RuntimeManager`;
 const NEOFORGE_HOST = 'maven.neoforged.net';
 const NEOFORGE_ORIGIN = `https://${NEOFORGE_HOST}`;
 const NEOFORGE_METADATA_URL = `https://${NEOFORGE_HOST}/releases/net/neoforged/neoforge/maven-metadata.xml`;
@@ -59,6 +68,10 @@ const SAFE_MINECRAFT_VERSION = /^\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9._-]+)?$/;
 const SUPPORTED_RUNTIME_LOADERS = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
 const QUILT_LAUNCHER_MAIN = 'org.quiltmc.loader.impl.launch.server.QuiltServerLauncher';
 const QUILT_SERVER_MAIN = 'org.quiltmc.loader.impl.launch.knot.KnotServer';
+// Older Minecraft Core releases have no NeoForge launch path and run the root server.jar of any
+// server they do not recognise. NeoForge servers therefore get a root jar whose missing main class
+// names the problem, so a downgraded app fails to start them instead of running vanilla on the world.
+const NEOFORGE_DOWNGRADE_GUARD_MAIN_CLASS = 'MinecraftCore.UpdateRequired.This_NeoForge_server_needs_a_newer_Minecraft_Core';
 const MOJANG_META_HOST = 'piston-meta.mojang.com';
 const MOJANG_META_ORIGIN = `https://${MOJANG_META_HOST}`;
 const MOJANG_DATA_HOST = 'piston-data.mojang.com';
@@ -1282,28 +1295,63 @@ function validateNeoForgeArgumentFile(root, argumentFile, { minecraftVersion = n
   return { text, referencedFiles: [...referencedFiles] };
 }
 
-function neoForgeLayout(root, loaderVersion, minecraftVersion = null) {
+function minecraftServerLibraryJar(minecraftVersion) {
+  return `libraries/net/minecraft/server/${minecraftVersion}/server-${minecraftVersion}.jar`;
+}
+
+// Generated jars must be byte-identical wherever they are rebuilt, because a targeted Repair only
+// accepts a regenerated runtime file whose hash equals the recorded one. AdmZip encodes entry times
+// with local-time getters, so the 1980 epoch uses the local-time constructor and every time zone
+// writes the same DOS fields. Entries are stored, not deflated, so zlib builds cannot change the
+// bytes, and "version made by" is pinned because AdmZip otherwise derives it from the host OS.
+function deterministicManifestJar(manifestLines) {
+  const zip = new AdmZip();
+  const entry = zip.addFile('META-INF/MANIFEST.MF', Buffer.from(manifestLines.join('\r\n'), 'utf8'));
+  entry.header.time = new Date(1980, 0, 1, 0, 0, 0);
+  entry.header.method = 0;
+  entry.header.made = 0x0a14;
+  return zip.toBuffer();
+}
+
+function neoForgeDowngradeGuardJarBytes() {
+  return deterministicManifestJar([
+    'Manifest-Version: 1.0',
+    foldManifestAttribute('Main-Class', NEOFORGE_DOWNGRADE_GUARD_MAIN_CLASS),
+    '',
+    ''
+  ]);
+}
+
+function neoForgeLayout(root, loaderVersion, minecraftVersion) {
   const loaderDirectory = resolveControlledPath(root, `libraries/net/neoforged/neoforge/${loaderVersion}`);
   const argsFile = path.join(loaderDirectory, 'win_args.txt');
   const universalJar = path.join(loaderDirectory, `neoforge-${loaderVersion}-universal.jar`);
+  const minecraftServerJar = resolveControlledPath(root, minecraftServerLibraryJar(minecraftVersion));
+  // Any root jar is accepted: new layouts carry the downgrade guard, while layouts published by
+  // pre-release builds keep their vanilla copy until an update or loader switch republishes them.
+  // A targeted Repair of such a vanilla root jar fails closed, because the regenerated guard can
+  // never match the recorded vanilla hash.
   const serverJar = path.join(root, 'server.jar');
   const userJvmArgs = path.join(root, 'user_jvm_args.txt');
   requireJar(root, serverJar);
+  requireJar(root, minecraftServerJar);
   requireJar(root, universalJar);
   assertRegularContainedFile(root, userJvmArgs);
   const args = validateNeoForgeArgumentFile(root, argsFile, { minecraftVersion, loaderVersion });
-  return { argsFile, universalJar, serverJar, userJvmArgs, referencedFiles: args.referencedFiles };
+  return { argsFile, universalJar, serverJar, minecraftServerJar, userJvmArgs, referencedFiles: args.referencedFiles };
 }
 
-function materializeNeoForgeServerJar(root, minecraftVersion) {
+// The NeoForge launch never uses the root server.jar; it exists only so older releases neither see
+// a missing jar (their Repair would download vanilla) nor run vanilla on a NeoForge world.
+function writeNeoForgeDowngradeGuardJar(root, minecraftVersion) {
+  requireJar(root, resolveControlledPath(root, minecraftServerLibraryJar(minecraftVersion)));
   const rootServerJar = path.join(root, 'server.jar');
-  if (fs.existsSync(rootServerJar)) return requireJar(root, rootServerJar);
-  const installedServerJar = resolveControlledPath(
-    root,
-    `libraries/net/minecraft/server/${minecraftVersion}/server-${minecraftVersion}.jar`
-  );
-  requireJar(root, installedServerJar);
-  fs.copyFileSync(installedServerJar, rootServerJar, fs.constants.COPYFILE_EXCL);
+  if (fs.existsSync(rootServerJar)) {
+    const stat = fs.lstatSync(rootServerJar);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw runtimeIncomplete();
+    fs.rmSync(rootServerJar);
+  }
+  writeNewControlledFile(root, rootServerJar, neoForgeDowngradeGuardJarBytes());
   return requireJar(root, rootServerJar);
 }
 
@@ -1527,21 +1575,20 @@ function foldManifestAttribute(name, value) {
   return lines.join('\r\n');
 }
 
-function createQuiltLauncherJar(root, libraries) {
+function quiltLauncherJarBytes(libraries) {
   const classPath = libraries.map(library => library.relativePath).join(' ');
-  const manifest = [
+  return deterministicManifestJar([
     'Manifest-Version: 1.0',
     `Main-Class: ${QUILT_LAUNCHER_MAIN}`,
     foldManifestAttribute('Class-Path', classPath),
     '',
     ''
-  ].join('\r\n');
-  const zip = new AdmZip();
-  zip.addFile('META-INF/MANIFEST.MF', Buffer.from(manifest, 'utf8'));
-  const entry = zip.getEntry('META-INF/MANIFEST.MF');
-  entry.header.time = new Date('1980-01-01T00:00:00.000Z');
+  ]);
+}
+
+function createQuiltLauncherJar(root, libraries) {
   const destination = path.join(root, 'quilt-server-launch.jar');
-  writeNewControlledFile(root, destination, zip.toBuffer());
+  writeNewControlledFile(root, destination, quiltLauncherJarBytes(libraries));
   return destination;
 }
 
@@ -1564,7 +1611,7 @@ function parseJarManifest(filePath) {
   return attributes;
 }
 
-function quiltLayout(root, loaderMetadata) {
+function quiltLayout(root, loaderMetadata, minecraftVersion) {
   if (!hasExactKeys(loaderMetadata, ['family', 'launcherJar', 'properties', 'libraries']) ||
     loaderMetadata.family !== 'quilt' || !Array.isArray(loaderMetadata.libraries) || loaderMetadata.libraries.length === 0) throw runtimeIncomplete();
   const launcherJar = resolveControlledPath(root, loaderMetadata.launcherJar);
@@ -1574,7 +1621,15 @@ function quiltLayout(root, loaderMetadata) {
   requireJar(root, serverJar);
   assertRegularContainedFile(root, propertiesPath);
   const properties = parsePropertiesExact(propertiesPath);
-  if (properties.size !== 1 || properties.get('serverJar') !== 'server.jar') throw runtimeIncomplete();
+  // New layouts keep vanilla under libraries and make the root server.jar a copy of the launcher, so
+  // older releases that run the root jar still start Quilt with its mods. 'server.jar' is the layout
+  // pre-release builds published (vanilla root jar); it stays valid until an update or loader switch
+  // republishes it, and a targeted Repair of its root jar fails closed on the recorded vanilla hash.
+  const referencedServerJar = properties.get('serverJar');
+  if (properties.size !== 1 ||
+      !['server.jar', minecraftServerLibraryJar(minecraftVersion)].includes(referencedServerJar)) throw runtimeIncomplete();
+  const minecraftServerJar = resolveControlledPath(root, referencedServerJar);
+  requireJar(root, minecraftServerJar);
   const libraries = loaderMetadata.libraries.map(library => {
     if (!hasExactKeys(library, ['coordinate', 'repository', 'relativePath'])) throw runtimeIncomplete();
     mavenCoordinateToPath(library.coordinate);
@@ -1588,7 +1643,7 @@ function quiltLayout(root, loaderMetadata) {
   const manifest = parseJarManifest(launcherJar);
   if (manifest.get('Manifest-Version') !== '1.0' || manifest.get('Main-Class') !== QUILT_LAUNCHER_MAIN ||
     manifest.get('Class-Path') !== libraries.map(library => library.relativePath).join(' ')) throw runtimeIncomplete();
-  return { launcherJar, propertiesPath, serverJar, libraries };
+  return { launcherJar, propertiesPath, serverJar, minecraftServerJar, libraries };
 }
 
 function getForgeArtifactVersion(minecraftVersion, loaderVersion) {
@@ -2184,10 +2239,11 @@ function validateRuntimeRecord(root, expectedRuntime, record, options = {}) {
       record.loader.argsFile !== `libraries/net/neoforged/neoforge/${runtime.loaderVersion}/win_args.txt` ||
       record.loader.universalJar !== `libraries/net/neoforged/neoforge/${runtime.loaderVersion}/neoforge-${runtime.loaderVersion}-universal.jar`) throw runtimeIncomplete();
     const layout = neoForgeLayout(root, runtime.loaderVersion, runtime.minecraftVersion);
-    [layout.argsFile, layout.universalJar, layout.serverJar, layout.userJvmArgs, ...layout.referencedFiles].forEach(requireRecorded);
+    [layout.argsFile, layout.universalJar, layout.serverJar, layout.minecraftServerJar, layout.userJvmArgs,
+      ...layout.referencedFiles].forEach(requireRecorded);
   } else if (runtime.loaderFamily === 'quilt') {
-    const layout = quiltLayout(root, record.loader);
-    [layout.launcherJar, layout.propertiesPath, layout.serverJar,
+    const layout = quiltLayout(root, record.loader, runtime.minecraftVersion);
+    [layout.launcherJar, layout.propertiesPath, layout.serverJar, layout.minecraftServerJar,
       ...layout.libraries.map(library => resolveControlledPath(root, library.relativePath))].forEach(requireRecorded);
   } else if (runtime.loaderFamily === 'fabric') {
     if (!hasExactKeys(record.loader, ['family', 'launcherJar']) || record.loader.launcherJar !== 'fabric-server-launch.jar') throw runtimeIncomplete();
@@ -2224,12 +2280,25 @@ function validateRuntimeRecord(root, expectedRuntime, record, options = {}) {
   return { valid: true, runtime, loader: record.loader, artifacts: record.artifacts };
 }
 
+// True unless lstat proves .minecraft-core-state/runtime.json absent (ENOENT). Every other outcome,
+// including an unusable path or an unreadable entry, counts as present so callers fail closed. No
+// canonical-path checks: v26.6.1 never wrote this file, so servers it installed on junction, SUBST
+// or mapped-drive paths must keep resolving exactly as they did there.
+function hasPreparedRuntimeMetadata(serverPath) {
+  try {
+    if (typeof serverPath !== 'string' || !path.isAbsolute(serverPath)) return true;
+    return fs.lstatSync(path.join(path.resolve(serverPath), RUNTIME_METADATA_RELATIVE), { throwIfNoEntry: false }) !== undefined;
+  } catch {
+    return true;
+  }
+}
+
 function inspectPreparedRuntime(serverPath) {
+  if (!hasPreparedRuntimeMetadata(serverPath)) return null;
   let root;
   try {
     root = assertCanonicalDirectory(serverPath);
     const metadataPath = path.join(root, RUNTIME_METADATA_RELATIVE);
-    if (!fs.existsSync(metadataPath)) return null;
     const inspected = assertRegularContainedFile(root, metadataPath);
     if (inspected.stat.size < 2 || inspected.stat.size > DEFAULT_METADATA_BYTES) throw runtimeIncomplete();
     const record = parseBoundedJson(fs.readFileSync(metadataPath));
@@ -2443,7 +2512,7 @@ async function installNeoForgeServer(options) {
         fs.rmSync(scriptPath);
       }
     }
-    materializeNeoForgeServerJar(serverRoot, runtime.minecraftVersion);
+    writeNeoForgeDowngradeGuardJar(serverRoot, runtime.minecraftVersion);
     const layout = neoForgeLayout(serverRoot, runtime.loaderVersion, runtime.minecraftVersion);
     const loader = {
       family: 'neoforge',
@@ -2526,6 +2595,7 @@ function resolveMojangServerDownload(metadata, minecraftVersion, maxBytes) {
 async function defaultEnsureQuiltBaseRuntime({
   targetPath,
   minecraftVersion,
+  destinationRelativePath = 'server.jar',
   logChannel,
   progressChannel,
   transport: suppliedTransport,
@@ -2537,6 +2607,7 @@ async function defaultEnsureQuiltBaseRuntime({
   try {
     const root = assertCanonicalDirectory(targetPath);
     if (!validMinecraftVersion(minecraftVersion)) throw runtimeIncomplete();
+    const destination = resolveControlledPath(root, destinationRelativePath);
     const transport = requestTransport({ transport: suppliedTransport });
     const metadataLimit = positiveSafeInteger(maxMetadataBytes, DEFAULT_METADATA_BYTES, 16 * 1024 * 1024);
     const runtimeLimit = positiveSafeInteger(maxRuntimeBytes, DEFAULT_RUNTIME_BYTES, DEFAULT_RUNTIME_BYTES);
@@ -2572,7 +2643,7 @@ async function defaultEnsureQuiltBaseRuntime({
     if (serverResponse.body.length !== server.size) throw runtimeIncomplete();
     verifyOfficialDigests(serverResponse.body, server.digests);
     assertJarBytes(serverResponse.body);
-    writeNewControlledFile(root, path.join(root, 'server.jar'), serverResponse.body);
+    writeNewControlledFile(root, destination, serverResponse.body);
     emitProgress(progressChannel, { percent: 40, speed: 'Minecraft server runtime prepared' }, 'quilt');
   } catch (error) {
     if (error?.code === 'CANCELLED') throw error;
@@ -2607,9 +2678,12 @@ async function installQuiltServer(options) {
     const downloadedLibraries = await downloadQuiltLibraries(serverRoot, libraries, pair, options);
     const ensureBaseRuntime = options.ensureBaseRuntime || defaultEnsureQuiltBaseRuntime;
     if (typeof ensureBaseRuntime !== 'function') throw runtimeIncomplete();
+    // Vanilla lives under libraries; the root server.jar is a copy of the Quilt launcher (see quiltLayout).
+    const minecraftServerJar = minecraftServerLibraryJar(runtime.minecraftVersion);
     await ensureBaseRuntime({
       targetPath: serverRoot,
       minecraftVersion: runtime.minecraftVersion,
+      destinationRelativePath: minecraftServerJar,
       javaPath: options.javaPath,
       logChannel: options.logChannel,
       progressChannel: options.progressChannel,
@@ -2619,10 +2693,11 @@ async function installQuiltServer(options) {
       maxRuntimeBytes: options.maxMojangServerBytes ?? options.maxRuntimeBytes,
       signal: options.signal
     });
-    requireJar(serverRoot, path.join(serverRoot, 'server.jar'));
+    requireJar(serverRoot, resolveControlledPath(serverRoot, minecraftServerJar));
     const launcherJar = createQuiltLauncherJar(serverRoot, downloadedLibraries);
+    writeNewControlledFile(serverRoot, path.join(serverRoot, 'server.jar'), fs.readFileSync(launcherJar));
     const propertiesPath = path.join(serverRoot, 'quilt-server-launcher.properties');
-    writeNewControlledFile(serverRoot, propertiesPath, Buffer.from('serverJar=server.jar\n', 'utf8'));
+    writeNewControlledFile(serverRoot, propertiesPath, Buffer.from(`serverJar=${minecraftServerJar}\n`, 'utf8'));
     const loader = {
       family: 'quilt',
       launcherJar: portableRelative(serverRoot, launcherJar),
@@ -3042,9 +3117,14 @@ module.exports = {
   prepareManagedServerRuntime,
   installClientLoader,
   getForgeRuntimeHealthIssues,
+  hasPreparedRuntimeMetadata,
   inspectPreparedRuntime,
   validatePreparedRuntime,
   __testUtils: {
+    RUNTIME_USER_AGENT,
+    NEOFORGE_DOWNGRADE_GUARD_MAIN_CLASS,
+    neoForgeDowngradeGuardJarBytes,
+    quiltLauncherJarBytes,
     getForgeArtifactVersion,
     getForgeInstallerPath,
     isForgeInstallerOpenError,

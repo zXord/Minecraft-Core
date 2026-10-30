@@ -83,7 +83,9 @@ const SERVER_WRITER_WRITE_SITE_DIGESTS = Object.freeze({
   'electron/services/forge-runtime-finalizer-worker.cjs': 'c780be1547c8d6f53252d7d475fbba760f861e0b418197dad147ccae3dbe102d',
   'electron/services/java-archive-worker-client.cjs': '8da09e8e7729edc67f4cdf68a0be4a9b8de242e460f68c87584da6dbcce63b95',
   'electron/services/java-archive-worker.cjs': 'a08522a594d35e4561ea65c48e4f5ee21b8cb9127cfc17fd2dadcd063ea6333e',
-  'electron/services/loader-install-service.cjs': '285a58782d5a5d20e888f37662db7cd1187b014035be16e2bfd5d5335d897a0f',
+  // Reviewed: the NeoForge vanilla root copy is gone; a regular root jar in the
+  // private runtime staging folder is removed before the guard. Still 27 sites.
+  'electron/services/loader-install-service.cjs': '09022a8e755141ccf95344adf9e7217c6ab47e2972e1f287453b7bfd7caa2c66',
   'electron/services/managed-runtime-worker.cjs': '6e94d638b000e8baba70b5b00223d42637a9d4cf4063a143a5c2c7694f3947e3',
   'electron/services/minecraft-launcher/client-downloader.cjs': '9a98f34282bcd63b9f07025a13c77000c4e133da8adf4f11c1c8057490bc9e85',
   'electron/services/minecraft-launcher/index.cjs': '2a459f5ca8f7860dc20f996e8da5165aaf60f7b77471b67c667d8851fdc71f16',

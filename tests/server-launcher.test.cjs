@@ -9,8 +9,20 @@ const path = require('node:path');
 const { PassThrough, Writable } = require('node:stream');
 const AdmZip = require('adm-zip');
 
-const { resolveLaunchPlan } = require('../electron/services/server-launcher.cjs');
+const {
+  resolveLaunchPlan,
+  syncServerPort,
+  writeServerProperties
+} = require('../electron/services/server-launcher.cjs');
+const {
+  __testUtils: { publishForgeRuntimeMetadata }
+} = require('../electron/services/loader-install-service.cjs');
 const { ModpackError } = require('../electron/services/modpacks/errors.cjs');
+const { ServerMutationCoordinator } = require('../electron/services/server-mutation-coordinator.cjs');
+const {
+  runWithServerMutationLease,
+  sharedServerMutationContext
+} = require('../electron/services/server-mutation-context.cjs');
 const { resolveServerLoader } = require('../electron/utils/server-loader.cjs');
 const {
   createServerProcessRunner,
@@ -97,6 +109,74 @@ function writeLegacyForgeRuntimeMarker(serverPath) {
       .sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'en'))
   }));
   return { runtime, launchJar, serverJar, libraries };
+}
+
+const V26_FORGE_ARGS = 'libraries/net/minecraftforge/forge/1.20.1-47.2.0/win_args.txt';
+
+// The unmanaged tuple server-manager builds for every start (server-manager.cjs startMinecraftServer).
+function v26ForgeTuple(loaderVersion = '47.2.0') {
+  return makeRuntimeTuple('forge', loaderVersion, '1.20.1', 17);
+}
+
+// A Forge 1.20.1 server as v26.6.1 installed it: args files and a root server.jar, no app runtime metadata.
+function makeV26ForgeServer() {
+  const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-forge-v26-'));
+  fs.writeFileSync(path.join(serverPath, '.minecraft-core.json'), JSON.stringify({
+    version: '1.20.1',
+    loader: 'forge',
+    loaderVersion: '47.2.0',
+    fabric: null,
+    port: 25565,
+    maxRam: 4
+  }, null, 2));
+  fs.writeFileSync(path.join(serverPath, 'user_jvm_args.txt'), '# Xmx and Xms set the maximum and minimum RAM usage.\n');
+  const argsPath = path.join(serverPath, ...V26_FORGE_ARGS.split('/'));
+  fs.mkdirSync(path.dirname(argsPath), { recursive: true });
+  fs.writeFileSync(argsPath, '-DlibraryDirectory=libraries\n--launchTarget forgeserver\n--fml.forgeVersion 47.2.0\n--fml.mcVersion 1.20.1\n');
+  fs.writeFileSync(path.join(serverPath, 'run.bat'), `java @user_jvm_args.txt @${V26_FORGE_ARGS} %*\r\n`);
+  writeMinimalJar(path.join(serverPath, 'server.jar'));
+  return serverPath;
+}
+
+function v26ForgeLaunchArgs(maxRam = 4) {
+  return ['@user_jvm_args.txt', `-Xmx${maxRam}G`, '-Xms1G', `@${path.join(...V26_FORGE_ARGS.split('/'))}`, 'nogui'];
+}
+
+function startLeaseFixture(root, operationId, initialRevision = 9) {
+  let revision = initialRevision;
+  const bumps = [];
+  const coordinator = new ServerMutationCoordinator({
+    context: sharedServerMutationContext,
+    readContentRevision: () => revision,
+    bumpContentRevision(_serverPath, options) {
+      bumps.push({ ...options });
+      assert.equal(options.expectedRevision, revision);
+      revision += 1;
+      return revision;
+    }
+  });
+  coordinator.completeStartupRecovery([]);
+  return {
+    bumps,
+    revision: () => revision,
+    acquire: () => coordinator.acquireStart(
+      { instanceId: `launcher-${operationId}`, serverPath: root },
+      { operation: 'server-start', operationId, parentMutationLease: null }
+    )
+  };
+}
+
+function minecraftShapedProperties(port = 25565) {
+  return [
+    '#Minecraft server properties',
+    '#Thu Oct 29 21:14:03 AST 2026',
+    'allow-flight=false',
+    'level-name=world',
+    'motd=A Minecraft Server',
+    'server-ip=',
+    `server-port=${port}`,
+    'view-distance=10'
+  ].join('\n') + '\n';
 }
 
 class FakeChild extends EventEmitter {
@@ -990,4 +1070,126 @@ test('shared process runner validates its closed request before spawn', () => {
     );
   }
   assert.equal(spawnCalls.length, 0);
+});
+
+test('a v26.6.1 Forge server without runtime metadata starts through the real runner with v26.6.1 discovery', async t => {
+  const serverPath = makeV26ForgeServer();
+  t.after(() => fs.rmSync(serverPath, { recursive: true, force: true }));
+  const child = new FakeChild(4610);
+  const spawnCalls = [];
+  const runner = createServerProcessRunner({
+    eventBus: new EventEmitter(),
+    getListeningEndpoints: async () => [],
+    randomUUID: () => 'b09956c1-1daa-4fb9-a8fe-bf6d401c04bc',
+    spawnProcess(file, args, options) {
+      spawnCalls.push({ file, args, options });
+      return child;
+    }
+  });
+
+  const handle = runner.launchServerProcess({
+    serverPath,
+    instanceId: 'legacy-forge-server',
+    runtime: v26ForgeTuple(),
+    javaPath: 'C:\\Java\\bin\\java.exe',
+    maxRam: 4,
+    operationId: 'legacy-forge-start',
+    publishEvents: false,
+    onLine() {}
+  });
+
+  assert.equal(spawnCalls.length, 1);
+  const spawnArgs = spawnCalls[0].args;
+  const firstLaunchArgument = spawnArgs.findIndex(arg => !arg.startsWith('-Dminecraft.core.server.'));
+  assert.deepEqual(spawnArgs.slice(0, firstLaunchArgument), [
+    '-Dminecraft.core.server.id=legacy-forge-start',
+    '-Dminecraft.core.server.launch=b09956c1-1daa-4fb9-a8fe-bf6d401c04bc'
+  ]);
+  assert.deepEqual(spawnArgs.slice(firstLaunchArgument), v26ForgeLaunchArgs(4));
+  assert.equal(spawnCalls[0].options.cwd, serverPath);
+  assert.equal(handle.launchPlan.loader, 'forge');
+  assert.equal(fs.existsSync(path.join(serverPath, '.minecraft-core-state')), false);
+  child.finish(0, null);
+  await handle.closed;
+});
+
+test('Forge launch uses recorded runtime metadata only when it exists and still fails closed when it is damaged', t => {
+  const distractorArgs = '1.20.1-47.2.0/win_args.txt';
+  const recorded = makeV26ForgeServer();
+  t.after(() => fs.rmSync(recorded, { recursive: true, force: true }));
+  const distractor = path.join(recorded, ...distractorArgs.split('/'));
+  fs.mkdirSync(path.dirname(distractor), { recursive: true });
+  fs.writeFileSync(distractor, '-jar wrong.jar\n');
+  const discovered = resolveLaunchPlan(recorded, { loader: 'forge', maxRam: 4 });
+  assert.equal(discovered.assets.forgeArgs, distractor, 'filesystem discovery would score the distractor first');
+  assert.equal(publishForgeRuntimeMetadata(recorded, v26ForgeTuple()).valid, true);
+  const plan = resolveLaunchPlan(recorded, { loader: 'forge', maxRam: 4 }, { runtimeTuple: v26ForgeTuple() });
+  assert.deepEqual(plan.args, v26ForgeLaunchArgs(4));
+  assert.equal(plan.assets.forgeArgs, path.join(recorded, ...V26_FORGE_ARGS.split('/')));
+  assert.deepEqual(plan.runtime, v26ForgeTuple());
+  assert.throws(
+    () => resolveLaunchPlan(recorded, { loader: 'forge', maxRam: 4 }, { runtimeTuple: v26ForgeTuple('47.2.1') }),
+    error => error.code === 'RUNTIME_INCOMPLETE'
+  );
+
+  const corrupt = makeV26ForgeServer();
+  t.after(() => fs.rmSync(corrupt, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(corrupt, '.minecraft-core-state'));
+  fs.writeFileSync(path.join(corrupt, '.minecraft-core-state', 'runtime.json'), '{"formatVersion":1,"runtime":');
+  const directoryShaped = makeV26ForgeServer();
+  t.after(() => fs.rmSync(directoryShaped, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(directoryShaped, '.minecraft-core-state', 'runtime.json'), { recursive: true });
+  for (const serverPath of [corrupt, directoryShaped]) {
+    assert.throws(
+      () => resolveLaunchPlan(serverPath, { loader: 'forge', maxRam: 4 }, { runtimeTuple: v26ForgeTuple() }),
+      error => error.code === 'RUNTIME_INCOMPLETE',
+      serverPath
+    );
+  }
+});
+
+test('an unchanged server.properties write is skipped and leaves the start lease clean', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-properties-unchanged-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const propertiesPath = path.join(root, 'server.properties');
+  fs.writeFileSync(propertiesPath, minecraftShapedProperties(25565), 'utf8');
+  const before = fs.statSync(propertiesPath, { bigint: true });
+  const leases = startLeaseFixture(root, 'unchanged-properties-start');
+  const lease = await leases.acquire();
+
+  let written;
+  await runWithServerMutationLease(lease, async () => {
+    written = writeServerProperties(root, { 'server-port': '25565' });
+    syncServerPort(root, 25565);
+  });
+  lease.markRunning({ pid: 56 });
+  lease.release();
+
+  assert.equal(leases.revision(), 9);
+  assert.deepEqual(leases.bumps, []);
+  assert.equal(fs.readFileSync(propertiesPath, 'utf8'), minecraftShapedProperties(25565));
+  assert.equal(fs.statSync(propertiesPath, { bigint: true }).mtimeNs, before.mtimeNs);
+  assert.equal(written, false);
+});
+
+test('a changed server port is replaced in place and bumps the start revision once', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-properties-changed-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const propertiesPath = path.join(root, 'server.properties');
+  fs.writeFileSync(propertiesPath, minecraftShapedProperties(25565), 'utf8');
+  const leases = startLeaseFixture(root, 'changed-properties-start');
+  const lease = await leases.acquire();
+
+  let written;
+  await runWithServerMutationLease(lease, async () => {
+    written = writeServerProperties(root, { 'server-port': '25570' });
+  });
+  lease.markRunning({ pid: 57 });
+  lease.release();
+
+  assert.equal(written, true);
+  assert.equal(fs.readFileSync(propertiesPath, 'utf8'), minecraftShapedProperties(25570));
+  assert.equal(leases.revision(), 10);
+  assert.equal(leases.bumps.length, 1);
+  assert.equal(leases.bumps[0].operationId, 'changed-properties-start');
 });

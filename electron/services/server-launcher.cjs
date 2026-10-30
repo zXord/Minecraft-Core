@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
 const { FABRIC_LAUNCH_JAR, getFabricRuntimeStatus } = require('../utils/fabric-runtime.cjs');
-const { validatePreparedRuntime } = require('./loader-install-service.cjs');
+const { hasPreparedRuntimeMetadata, validatePreparedRuntime } = require('./loader-install-service.cjs');
 const { normalizeRuntimeTuple } = require('./modpacks/contracts.cjs');
 const { ModpackError } = require('./modpacks/errors.cjs');
 const { markCurrentServerMutationDirty } = require('./server-mutation-context.cjs');
@@ -95,8 +95,11 @@ function writeServerProperties(serverPath, properties) {
   const filePath = path.join(serverPath, 'server.properties');
   const current = fs.existsSync(filePath) ? fs.readFileSync(filePath) : null;
   const next = overlayServerProperties(current, properties);
+  // An unchanged file is not a content mutation, so a routine start leaves the lease and revision alone.
+  if (current && current.equals(next)) return false;
   markCurrentServerMutationDirty(serverPath);
   fs.writeFileSync(filePath, next);
+  return true;
 }
 
 function syncServerPort(serverPath, port, networkAccess = 'pack-default') {
@@ -552,7 +555,10 @@ function resolveLaunchPlan(serverPath, options = {}, { runtimeTuple = null } = {
   }
 
   if (resolvedLoader === 'forge') {
-    if (runtimeTuple) {
+    // Only a server with app-recorded runtime metadata uses the recorded plan; Forge servers installed
+    // without it (every v26.6.1 server) keep the v26.6.1 args-file discovery. Present but corrupt,
+    // directory-shaped or mismatched metadata still fails closed in validatePreparedRuntime.
+    if (runtimeTuple && hasPreparedRuntimeMetadata(serverPath)) {
       return resolveRecordedForgeLaunchPlan(
         serverPath,
         maxRam,

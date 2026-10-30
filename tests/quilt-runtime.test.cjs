@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -25,6 +26,28 @@ const PROFILE_URL = `${PAIR_URL}/server/json`;
 const QUILT_MAVEN = 'https://maven.quiltmc.org/repository/release/';
 const FABRIC_MAVEN = 'https://maven.fabricmc.net/';
 const MOJANG_MANIFEST_URL = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json';
+const VANILLA_SERVER_JAR = `libraries/net/minecraft/server/${GAME}/server-${GAME}.jar`;
+// Pinned bytes of the generated launcher for this library set: a targeted Repair must regenerate exactly these.
+const LAUNCHER_JAR_SHA256 = '5093118106a9f3833c3c1b6fee39e9e79ee67c6544102fcc556be306ff0183c4';
+const LIBRARY_PATHS = [
+  'libraries/net/fabricmc/intermediary/1.20.1/intermediary-1.20.1.jar',
+  'libraries/org/quiltmc/hashed/1.20.1/hashed-1.20.1.jar',
+  'libraries/org/quiltmc/quilt-loader/0.26.4/quilt-loader-0.26.4.jar'
+];
+
+function sha256(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+// Stands in for the pinned Mojang download: writes the vanilla jar where the installer asks for it.
+function fakeBaseRuntime(serverBytes, calls = null) {
+  return async options => {
+    if (calls) calls.push(options);
+    const destination = path.join(options.targetPath, ...(options.destinationRelativePath ?? 'server.jar').split('/'));
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, serverBytes);
+  };
+}
 
 function jarBytes(label) {
   const zip = new AdmZip();
@@ -201,7 +224,7 @@ test('Quilt resolves the exact pair, maps strict Maven paths, and reconstructs a
   fs.writeFileSync(path.join(root, 'fabric-server-launch.jar'), 'stale Fabric launcher');
   const { routes, serverBytes } = routesForInstall();
   const transport = fakeTransport(routes);
-  let baseCalls = 0;
+  const baseCalls = [];
   let processCalls = 0;
   const result = await installServerLoader({
     targetPath: root,
@@ -212,14 +235,12 @@ test('Quilt resolves the exact pair, maps strict Maven paths, and reconstructs a
     javaMajor: 17,
     transport,
     validateJava: async ({ expectedMajor }) => expectedMajor,
-    ensureBaseRuntime: async ({ targetPath }) => {
-      baseCalls += 1;
-      fs.writeFileSync(path.join(targetPath, 'server.jar'), serverBytes);
-    },
+    ensureBaseRuntime: fakeBaseRuntime(serverBytes, baseCalls),
     processRunner: async () => { processCalls += 1; throw new Error('Quilt must not execute an installer'); }
   });
 
-  assert.equal(baseCalls, 1);
+  assert.equal(baseCalls.length, 1);
+  assert.equal(baseCalls[0].destinationRelativePath, VANILLA_SERVER_JAR);
   assert.equal(processCalls, 0);
   assert.equal(result.loader, 'quilt');
   assert.deepEqual(result.runtime, tuple());
@@ -231,7 +252,18 @@ test('Quilt resolves the exact pair, maps strict Maven paths, and reconstructs a
   assert.equal(fs.readFileSync(path.join(root, 'run.ps1'), 'utf8'), 'pack supplied');
   assert.equal(fs.readFileSync(path.join(root, 'quilt-installer.jar'), 'utf8'), 'pack supplied');
   assert.equal(fs.existsSync(path.join(root, 'fabric-server-launch.jar')), false);
-  assert.equal(fs.readFileSync(path.join(root, 'quilt-server-launcher.properties'), 'utf8'), 'serverJar=server.jar\n');
+  assert.equal(
+    fs.readFileSync(path.join(root, 'quilt-server-launcher.properties'), 'utf8'),
+    `serverJar=${VANILLA_SERVER_JAR}\n`
+  );
+  assert.deepEqual(fs.readFileSync(path.join(root, ...VANILLA_SERVER_JAR.split('/'))), serverBytes);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'server.jar')), fs.readFileSync(path.join(root, 'quilt-server-launch.jar')));
+  assert.equal(sha256(fs.readFileSync(path.join(root, 'server.jar'))), LAUNCHER_JAR_SHA256);
+  const recorded = JSON.parse(fs.readFileSync(path.join(root, '.minecraft-core-state', 'runtime.json'), 'utf8'))
+    .artifacts.map(artifact => artifact.relativePath);
+  for (const relativePath of ['server.jar', VANILLA_SERVER_JAR, 'quilt-server-launch.jar', 'quilt-server-launcher.properties']) {
+    assert.equal(recorded.includes(relativePath), true, relativePath);
+  }
 
   const launchJar = fs.readFileSync(path.join(root, 'quilt-server-launch.jar'));
   const manifest = new AdmZip(launchJar).readAsText('META-INF/MANIFEST.MF');
@@ -362,7 +394,7 @@ test('Quilt verifies every official digest supplied for each downloaded library'
     javaMajor: 17,
     transport: fakeTransport(routes),
     validateJava: async () => 17,
-    ensureBaseRuntime: async ({ targetPath }) => fs.writeFileSync(path.join(targetPath, 'server.jar'), serverBytes)
+    ensureBaseRuntime: fakeBaseRuntime(serverBytes)
   }), error => error.code === 'RUNTIME_INCOMPLETE');
   assert.equal(fs.existsSync(path.join(root, 'quilt-server-launch.jar')), false);
 });
@@ -401,6 +433,8 @@ test('production Quilt base acquisition uses only bounded pinned Mojang endpoint
     assert.ok(call.options.signal instanceof AbortSignal);
   }
   assert.equal(validatePreparedRuntime(root, tuple()).valid, true);
+  assert.deepEqual(fs.readFileSync(path.join(root, ...VANILLA_SERVER_JAR.split('/'))), mojang.routes.get(mojang.serverUrl));
+  assert.deepEqual(fs.readFileSync(path.join(root, 'server.jar')), fs.readFileSync(path.join(root, 'quilt-server-launch.jar')));
 });
 
 test('production Quilt base acquisition fails closed on malformed UTF-8 and cancellation', async (t) => {
@@ -455,7 +489,7 @@ test('Quilt validation rejects partial or mutated libraries and launch never fal
     javaMajor: 17,
     transport: fakeTransport(routes),
     validateJava: async () => 17,
-    ensureBaseRuntime: async ({ targetPath }) => fs.writeFileSync(path.join(targetPath, 'server.jar'), serverBytes)
+    ensureBaseRuntime: fakeBaseRuntime(serverBytes)
   });
   const mutated = path.join(root, 'libraries', 'org', 'quiltmc', 'quilt-loader', VERSION, `quilt-loader-${VERSION}.jar`);
   fs.appendFileSync(mutated, 'tampered');
@@ -479,7 +513,7 @@ test('Quilt launch is the exact app-owned launcher jar with stable markers', asy
     javaMajor: 17,
     transport: fakeTransport(routes),
     validateJava: async () => 17,
-    ensureBaseRuntime: async ({ targetPath }) => fs.writeFileSync(path.join(targetPath, 'server.jar'), serverBytes)
+    ensureBaseRuntime: fakeBaseRuntime(serverBytes)
   });
   const plan = resolveLaunchPlan(root, { loader: 'quilt', maxRam: 5 }, { runtimeTuple: tuple() });
   assert.equal(plan.type, 'jar');
@@ -489,4 +523,150 @@ test('Quilt launch is the exact app-owned launcher jar with stable markers', asy
   assert.equal(plan.cwd, root);
   assert.ok(plan.readyMarkers.some(marker => marker.includes('Done (')));
   assert.ok(plan.fatalMarkers.includes('UnsupportedClassVersionError'));
+});
+
+async function installQuilt(targetPath, serverBytes) {
+  return installServerLoader({
+    targetPath,
+    minecraftVersion: GAME,
+    loader: 'quilt',
+    loaderVersion: VERSION,
+    javaPath: path.join(targetPath, 'java.exe'),
+    javaMajor: 17,
+    transport: fakeTransport(routesForInstall().routes),
+    validateJava: async () => 17,
+    ensureBaseRuntime: fakeBaseRuntime(serverBytes)
+  });
+}
+
+function recordedArtifact(root, relativePath) {
+  const record = JSON.parse(fs.readFileSync(path.join(root, '.minecraft-core-state', 'runtime.json'), 'utf8'));
+  return record.artifacts.find(artifact => artifact.relativePath === relativePath) || null;
+}
+
+// Mirrors the targeted runtime Repair check (production-mutation-runtime.cjs #repairCandidateRuntimePaths):
+// a runtime file regenerated into a fresh staging folder replaces the live one only when its size and
+// hash equal the recorded artifact; otherwise the repair fails with RUNTIME_INCOMPLETE.
+function repairRuntimeFile(liveRoot, stagingRoot, relativePath) {
+  const recorded = recordedArtifact(liveRoot, relativePath);
+  const regenerated = fs.readFileSync(path.join(stagingRoot, ...relativePath.split('/')));
+  if (!recorded || regenerated.length !== recorded.size || sha256(regenerated) !== recorded.sha256) {
+    throw Object.assign(new Error('The prepared server runtime is incomplete.'), { code: 'RUNTIME_INCOMPLETE' });
+  }
+  fs.writeFileSync(path.join(liveRoot, ...relativePath.split('/')), regenerated);
+}
+
+// Re-records every runtime artifact as it now is on disk, the way a publication would.
+function republishArtifacts(root) {
+  const metadataPath = path.join(root, '.minecraft-core-state', 'runtime.json');
+  const record = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+  record.artifacts = __testUtils.listRuntimeArtifactFiles(root).map(file => {
+    const bytes = fs.readFileSync(file.source);
+    return {
+      relativePath: file.relativePath,
+      size: bytes.length,
+      sha256: sha256(bytes),
+      sha512: crypto.createHash('sha512').update(bytes).digest('hex')
+    };
+  }).sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'en'));
+  fs.writeFileSync(metadataPath, `${JSON.stringify(record, null, 2)}\n`);
+}
+
+test('the Quilt launcher jar, and so its root server.jar copy, has identical bytes in every time zone', () => {
+  const modulePath = require.resolve('../electron/services/loader-install-service.cjs');
+  const script = [
+    "const crypto = require('node:crypto');",
+    `const { __testUtils } = require(${JSON.stringify(modulePath)});`,
+    `const libraries = ${JSON.stringify(LIBRARY_PATHS)}.map(relativePath => ({ relativePath }));`,
+    'process.stdout.write(JSON.stringify({',
+    '  offset: new Date(1980, 0, 1).getTimezoneOffset(),',
+    "  sha256: crypto.createHash('sha256').update(__testUtils.quiltLauncherJarBytes(libraries)).digest('hex')",
+    '}));'
+  ].join('\n');
+  const runs = ['UTC', 'EST5EDT'].map(TZ => {
+    const result = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      env: { ...process.env, TZ },
+      timeout: 60_000,
+      windowsHide: true
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout.trim().split(/\r?\n/u).pop());
+  });
+
+  assert.deepEqual(runs.map(run => run.offset), [0, 300], 'each child ran in its own time zone');
+  assert.deepEqual(runs.map(run => run.sha256), [LAUNCHER_JAR_SHA256, LAUNCHER_JAR_SHA256]);
+  assert.equal(
+    sha256(__testUtils.quiltLauncherJarBytes(LIBRARY_PATHS.map(relativePath => ({ relativePath })))),
+    LAUNCHER_JAR_SHA256
+  );
+});
+
+test('targeted Repair regenerates the Quilt root jar and launcher with the recorded hashes', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-quilt-repair-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const live = path.join(root, 'live');
+  const staging = path.join(root, 'staging');
+  fs.mkdirSync(live);
+  fs.mkdirSync(staging);
+  const serverBytes = jarBytes('vanilla-for-repair');
+  await installQuilt(live, serverBytes);
+  fs.writeFileSync(path.join(live, 'server.jar'), jarBytes('damaged root'));
+  fs.rmSync(path.join(live, 'quilt-server-launch.jar'));
+  assert.throws(() => validatePreparedRuntime(live, tuple()), error => error.code === 'RUNTIME_INCOMPLETE');
+
+  await installQuilt(staging, serverBytes);
+  repairRuntimeFile(live, staging, 'server.jar');
+  repairRuntimeFile(live, staging, 'quilt-server-launch.jar');
+
+  assert.equal(validatePreparedRuntime(live, tuple()).valid, true);
+  assert.equal(sha256(fs.readFileSync(path.join(live, 'server.jar'))), LAUNCHER_JAR_SHA256);
+  assert.equal(sha256(fs.readFileSync(path.join(live, 'quilt-server-launch.jar'))), LAUNCHER_JAR_SHA256);
+});
+
+test('a pre-release Quilt layout keeps validating, a targeted Repair of its vanilla root jar fails closed, and an update rewrites it', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-quilt-prerelease-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const live = path.join(root, 'live');
+  const staging = path.join(root, 'staging');
+  fs.mkdirSync(live);
+  fs.mkdirSync(staging);
+  const serverBytes = jarBytes('vanilla-prerelease');
+  await installQuilt(live, serverBytes);
+  // What pre-release builds published: vanilla as the root server.jar and serverJar=server.jar.
+  fs.writeFileSync(path.join(live, 'server.jar'), serverBytes);
+  fs.rmSync(path.join(live, ...VANILLA_SERVER_JAR.split('/')));
+  fs.writeFileSync(path.join(live, 'quilt-server-launcher.properties'), 'serverJar=server.jar\n');
+  republishArtifacts(live);
+  assert.equal(validatePreparedRuntime(live, tuple()).valid, true);
+  assert.equal(resolveLaunchPlan(live, { loader: 'quilt', maxRam: 4 }, { runtimeTuple: tuple() }).jar,
+    path.join(live, 'quilt-server-launch.jar'));
+
+  await installQuilt(staging, serverBytes);
+  assert.throws(
+    () => repairRuntimeFile(live, staging, 'server.jar'),
+    error => error.code === 'RUNTIME_INCOMPLETE'
+  );
+  assert.deepEqual(fs.readFileSync(path.join(live, 'server.jar')), serverBytes);
+
+  await installQuilt(live, serverBytes);
+  assert.equal(
+    fs.readFileSync(path.join(live, 'quilt-server-launcher.properties'), 'utf8'),
+    `serverJar=${VANILLA_SERVER_JAR}\n`
+  );
+  assert.equal(sha256(fs.readFileSync(path.join(live, 'server.jar'))), LAUNCHER_JAR_SHA256);
+  assert.equal(validatePreparedRuntime(live, tuple()).valid, true);
+});
+
+test('Quilt validation accepts only the legacy or the exact libraries serverJar reference', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-quilt-serverjar-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  await installQuilt(root, jarBytes('vanilla-reference'));
+  const otherVersion = 'libraries/net/minecraft/server/1.20.2/server-1.20.2.jar';
+  fs.mkdirSync(path.dirname(path.join(root, ...otherVersion.split('/'))), { recursive: true });
+  fs.copyFileSync(path.join(root, ...VANILLA_SERVER_JAR.split('/')), path.join(root, ...otherVersion.split('/')));
+  fs.writeFileSync(path.join(root, 'quilt-server-launcher.properties'), `serverJar=${otherVersion}\n`);
+  republishArtifacts(root);
+
+  assert.throws(() => validatePreparedRuntime(root, tuple()), error => error.code === 'RUNTIME_INCOMPLETE');
 });

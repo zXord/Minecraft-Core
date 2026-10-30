@@ -194,6 +194,60 @@ function detectLoaderFromFiles(serverPath, preparedRuntime = undefined) {
   return { loader: null, loaderVersion: null, detectedFrom: 'none' };
 }
 
+function applyConfigLoader(result, config) {
+  for (const key of loaderTypeKeys) {
+    if (config[key]) {
+      result.loader = normalizeLoader(config[key]);
+      result.source = `config:${key}`;
+      break;
+    }
+  }
+
+  if (!result.loader) {
+    for (const [candidateLoader, versionKeys] of Object.entries(loaderByVersionKey)) {
+      for (const versionKey of versionKeys) {
+        if (config[versionKey]) {
+          result.loader = candidateLoader;
+          result.source = `config:${versionKey}`;
+          result.loaderVersion = String(config[versionKey]).trim();
+          break;
+        }
+      }
+      if (result.loader) {
+        break;
+      }
+    }
+  }
+
+  if (!result.loaderVersion) {
+    for (const versionKey of loaderVersionKeys) {
+      if (config[versionKey]) {
+        result.loaderVersion = String(config[versionKey]).trim();
+        if (!result.loader) {
+          // Attempt to derive loader type from version value when not explicitly set
+          result.loader = normalizeLoader(config[versionKey]);
+          result.source = `config:${versionKey}`;
+        }
+        break;
+      }
+    }
+  }
+
+  if (result.loader && !result.loaderVersion) {
+    const normalizedLoader = result.loader.toLowerCase();
+    const versionKeys = loaderByVersionKey[normalizedLoader];
+    if (versionKeys) {
+      for (const versionKey of versionKeys) {
+        if (config[versionKey]) {
+          result.loaderVersion = String(config[versionKey]).trim();
+          break;
+        }
+      }
+    }
+  }
+  return result;
+}
+
 function resolveServerLoader(serverPath) {
   const loggerInstance = getLogger();
   const result = {
@@ -210,56 +264,7 @@ function resolveServerLoader(serverPath) {
   }
   const config = preparedRuntime ? null : readServerConfig(serverPath);
   if (config) {
-    for (const key of loaderTypeKeys) {
-      if (config[key]) {
-        result.loader = normalizeLoader(config[key]);
-        result.source = `config:${key}`;
-        break;
-      }
-    }
-
-    if (!result.loader) {
-      for (const [candidateLoader, versionKeys] of Object.entries(loaderByVersionKey)) {
-        for (const versionKey of versionKeys) {
-          if (config[versionKey]) {
-            result.loader = candidateLoader;
-            result.source = `config:${versionKey}`;
-            result.loaderVersion = String(config[versionKey]).trim();
-            break;
-          }
-        }
-        if (result.loader) {
-          break;
-        }
-      }
-    }
-
-    if (!result.loaderVersion) {
-      for (const versionKey of loaderVersionKeys) {
-        if (config[versionKey]) {
-          result.loaderVersion = String(config[versionKey]).trim();
-          if (!result.loader) {
-            // Attempt to derive loader type from version value when not explicitly set
-            result.loader = normalizeLoader(config[versionKey]);
-            result.source = `config:${versionKey}`;
-          }
-          break;
-        }
-      }
-    }
-
-    if (result.loader && !result.loaderVersion) {
-      const normalizedLoader = result.loader.toLowerCase();
-      const versionKeys = loaderByVersionKey[normalizedLoader];
-      if (versionKeys) {
-        for (const versionKey of versionKeys) {
-          if (config[versionKey]) {
-            result.loaderVersion = String(config[versionKey]).trim();
-            break;
-          }
-        }
-      }
-    }
+    applyConfigLoader(result, config);
   }
 
   if (!result.loader) {
@@ -291,7 +296,27 @@ function resolveServerLoader(serverPath) {
   return result;
 }
 
+// Never throws. Informational callers get resolveServerLoader's answer, or, when app-recorded runtime
+// metadata cannot be validated, the loader named in .minecraft-core.json with runtimeIncomplete:true.
+// File heuristics are skipped then, so a drifted runtime is never re-described from loose jars.
+// Launch paths keep using resolveServerLoader, which stays strict.
+function describeServerLoader(serverPath) {
+  try {
+    return { ...resolveServerLoader(serverPath), runtimeIncomplete: false };
+  } catch {
+    const result = { loader: null, loaderVersion: null, source: 'runtime-incomplete' };
+    try {
+      const config = readServerConfig(serverPath);
+      if (config && typeof config === 'object') applyConfigLoader(result, config);
+    } catch {
+      // An unreadable config leaves the loader undescribed.
+    }
+    return { ...result, runtimeIncomplete: true };
+  }
+}
+
 module.exports = {
+  describeServerLoader,
   resolveServerLoader,
   normalizeLoaderName: normalizeLoader
 };

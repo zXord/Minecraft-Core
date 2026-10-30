@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -19,6 +20,10 @@ const { resolveServerLoader } = require('../electron/utils/server-loader.cjs');
 const METADATA_URL = 'https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml';
 const VERSION = '21.1.172-beta';
 const INSTALLER_URL = `https://maven.neoforged.net/releases/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-installer.jar`;
+const VANILLA_SERVER_JAR = 'libraries/net/minecraft/server/1.21.1/server-1.21.1.jar';
+const GUARD_MAIN_CLASS = 'MinecraftCore.UpdateRequired.This_NeoForge_server_needs_a_newer_Minecraft_Core';
+// Pinned bytes of the generated guard jar: a targeted Repair must regenerate exactly these.
+const GUARD_JAR_SHA256 = 'a091729f06bbb1ed882bb4913af93680da2dd5cf448063659bdbb6e9625acaae';
 
 function response(body, statusCode = 200, headers = {}) {
   const stream = Readable.from([Buffer.isBuffer(body) ? body : Buffer.from(body)]);
@@ -76,6 +81,72 @@ function tuple() {
     os: 'win32',
     architecture: 'x64'
   };
+}
+
+const VANILLA_BYTES = jarBytes('vanilla-1.21.1');
+
+function sha256(bytes) {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+// What the official installer leaves in its working folder: libraries (including the vanilla jar
+// under libraries/net/minecraft/server), user_jvm_args.txt and run scripts, but no root server.jar.
+function writeOfficialInstallerOutput(cwd, { userJvmArgs = '# app reviewed\n' } = {}) {
+  const runtimeDir = path.join(cwd, 'libraries', 'net', 'neoforged', 'neoforge', VERSION);
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  fs.mkdirSync(path.dirname(path.join(cwd, ...VANILLA_SERVER_JAR.split('/'))), { recursive: true });
+  fs.writeFileSync(path.join(cwd, ...VANILLA_SERVER_JAR.split('/')), VANILLA_BYTES);
+  fs.writeFileSync(path.join(cwd, 'user_jvm_args.txt'), userJvmArgs);
+  fs.writeFileSync(path.join(cwd, 'run.bat'), `java @user_jvm_args.txt @libraries/net/neoforged/neoforge/${VERSION}/win_args.txt %*\r\n`);
+  fs.writeFileSync(path.join(runtimeDir, `neoforge-${VERSION}-universal.jar`), jarBytes('neoforge'));
+  fs.writeFileSync(path.join(runtimeDir, 'win_args.txt'), `--module-path libraries/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-universal.jar\n`);
+}
+
+function neoForgeInstallRoutes() {
+  const installer = installerJar();
+  return fakeTransport(new Map([
+    [METADATA_URL, metadataXml([VERSION])],
+    [`${INSTALLER_URL}.sha512`, crypto.createHash('sha512').update(installer).digest('hex')],
+    [INSTALLER_URL, installer]
+  ]));
+}
+
+async function installNeoForge(targetPath, javaRoot, { userJvmArgs } = {}) {
+  return installServerLoader({
+    targetPath,
+    minecraftVersion: '1.21.1',
+    loader: 'neoforge',
+    loaderVersion: VERSION,
+    javaPath: path.join(javaRoot, 'java.exe'),
+    javaMajor: 21,
+    transport: neoForgeInstallRoutes(),
+    validateJava: async () => 21,
+    processRunner: async request => {
+      writeOfficialInstallerOutput(request.cwd, { userJvmArgs });
+      return { code: 0, stdout: '', stderr: '' };
+    }
+  });
+}
+
+function recordedArtifact(root, relativePath) {
+  const record = JSON.parse(fs.readFileSync(path.join(root, '.minecraft-core-state', 'runtime.json'), 'utf8'));
+  return record.artifacts.find(artifact => artifact.relativePath === relativePath) || null;
+}
+
+// Mirrors the targeted runtime Repair check (production-mutation-runtime.cjs #repairCandidateRuntimePaths):
+// a runtime file regenerated into a fresh staging folder replaces the live one only when its size and
+// hash equal the recorded artifact; otherwise the repair fails with RUNTIME_INCOMPLETE.
+function repairRuntimeFile(liveRoot, stagingRoot, relativePath) {
+  const recorded = recordedArtifact(liveRoot, relativePath);
+  const regenerated = fs.readFileSync(path.join(stagingRoot, ...relativePath.split('/')));
+  if (!recorded || regenerated.length !== recorded.size || sha256(regenerated) !== recorded.sha256) {
+    throw Object.assign(new Error('The prepared server runtime is incomplete.'), { code: 'RUNTIME_INCOMPLETE' });
+  }
+  fs.writeFileSync(path.join(liveRoot, ...relativePath.split('/')), regenerated);
+}
+
+function unfoldedManifest(jarPath) {
+  return new AdmZip(jarPath).readAsText('META-INF/MANIFEST.MF').replace(/\r?\n /gu, '');
 }
 
 function refreshArtifactRecord(root, relativePath) {
@@ -154,12 +225,7 @@ test('NeoForge stages the exact digest-verified official installer and never run
     validateJava: async ({ expectedMajor }) => expectedMajor,
     processRunner: async request => {
       processCalls.push(request);
-      const runtimeDir = path.join(request.cwd, 'libraries', 'net', 'neoforged', 'neoforge', VERSION);
-      fs.mkdirSync(runtimeDir, { recursive: true });
-      fs.writeFileSync(path.join(request.cwd, 'user_jvm_args.txt'), '# app reviewed\n');
-      fs.writeFileSync(path.join(request.cwd, 'server.jar'), jarBytes('server'));
-      fs.writeFileSync(path.join(runtimeDir, `neoforge-${VERSION}-universal.jar`), jarBytes('neoforge'));
-      fs.writeFileSync(path.join(runtimeDir, 'win_args.txt'), `--module-path libraries/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-universal.jar\n`);
+      writeOfficialInstallerOutput(request.cwd);
       return { code: 0, stdout: 'installed', stderr: '' };
     }
   });
@@ -323,12 +389,7 @@ test('NeoForge refuses a target reached through a reparse ancestor before execut
     validateJava: async () => 21,
     processRunner: async request => {
       executions += 1;
-      const runtimeDir = path.join(request.cwd, 'libraries', 'net', 'neoforged', 'neoforge', VERSION);
-      fs.mkdirSync(runtimeDir, { recursive: true });
-      fs.writeFileSync(path.join(request.cwd, 'server.jar'), jarBytes('server'));
-      fs.writeFileSync(path.join(request.cwd, 'user_jvm_args.txt'), '# args\n');
-      fs.writeFileSync(path.join(runtimeDir, `neoforge-${VERSION}-universal.jar`), jarBytes('neo'));
-      fs.writeFileSync(path.join(runtimeDir, 'win_args.txt'), `--module-path libraries/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-universal.jar\n`);
+      writeOfficialInstallerOutput(request.cwd);
       return { code: 0, stdout: '', stderr: '' };
     }
   }), error => error.code === 'RUNTIME_INCOMPLETE');
@@ -395,32 +456,7 @@ test('NeoForge can never fall through to Vanilla when its exact runtime is incom
 test('NeoForge launch uses only the exact Windows arg file and app-controlled JVM arguments', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-neoforge-launch-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const installer = installerJar();
-  const digest = crypto.createHash('sha512').update(installer).digest('hex');
-  const transport = fakeTransport(new Map([
-    [METADATA_URL, metadataXml([VERSION])],
-    [`${INSTALLER_URL}.sha512`, digest],
-    [INSTALLER_URL, installer]
-  ]));
-  await installServerLoader({
-    targetPath: root,
-    minecraftVersion: '1.21.1',
-    loader: 'neoforge',
-    loaderVersion: VERSION,
-    javaPath: path.join(root, 'java.exe'),
-    javaMajor: 21,
-    transport,
-    validateJava: async () => 21,
-    processRunner: async request => {
-      const runtimeDir = path.join(request.cwd, 'libraries', 'net', 'neoforged', 'neoforge', VERSION);
-      fs.mkdirSync(runtimeDir, { recursive: true });
-      fs.writeFileSync(path.join(request.cwd, 'server.jar'), jarBytes('server'));
-      fs.writeFileSync(path.join(request.cwd, 'user_jvm_args.txt'), '-javaagent:pack-supplied.jar\n');
-      fs.writeFileSync(path.join(runtimeDir, `neoforge-${VERSION}-universal.jar`), jarBytes('neo'));
-      fs.writeFileSync(path.join(runtimeDir, 'win_args.txt'), `--module-path libraries/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-universal.jar\n`);
-      return { code: 0, stdout: '', stderr: '' };
-    }
-  });
+  await installNeoForge(root, root, { userJvmArgs: '-javaagent:pack-supplied.jar\n' });
 
   const plan = resolveLaunchPlan(root, { loader: 'neoforge', maxRam: 6 }, { runtimeTuple: tuple() });
   assert.equal(plan.type, 'neoforge');
@@ -439,31 +475,7 @@ test('NeoForge launch uses only the exact Windows arg file and app-controlled JV
 test('NeoForge validation rejects escaping argument-file references and mutated artifacts', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-neoforge-tamper-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const installer = installerJar();
-  const digest = crypto.createHash('sha512').update(installer).digest('hex');
-  await installServerLoader({
-    targetPath: root,
-    minecraftVersion: '1.21.1',
-    loader: 'neoforge',
-    loaderVersion: VERSION,
-    javaPath: path.join(root, 'java.exe'),
-    javaMajor: 21,
-    transport: fakeTransport(new Map([
-      [METADATA_URL, metadataXml([VERSION])],
-      [`${INSTALLER_URL}.sha512`, digest],
-      [INSTALLER_URL, installer]
-    ])),
-    validateJava: async () => 21,
-    processRunner: async request => {
-      const runtimeDir = path.join(request.cwd, 'libraries', 'net', 'neoforged', 'neoforge', VERSION);
-      fs.mkdirSync(runtimeDir, { recursive: true });
-      fs.writeFileSync(path.join(request.cwd, 'server.jar'), jarBytes('server'));
-      fs.writeFileSync(path.join(request.cwd, 'user_jvm_args.txt'), '# args\n');
-      fs.writeFileSync(path.join(runtimeDir, `neoforge-${VERSION}-universal.jar`), jarBytes('neo'));
-      fs.writeFileSync(path.join(runtimeDir, 'win_args.txt'), `--module-path libraries/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-universal.jar\n`);
-      return { code: 0, stdout: '', stderr: '' };
-    }
-  });
+  await installNeoForge(root, root);
   const argsRelative = `libraries/net/neoforged/neoforge/${VERSION}/win_args.txt`;
   const universalRelative = `libraries/net/neoforged/neoforge/${VERSION}/neoforge-${VERSION}-universal.jar`;
   const argsPath = path.join(root, ...argsRelative.split('/'));
@@ -475,4 +487,99 @@ test('NeoForge validation rejects escaping argument-file references and mutated 
   refreshArtifactRecord(root, argsRelative);
   fs.appendFileSync(path.join(root, ...universalRelative.split('/')), 'mutated');
   assert.throws(() => validatePreparedRuntime(root, tuple()), error => error.code === 'RUNTIME_INCOMPLETE');
+});
+
+test('NeoForge publishes a manifest-only downgrade guard as the root server.jar and records the vanilla libraries jar', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-neoforge-guard-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  await installNeoForge(root, root);
+
+  const rootJar = path.join(root, 'server.jar');
+  assert.deepEqual(new AdmZip(rootJar).getEntries().map(entry => entry.entryName), ['META-INF/MANIFEST.MF']);
+  assert.match(unfoldedManifest(rootJar), new RegExp(`^Main-Class: ${GUARD_MAIN_CLASS.replaceAll('.', '\\.')}\\r?$`, 'mu'));
+  assert.equal(__testUtils.NEOFORGE_DOWNGRADE_GUARD_MAIN_CLASS, GUARD_MAIN_CLASS);
+  assert.equal(sha256(fs.readFileSync(rootJar)), GUARD_JAR_SHA256);
+  assert.notDeepEqual(fs.readFileSync(rootJar), VANILLA_BYTES);
+  assert.deepEqual(fs.readFileSync(path.join(root, ...VANILLA_SERVER_JAR.split('/'))), VANILLA_BYTES);
+  assert.ok(recordedArtifact(root, 'server.jar'));
+  assert.ok(recordedArtifact(root, VANILLA_SERVER_JAR));
+  assert.equal(validatePreparedRuntime(root, tuple()).valid, true);
+  assert.deepEqual(resolveLaunchPlan(root, { loader: 'neoforge', maxRam: 4 }, { runtimeTuple: tuple() }).args, [
+    '-Xmx4G',
+    '-Xms1G',
+    `@libraries${path.sep}net${path.sep}neoforged${path.sep}neoforge${path.sep}${VERSION}${path.sep}win_args.txt`,
+    'nogui'
+  ]);
+
+  fs.rmSync(path.join(root, ...VANILLA_SERVER_JAR.split('/')));
+  assert.throws(() => validatePreparedRuntime(root, tuple()), error => error.code === 'RUNTIME_INCOMPLETE');
+});
+
+test('the NeoForge downgrade guard jar has identical bytes in every time zone', () => {
+  const modulePath = require.resolve('../electron/services/loader-install-service.cjs');
+  const script = [
+    "const crypto = require('node:crypto');",
+    `const { __testUtils } = require(${JSON.stringify(modulePath)});`,
+    'process.stdout.write(JSON.stringify({',
+    '  offset: new Date(1980, 0, 1).getTimezoneOffset(),',
+    "  sha256: crypto.createHash('sha256').update(__testUtils.neoForgeDowngradeGuardJarBytes()).digest('hex')",
+    '}));'
+  ].join('\n');
+  const runs = ['UTC', 'EST5EDT'].map(TZ => {
+    const result = spawnSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      env: { ...process.env, TZ },
+      timeout: 60_000,
+      windowsHide: true
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout.trim().split(/\r?\n/u).pop());
+  });
+
+  assert.deepEqual(runs.map(run => run.offset), [0, 300], 'each child ran in its own time zone');
+  assert.deepEqual(runs.map(run => run.sha256), [GUARD_JAR_SHA256, GUARD_JAR_SHA256]);
+  assert.equal(sha256(__testUtils.neoForgeDowngradeGuardJarBytes()), GUARD_JAR_SHA256);
+});
+
+test('targeted Repair regenerates the NeoForge guard jar with the recorded hash', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-neoforge-repair-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const live = path.join(root, 'live');
+  const staging = path.join(root, 'staging');
+  fs.mkdirSync(live);
+  fs.mkdirSync(staging);
+  await installNeoForge(live, root);
+  fs.writeFileSync(path.join(live, 'server.jar'), jarBytes('damaged'));
+  assert.throws(() => validatePreparedRuntime(live, tuple()), error => error.code === 'RUNTIME_INCOMPLETE');
+
+  await installNeoForge(staging, root);
+  repairRuntimeFile(live, staging, 'server.jar');
+
+  assert.equal(validatePreparedRuntime(live, tuple()).valid, true);
+  assert.equal(sha256(fs.readFileSync(path.join(live, 'server.jar'))), GUARD_JAR_SHA256);
+});
+
+test('a pre-release NeoForge layout keeps validating, a targeted Repair of its vanilla root jar fails closed, and an update rewrites it', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-neoforge-prerelease-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const live = path.join(root, 'live');
+  const staging = path.join(root, 'staging');
+  fs.mkdirSync(live);
+  fs.mkdirSync(staging);
+  await installNeoForge(live, root);
+  // What pre-release builds published: the vanilla libraries jar copied to the root and recorded.
+  fs.copyFileSync(path.join(live, ...VANILLA_SERVER_JAR.split('/')), path.join(live, 'server.jar'));
+  refreshArtifactRecord(live, 'server.jar');
+  assert.equal(validatePreparedRuntime(live, tuple()).valid, true);
+
+  await installNeoForge(staging, root);
+  assert.throws(
+    () => repairRuntimeFile(live, staging, 'server.jar'),
+    error => error.code === 'RUNTIME_INCOMPLETE'
+  );
+  assert.deepEqual(fs.readFileSync(path.join(live, 'server.jar')), VANILLA_BYTES);
+
+  await installNeoForge(live, root);
+  assert.equal(sha256(fs.readFileSync(path.join(live, 'server.jar'))), GUARD_JAR_SHA256);
+  assert.equal(validatePreparedRuntime(live, tuple()).valid, true);
 });
