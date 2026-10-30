@@ -312,6 +312,8 @@ function assertValidationResult(result, expectedRuntime) {
       sha512: artifact.sha512
     };
   });
+  // NeoForge also needs user_jvm_args.txt, but only to exist, which the worker's validation checks:
+  // it is the server owner's file, so a result never has to carry a hashed record of it.
   const requiredPaths = runtime.loaderFamily === 'vanilla'
     ? [loader.serverJar]
     : runtime.loaderFamily === 'fabric'
@@ -319,7 +321,7 @@ function assertValidationResult(result, expectedRuntime) {
       : runtime.loaderFamily === 'forge'
         ? (loader.argsFile ? [loader.argsFile] : [loader.launchJar, loader.serverJar, ...loader.libraries])
         : runtime.loaderFamily === 'neoforge'
-          ? [loader.argsFile, loader.universalJar, 'server.jar', 'user_jvm_args.txt']
+          ? [loader.argsFile, loader.universalJar, 'server.jar']
           : [loader.launcherJar, loader.properties, 'server.jar', ...loader.libraries.map(item => item.relativePath)];
   if (requiredPaths.some(value => !identities.has(value.normalize('NFC').toLowerCase()))) throw protocolError();
   return {

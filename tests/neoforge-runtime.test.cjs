@@ -453,10 +453,10 @@ test('NeoForge can never fall through to Vanilla when its exact runtime is incom
   }
 });
 
-test('NeoForge launch uses only the exact Windows arg file and app-controlled JVM arguments', async (t) => {
+test('NeoForge launch passes user_jvm_args.txt like the official run script, then app memory flags and the exact Windows arg file', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-neoforge-launch-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  await installNeoForge(root, root, { userJvmArgs: '-javaagent:pack-supplied.jar\n' });
+  await installNeoForge(root, root, { userJvmArgs: '-XX:+UseG1GC\n' });
 
   const plan = resolveLaunchPlan(root, { loader: 'neoforge', maxRam: 6 }, { runtimeTuple: tuple() });
   assert.equal(plan.type, 'neoforge');
@@ -464,12 +464,13 @@ test('NeoForge launch uses only the exact Windows arg file and app-controlled JV
   assert.equal(plan.cwd, root);
   assert.equal(plan.jar, null);
   assert.deepEqual(plan.args, [
+    '@user_jvm_args.txt',
     '-Xmx6G',
     '-Xms1G',
     `@libraries${path.sep}net${path.sep}neoforged${path.sep}neoforge${path.sep}${VERSION}${path.sep}win_args.txt`,
     'nogui'
   ]);
-  assert.equal(plan.args.some(arg => arg.includes('run.bat') || arg.includes('user_jvm_args')), false);
+  assert.equal(plan.args.some(arg => arg.includes('run.bat')), false);
 });
 
 test('NeoForge validation rejects escaping argument-file references and mutated artifacts', async (t) => {
@@ -505,6 +506,7 @@ test('NeoForge publishes a manifest-only downgrade guard as the root server.jar 
   assert.ok(recordedArtifact(root, VANILLA_SERVER_JAR));
   assert.equal(validatePreparedRuntime(root, tuple()).valid, true);
   assert.deepEqual(resolveLaunchPlan(root, { loader: 'neoforge', maxRam: 4 }, { runtimeTuple: tuple() }).args, [
+    '@user_jvm_args.txt',
     '-Xmx4G',
     '-Xms1G',
     `@libraries${path.sep}net${path.sep}neoforged${path.sep}neoforge${path.sep}${VERSION}${path.sep}win_args.txt`,

@@ -12,6 +12,7 @@ const {
 } = require('../utils/server-network-properties.cjs');
 
 const SUPPORTED_LOADERS = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
+const USER_JVM_ARGS_FILE = 'user_jvm_args.txt';
 const WINDOWS_RESPONSE_FILE_PATH_LIMIT = 260;
 const READY_MARKERS = Object.freeze([
   'Done (',
@@ -344,27 +345,45 @@ function resolveForgeLaunchPlan(serverPath, maxRam, expected = {}, runtime = nul
   });
 }
 
+// user_jvm_args.txt is the server owner's file (RAM and other JVM flags) and its bytes are never
+// validated. A runtime-backed Forge or NeoForge launch passes it whenever it is present, as the
+// official run scripts do, whether or not the runtime record lists it.
+function resolveUserJvmArgsFile(serverPath) {
+  const filePath = path.join(serverPath, USER_JVM_ARGS_FILE);
+  let stat;
+  try {
+    stat = fs.lstatSync(filePath, { throwIfNoEntry: false });
+  } catch {
+    throw codedLaunchError('RUNTIME_INCOMPLETE', 'The server user_jvm_args.txt could not be read.');
+  }
+  if (!stat) return null;
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw codedLaunchError('RUNTIME_INCOMPLETE', 'The server user_jvm_args.txt is not a regular file.');
+  }
+  assertWindowsResponseFilePath(filePath);
+  return filePath;
+}
+
+function responseFileLaunchArgs(serverPath, maxRam, argsFile, userJvmArgs) {
+  const args = userJvmArgs ? [`@${path.relative(serverPath, userJvmArgs)}`] : [];
+  args.push(`-Xmx${maxRam}G`, '-Xms1G', `@${path.relative(serverPath, argsFile)}`, 'nogui');
+  return args;
+}
+
 function resolveRecordedForgeLaunchPlan(serverPath, maxRam, validation) {
   const loader = validation?.loader;
   if (loader && typeof loader.argsFile === 'string') {
     const forgeArgs = path.join(serverPath, ...loader.argsFile.split('/'));
     assertWindowsResponseFilePath(forgeArgs);
-    const recordedPaths = new Set(validation.artifacts.map(artifact => artifact.relativePath));
-    const recordedUserJvmArgs = recordedPaths.has('user_jvm_args.txt')
-      ? path.join(serverPath, 'user_jvm_args.txt')
-      : null;
-    if (recordedUserJvmArgs) assertWindowsResponseFilePath(recordedUserJvmArgs);
-    const args = [];
-    if (recordedUserJvmArgs) args.push(`@${path.relative(serverPath, recordedUserJvmArgs)}`);
-    args.push(`-Xmx${maxRam}G`, '-Xms1G', `@${path.relative(serverPath, forgeArgs)}`, 'nogui');
+    const userJvmArgs = resolveUserJvmArgsFile(serverPath);
     return commonPlan({
       type: 'forge',
       loader: 'forge',
       jar: null,
-      args,
+      args: responseFileLaunchArgs(serverPath, maxRam, forgeArgs, userJvmArgs),
       cwd: serverPath,
       runtime: validation.runtime,
-      assets: { userJvmArgs: recordedUserJvmArgs, forgeArgs, runScript: null }
+      assets: { userJvmArgs, forgeArgs, runScript: null }
     });
   }
   if (loader && typeof loader.launchJar === 'string') {
@@ -481,9 +500,6 @@ function resolvePrevalidatedLaunchPlan(serverPath, options = {}, validation) {
   if (runtime.loaderFamily === 'forge') {
     const launchPath = typeof loader.argsFile === 'string' ? loader.argsFile : loader.launchJar;
     resolvePrevalidatedFile(serverPath, launchPath, recordedPaths);
-    if (recordedPaths.has('user_jvm_args.txt')) {
-      resolvePrevalidatedFile(serverPath, 'user_jvm_args.txt', recordedPaths);
-    }
     return resolveRecordedForgeLaunchPlan(serverPath, maxRam, { ...validation, runtime });
   }
   if (runtime.loaderFamily === 'neoforge') {
@@ -493,7 +509,7 @@ function resolvePrevalidatedLaunchPlan(serverPath, options = {}, validation) {
       type: 'neoforge',
       loader: 'neoforge',
       jar: null,
-      args: [`-Xmx${maxRam}G`, '-Xms1G', `@${path.relative(serverPath, argsFile)}`, 'nogui'],
+      args: responseFileLaunchArgs(serverPath, maxRam, argsFile, resolveUserJvmArgsFile(serverPath)),
       cwd: serverPath,
       runtime
     });
@@ -580,7 +596,7 @@ function resolveLaunchPlan(serverPath, options = {}, { runtimeTuple = null } = {
       type: 'neoforge',
       loader: 'neoforge',
       jar: null,
-      args: [`-Xmx${maxRam}G`, '-Xms1G', `@${path.relative(serverPath, argsFile)}`, 'nogui'],
+      args: responseFileLaunchArgs(serverPath, maxRam, argsFile, resolveUserJvmArgsFile(serverPath)),
       cwd: serverPath,
       runtime: validation.runtime
     });

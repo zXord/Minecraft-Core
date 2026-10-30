@@ -23,6 +23,7 @@ const {
 const {
   WindowsReparseInspector
 } = require('../../../electron/services/modpacks/local/windows-reparse-inspector.cjs');
+const { pathIsProtected } = require('../../../electron/services/modpacks/planning/ownership-planner.cjs');
 const realHarness = require('./real-modpack-harness.cjs');
 
 const MANAGEMENT_CONTINUATION_ROOT_ENV = 'MINECRAFT_CORE_REAL_MODPACK_MANAGEMENT_CONTINUATION_ROOT';
@@ -223,10 +224,25 @@ function safeRelativePath(value, label) {
   return value;
 }
 
-function uninstallableManagedPaths(manifest, serverPath) {
-  const paths = [];
+// Reads a stored manifest entry the way ModpackStateRepository does. A planner-protected path
+// (server.properties, JVM argument files, run scripts, worlds) is the server owner's file, even
+// where a manifest recorded by an earlier build lists it as pack or runtime content, so earlier
+// preserved runs and fresh runs are audited alike.
+function repositoryManifestEntry(entry) {
+  if (!entry || !['pack', 'runtime'].includes(entry.origin) || typeof entry.pathKey !== 'string' ||
+      !pathIsProtected(entry.pathKey, entry.role, entry.managementPolicy, [], [], entry.origin)) return entry;
+  if (entry.origin === 'runtime') {
+    return { ...entry, origin: 'user', managementPolicy: 'protected', role: entry.role === 'world' ? 'world' : 'other' };
+  }
+  return entry.managementPolicy === 'replaceable-managed' ? { ...entry, managementPolicy: 'preserve-after-seed' } : entry;
+}
+
+// The manifest entries an uninstall removes: unchanged pack and runtime files, never protected ones.
+function uninstallableManagedEntries(manifest, serverPath) {
+  const entries = [];
   const seen = new Set();
-  for (const entry of manifest.entries) {
+  for (const storedEntry of manifest.entries) {
+    const entry = repositoryManifestEntry(storedEntry);
     if (!entry || !['pack', 'runtime'].includes(entry.origin) || entry.managementPolicy !== 'replaceable-managed' ||
         ['world', 'secret', 'application'].includes(entry.role)) continue;
     if (typeof entry.pathKey !== 'string' || !SHA256_PATTERN.test(entry.installedHash) ||
@@ -240,10 +256,14 @@ function uninstallableManagedPaths(manifest, serverPath) {
       fail('rollback managed manifest paths are invalid or ambiguous');
     }
     seen.add(comparablePath(resolved));
-    paths.push(resolved);
+    entries.push({ entry, filePath: resolved });
   }
-  if (paths.length === 0) fail('rollback manifest does not expose uninstallable managed files');
-  return paths.sort((left, right) => comparablePath(left).localeCompare(comparablePath(right), 'en-US'));
+  if (entries.length === 0) fail('rollback manifest does not expose uninstallable managed files');
+  return entries.sort((left, right) => comparablePath(left.filePath).localeCompare(comparablePath(right.filePath), 'en-US'));
+}
+
+function uninstallableManagedPaths(manifest, serverPath) {
+  return uninstallableManagedEntries(manifest, serverPath).map(item => item.filePath);
 }
 
 async function readManagedState(serverPath, inspector, {
@@ -1578,14 +1598,19 @@ async function readCompletedRollbackOperationWorkspace({
 }
 
 async function validateCompletedRestoredManifest(current, serverPath, inspector) {
+  // Group sizes of the restored manifest as the state repository reads it.
   const expectedGroups = new Map([
     ['pack|replaceable-managed|mod', 21],
     ['runtime|replaceable-managed|library', 354],
-    ['runtime|replaceable-managed|runtime', 78],
     ['runtime|replaceable-managed|server', 2],
-    ['user|protected|other', 20],
     ['user|protected|world', 23]
   ]);
+  // Runtime preparation also writes server.properties. Earlier builds recorded it as runtime content
+  // (measured: 78 runtime and 20 user files); it is now the owner's file, and
+  // repositoryManifestEntry() reads earlier manifests the same way. Only the two groups' total is
+  // pinned until a fresh preserved run re-measures the split.
+  const sharedGroups = ['runtime|replaceable-managed|runtime', 'user|protected|other'];
+  const sharedGroupTotal = 98;
   if (current.manifest.entries.length !== 498 ||
       current.manifest.entries.some(entry => entry?.path === WORLD_SENTINEL_RELATIVE)) {
     fail('completed rollback immutable manifest is not the exact restored 498-entry snapshot');
@@ -1593,10 +1618,12 @@ async function validateCompletedRestoredManifest(current, serverPath, inspector)
   const groups = new Map();
   const seenPaths = new Set();
   const seenKeys = new Set();
-  for (const entry of current.manifest.entries) {
-    const relative = safeRelativePath(entry?.path, 'completed rollback manifest');
+  for (const storedEntry of current.manifest.entries) {
+    const relative = safeRelativePath(storedEntry?.path, 'completed rollback manifest');
+    const entry = repositoryManifestEntry(storedEntry);
     const key = `${entry.origin}|${entry.managementPolicy}|${entry.role}`;
-    if (!expectedGroups.has(key) || typeof entry.pathKey !== 'string' || entry.pathKey.length === 0 ||
+    if ((!expectedGroups.has(key) && !sharedGroups.includes(key)) ||
+        typeof entry.pathKey !== 'string' || entry.pathKey.length === 0 ||
         seenPaths.has(relative.toLocaleLowerCase('en-US')) || seenKeys.has(entry.pathKey.toLocaleLowerCase('en-US')) ||
         !SHA256_PATTERN.test(entry.installedHash) || !/^(0|[1-9][0-9]*)$/u.test(entry.size)) {
       fail('completed rollback immutable manifest topology is invalid');
@@ -1619,6 +1646,9 @@ async function validateCompletedRestoredManifest(current, serverPath, inspector)
   }
   for (const [key, count] of expectedGroups) {
     if (groups.get(key) !== count) fail('completed rollback immutable manifest classifications are not exact');
+  }
+  if (sharedGroups.reduce((total, key) => total + (groups.get(key) || 0), 0) !== sharedGroupTotal) {
+    fail('completed rollback immutable manifest classifications are not exact');
   }
 }
 
@@ -2884,8 +2914,20 @@ async function loadPostUninstallCompleted({
   const archived = await readArchivedManagedSnapshot(uninstallRestore, {
     expectedRevision: 8, expectedRuntime: retry.outcome.runtime.target
   });
-  const managedFilePaths = uninstallableManagedPaths(archived.manifest, serverPath);
-  if (managedFilePaths.length !== 455) fail('completed uninstall managed path set is not exactly 455 files');
+  // Derived from the evidence rather than a measured count: uninstall removes only unchanged
+  // managed files, so each one must be a file of the verified pre-uninstall restore point with
+  // exactly its manifest size and hash.
+  const managedEntries = uninstallableManagedEntries(archived.manifest, serverPath);
+  const restoredFiles = new Map(uninstallRestore.metadata.scope.entries
+    .filter(entry => entry.type === 'file')
+    .map(entry => [entry.path.toLocaleLowerCase('en-US'), entry]));
+  for (const { entry } of managedEntries) {
+    const restored = restoredFiles.get(entry.path.toLocaleLowerCase('en-US'));
+    if (!restored || String(restored.size) !== entry.size || restored.sha256 !== entry.installedHash) {
+      fail('completed uninstall managed path set does not match the pre-uninstall restore point');
+    }
+  }
+  const managedFilePaths = managedEntries.map(item => item.filePath);
   for (const managedPath of managedFilePaths) await assertAbsent(managedPath, 'completed uninstall managed file');
   const sentinelPath = path.join(serverPath, ...WORLD_SENTINEL_RELATIVE.split('/'));
   await assertCanonicalFile(sentinelPath, await fsp.realpath(path.dirname(sentinelPath)), inspector, 'world sentinel', { maxBytes: 4096 });

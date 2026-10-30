@@ -102,7 +102,8 @@ test.describe('preserved real Modrinth management continuation', () => {
         expect(completed).toMatchObject({
           authorized: true,
           state: { modpackManaged: false, lifecycleMode: 'files-only', contentRevision: 10 },
-          managedFilePaths: { length: 455 },
+          // The harness derives the removed set from the pre-uninstall restore point; it is not a fixed count.
+          managedFilePaths: expect.arrayContaining([expect.stringMatching(/[\\/]mods[\\/][^\\/]+\.jar$/u)]),
           rollbackOperationId: expect.any(String),
           uninstallOperationId: expect.any(String)
         });

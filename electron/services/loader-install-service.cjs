@@ -63,6 +63,9 @@ const DEFAULT_INSTALL_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_STDOUT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_STDERR_BYTES = 1024 * 1024;
 const RUNTIME_METADATA_RELATIVE = path.join('.minecraft-core-state', 'runtime.json');
+// The server owner's JVM argument file (RAM and other JVM flags). Runtime records never hash it
+// and validation never reads its bytes, so editing it can never make a prepared runtime incomplete.
+const USER_JVM_ARGS_FILE = 'user_jvm_args.txt';
 const SAFE_VERSION = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
 const SAFE_MINECRAFT_VERSION = /^\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9._-]+)?$/;
 const SUPPORTED_RUNTIME_LOADERS = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
@@ -211,6 +214,11 @@ function resolveControlledPath(root, relativePath) {
   const resolved = path.resolve(root, safe);
   if (!inside(root, resolved)) throw runtimeIncomplete();
   return resolved;
+}
+
+function isUserJvmArgsFile(relativePath) {
+  return typeof relativePath === 'string' &&
+    relativePath.normalize('NFC').toLocaleLowerCase('en-US') === USER_JVM_ARGS_FILE;
 }
 
 function assertDirectory(pathValue) {
@@ -672,14 +680,14 @@ function listRuntimeArtifactFiles(root, {
   maxBytes = DEFAULT_RUNTIME_BYTES
 } = {}) {
   const runtimeDirectories = new Set(['libraries', 'versions']);
+  // The root user_jvm_args.txt is the server owner's file, so it is never recorded here.
   const runtimeRootFiles = new Set([
     'fabric-installer.jar',
     'fabric-server-launch.jar',
     'fabric-server-launcher.properties',
     'quilt-server-launch.jar',
     'quilt-server-launcher.properties',
-    'server.jar',
-    'user_jvm_args.txt'
+    'server.jar'
   ]);
   const isRuntimeRootJar = identity => /^(?:forge|neoforge)-.*\.jar$/u.test(identity) ||
     /^minecraft_server\.[a-z0-9._+-]+\.jar$/u.test(identity);
@@ -722,13 +730,17 @@ function collectConflictingRuntimePaths(targetRoot, loaderFamily) {
 
 function publishStagedRuntime(stageRoot, targetRoot, workspace, verify, {
   loaderFamily = null,
+  preserveExistingFiles = [],
   renameFile = fs.renameSync
 } = {}) {
   stageRoot = assertCanonicalDirectory(stageRoot);
   targetRoot = assertCanonicalDirectory(targetRoot);
-  if (!inside(targetRoot, workspace) || !inside(workspace, stageRoot) || typeof verify !== 'function' || typeof renameFile !== 'function') {
+  if (!inside(targetRoot, workspace) || !inside(workspace, stageRoot) || typeof verify !== 'function' || typeof renameFile !== 'function' ||
+      !Array.isArray(preserveExistingFiles) || preserveExistingFiles.some(relativePath => !safeRelativePath(relativePath))) {
     throw runtimeIncomplete();
   }
+  const preservedIdentities = new Set(preserveExistingFiles.map(relativePath =>
+    relativePath.normalize('NFC').toLocaleLowerCase('en-US')));
   const files = listRegularFiles(stageRoot);
   const conflicts = loaderFamily ? collectConflictingRuntimePaths(targetRoot, loaderFamily) : [];
   const backupRoot = path.join(workspace, 'backup');
@@ -763,6 +775,9 @@ function publishStagedRuntime(stageRoot, targetRoot, workspace, verify, {
     }
     for (const file of files) {
       const destination = resolveControlledPath(targetRoot, file.relativePath);
+      // A preserved file is published only where the target has none; an existing one is kept.
+      if (preservedIdentities.has(file.relativePath.normalize('NFC').toLocaleLowerCase('en-US')) &&
+          fs.existsSync(destination)) continue;
       const backup = resolveControlledPath(backupRoot, file.relativePath);
       ensureTargetParent(path.dirname(destination));
       let hadExisting = false;
@@ -912,6 +927,14 @@ function validateArtifactRecord(root, record) {
   const inspected = digestStableArtifact(root, filePath);
   if (inspected.size !== record.size || inspected.sha256 !== record.sha256 ||
     inspected.sha512 !== record.sha512) throw runtimeIncomplete();
+  return filePath;
+}
+
+// Records written by earlier builds also hashed the root user_jvm_args.txt. Its bytes are the
+// server owner's, so such a record only proves the file is still there as a contained regular file.
+function validateUserJvmArgsRecord(root, record) {
+  const filePath = artifactRecordPath(root, record);
+  assertRegularContainedFile(root, filePath);
   return filePath;
 }
 
@@ -2225,7 +2248,9 @@ function validateRuntimeRecord(root, expectedRuntime, record, options = {}) {
   const artifactValidator = options.artifactValidator || validateArtifactRecord;
   if (typeof artifactValidator !== 'function') throw runtimeIncomplete();
   for (const artifact of record.artifacts) {
-    const filePath = artifactValidator(root, artifact);
+    const filePath = isUserJvmArgsFile(artifact?.relativePath)
+      ? validateUserJvmArgsRecord(root, artifact)
+      : artifactValidator(root, artifact);
     const identity = portableRelative(root, filePath).normalize('NFC').toLowerCase();
     if (artifactPaths.has(identity)) throw runtimeIncomplete();
     artifactPaths.add(identity);
@@ -2238,8 +2263,9 @@ function validateRuntimeRecord(root, expectedRuntime, record, options = {}) {
     if (!hasExactKeys(record.loader, ['family', 'argsFile', 'universalJar']) ||
       record.loader.argsFile !== `libraries/net/neoforged/neoforge/${runtime.loaderVersion}/win_args.txt` ||
       record.loader.universalJar !== `libraries/net/neoforged/neoforge/${runtime.loaderVersion}/neoforge-${runtime.loaderVersion}-universal.jar`) throw runtimeIncomplete();
+    // neoForgeLayout requires user_jvm_args.txt to exist; as the owner's file it is never recorded.
     const layout = neoForgeLayout(root, runtime.loaderVersion, runtime.minecraftVersion);
-    [layout.argsFile, layout.universalJar, layout.serverJar, layout.minecraftServerJar, layout.userJvmArgs,
+    [layout.argsFile, layout.universalJar, layout.serverJar, layout.minecraftServerJar,
       ...layout.referencedFiles].forEach(requireRecorded);
   } else if (runtime.loaderFamily === 'quilt') {
     const layout = quiltLayout(root, record.loader, runtime.minecraftVersion);
@@ -2520,8 +2546,11 @@ async function installNeoForgeServer(options) {
       universalJar: portableRelative(serverRoot, layout.universalJar)
     };
     publishRuntimeMetadata(serverRoot, runtime, loader, listRuntimeArtifactFiles(serverRoot).map(file => file.source));
+    // The installer's default user_jvm_args.txt only recreates a missing file; it never replaces
+    // the server owner's copy on an update or repair.
     publishStagedRuntime(serverRoot, root, workspace, () => validatePreparedRuntime(root, runtime), {
-      loaderFamily: 'neoforge'
+      loaderFamily: 'neoforge',
+      preserveExistingFiles: [USER_JVM_ARGS_FILE]
     });
     return { success: true, loader: 'neoforge', loaderVersion: runtime.loaderVersion, runtime };
   } catch (error) {
