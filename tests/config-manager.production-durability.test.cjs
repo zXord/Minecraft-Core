@@ -122,7 +122,12 @@ test('an explicitly configured legacy durable capability remains a supported fal
   assert.equal(JSON.parse(fs.readFileSync(path.join(serverPath, '.minecraft-core.json'), 'utf8')).maxRam, 10);
 });
 
-test('service graph configures fresh exact-root durability for every direct config mutation', (t) => {
+function addModpackEvidence(serverPath) {
+  fs.mkdirSync(path.join(serverPath, '.minecraft-core-state'), { recursive: true });
+  fs.writeFileSync(path.join(serverPath, '.minecraft-core-state', 'modpack.json'), '{}\n');
+}
+
+test('service graph keeps unmanaged config writes off the strict writer and gives servers with evidence their exact root', (t) => {
   const requestedRoots = [];
   let tempSequence = 0;
   composeGraph(t, allowedRoots => {
@@ -141,13 +146,20 @@ test('service graph configures fresh exact-root durability for every direct conf
     writeServerConfig(serverPaths[index], { maxRam: index + 4 });
   }
 
-  assert.deepEqual(
-    requestedRoots,
-    serverPaths.map(serverPath => [path.resolve(serverPath)])
-  );
+  assert.deepEqual(requestedRoots, [], 'folders without modpack evidence use the legacy writer');
   for (const serverPath of serverPaths) {
     assert.equal(fs.existsSync(path.join(serverPath, '.minecraft-core.json')), true);
+    assert.deepEqual(fs.readdirSync(serverPath).filter(name => name.includes('minecraft-core-tmp')), []);
   }
+
+  const managedPaths = serverPaths.slice(0, 3);
+  for (const serverPath of managedPaths) addModpackEvidence(serverPath);
+  writeServerConfig(managedPaths[0], { maxRam: 9 });
+  updateServerConfig(managedPaths[1], current => ({ ...current, maxRam: 10 }));
+  assert.equal(ensureConfigFile(managedPaths[2], { maxRam: 11 })?.maxRam, 8);
+  assert.deepEqual(requestedRoots, managedPaths.map(serverPath => [path.resolve(serverPath)]));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(managedPaths[0], '.minecraft-core.json'), 'utf8')).maxRam, 9);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(managedPaths[1], '.minecraft-core.json'), 'utf8')).maxRam, 10);
 
   const explicitPath = temporaryDirectory(t, 'minecraft-core-config-explicit-');
   const callsBeforeExplicitWrite = requestedRoots.length;
@@ -158,11 +170,12 @@ test('service graph configures fresh exact-root durability for every direct conf
   assert.equal(JSON.parse(fs.readFileSync(path.join(explicitPath, '.minecraft-core.json'), 'utf8')).maxRam, 32);
 });
 
-test('a configured production factory failure cannot fall back to ordinary filesystem writes', (t) => {
+test('a configured production factory failure cannot fall back to ordinary filesystem writes for a server with evidence', (t) => {
   composeGraph(t, () => {
     throw new Error('injected durable factory failure');
   });
   const serverPath = temporaryDirectory(t, 'minecraft-core-config-factory-failure-');
+  addModpackEvidence(serverPath);
   const configPath = path.join(serverPath, '.minecraft-core.json');
 
   assert.throws(
@@ -171,4 +184,24 @@ test('a configured production factory failure cannot fall back to ordinary files
   );
   assert.equal(ensureConfigFile(serverPath, { maxRam: 12 }), null);
   assert.equal(fs.existsSync(configPath), false);
+});
+
+test('an unmanaged config write succeeds while the strict production factory throws', (t) => {
+  let strictCalls = 0;
+  composeGraph(t, () => {
+    strictCalls += 1;
+    throw new Error('ArchiveWorker.exe is missing');
+  });
+  const serverPath = temporaryDirectory(t, 'minecraft-core-config-unmanaged-without-worker-');
+  const configPath = path.join(serverPath, '.minecraft-core.json');
+
+  assert.equal(writeServerConfig(serverPath, { maxRam: 12 }).maxRam, 12);
+  assert.equal(updateServerConfig(serverPath, current => ({ ...current, port: 25570 })).port, 25570);
+  assert.equal(ensureConfigFile(serverPath, { maxRam: 16 })?.maxRam, 12);
+
+  const written = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.equal(written.maxRam, 12);
+  assert.equal(written.port, 25570);
+  assert.equal(strictCalls, 0);
+  assert.deepEqual(fs.readdirSync(serverPath).filter(name => name.includes('minecraft-core-tmp')), []);
 });

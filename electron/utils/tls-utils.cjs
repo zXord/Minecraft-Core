@@ -306,6 +306,69 @@ function getPeerFingerprint(peer) {
 }
 
 const pinnedAgentCache = new Map();
+const PINNED_HANDSHAKE_TIMEOUT_MS = 10000;
+// The management transport reports such a socket as connected when it is handed
+// over (PRECONNECTED_SOCKET in services/management-session-transport.cjs).
+const PRECONNECTED_SOCKET = Symbol.for('minecraft-core.preconnected-socket');
+
+// https.Agent ignores a createConnection constructor option, so the pin is
+// checked by an Agent subclass. A new socket reaches the request only after its
+// certificate matched the pin, so nothing is ever sent to another certificate.
+class PinnedHttpsAgent extends https.Agent {
+  #host;
+  #port;
+  #fingerprint;
+
+  constructor({ host, port, fingerprint }) {
+    super({ keepAlive: true, rejectUnauthorized: false, checkServerIdentity: () => null });
+    this.#host = host;
+    this.#port = port;
+    this.#fingerprint = fingerprint;
+  }
+
+  createConnection(options, callback) {
+    let settled = false;
+    let socket;
+    const settle = (error, value) => {
+      if (settled) return;
+      settled = true;
+      callback(error, value);
+    };
+    try {
+      socket = tls.connect({ ...options, host: this.#host, port: this.#port, rejectUnauthorized: false });
+    } catch (error) {
+      settle(error);
+      return undefined;
+    }
+    const onError = error => settle(error);
+    const onHandshakeTimeout = () => {
+      socket.destroy();
+      settle(new Error('Pinned TLS handshake timed out'));
+    };
+    socket.on('error', onError);
+    socket.setTimeout(PINNED_HANDSHAKE_TIMEOUT_MS, onHandshakeTimeout);
+    socket.once('secureConnect', () => {
+      let actualFingerprint = '';
+      try {
+        actualFingerprint = getPeerFingerprint(socket.getPeerCertificate(true));
+      } catch {
+        actualFingerprint = '';
+      }
+      if (!actualFingerprint || actualFingerprint !== this.#fingerprint) {
+        socket.destroy();
+        settle(new Error('Pinned certificate fingerprint mismatch'));
+        return;
+      }
+      // Later idle timeouts belong to the request and the agent.
+      socket.setTimeout(0);
+      socket.removeListener('timeout', onHandshakeTimeout);
+      socket.removeListener('error', onError);
+      socket[PRECONNECTED_SOCKET] = true;
+      settle(null, socket);
+    });
+    return undefined;
+  }
+}
 
 async function fetchPeerFingerprint(host, port) {
   if (!host) return '';
@@ -347,40 +410,7 @@ async function getPinnedHttpsAgent(host, port, expectedFingerprint) {
     return pinnedAgentCache.get(cacheKey);
   }
 
-  const agent = new https.Agent({
-    keepAlive: true,
-    rejectUnauthorized: false,
-    checkServerIdentity: () => null,
-    createConnection: (options, callback) => {
-      const socket = tls.connect(
-        {
-          ...options,
-          host,
-          port: targetPort,
-          servername: host,
-          rejectUnauthorized: false
-        },
-        () => {
-          try {
-            const cert = socket.getPeerCertificate(true);
-            const actualFingerprint = getPeerFingerprint(cert);
-            if (!actualFingerprint || actualFingerprint !== normalized) {
-              const err = new Error('Pinned certificate fingerprint mismatch');
-              socket.destroy(err);
-              callback(err);
-              return;
-            }
-            callback(null, socket);
-          } catch (err) {
-            socket.destroy(err);
-            callback(err);
-          }
-        }
-      );
-      socket.on('error', (err) => callback(err));
-      return socket;
-    }
-  });
+  const agent = new PinnedHttpsAgent({ host, port: targetPort, fingerprint: normalized });
   pinnedAgentCache.set(cacheKey, agent);
   return agent;
 }

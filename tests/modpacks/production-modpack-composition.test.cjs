@@ -727,6 +727,111 @@ test('production composition exposes guarded client services and unavailable pai
   await assert.rejects(composition.clientPackIntegration.assertServerDestination(unregisteredPath), { code: 'CLIENT_PACK_UNAVAILABLE' });
 });
 
+// Production durable roots refuse drive roots and any reparse point, which is what
+// WindowsDurableFsClient does; the fixture's in-memory client otherwise accepts all.
+function refusingUnsupportedRoots(durableFsFactory) {
+  return roots => {
+    for (const root of roots || []) {
+      const resolved = path.resolve(root);
+      if (resolved === path.parse(resolved).root) {
+        throw new ModpackError('RECOVERY_REQUIRED', 'Durable filesystem roots cannot be a drive root');
+      }
+      let canonical = resolved;
+      try { canonical = fs.realpathSync.native(resolved); } catch { /* a missing root is refused later */ }
+      if (canonical.toLowerCase() !== resolved.toLowerCase()) {
+        throw new ModpackError('RECOVERY_REQUIRED', 'Durable filesystem roots cannot contain a reparse point');
+      }
+    }
+    return durableFsFactory(roots);
+  };
+}
+
+// A folder directly under a drive root, emulated without touching that drive.
+function driveRootChildFs(serverPath, directoryStats) {
+  const fsSync = Object.create(fs);
+  fsSync.statSync = (target, ...rest) => (target === serverPath ? directoryStats : fs.statSync(target, ...rest));
+  fsSync.lstatSync = (target, ...rest) => {
+    if (target === serverPath) return directoryStats;
+    if (typeof target === 'string' && target.startsWith(`${serverPath}\\`)) {
+      throw Object.assign(new Error(`ENOENT: no such file or directory, lstat '${target}'`), { code: 'ENOENT' });
+    }
+    return fs.lstatSync(target, ...rest);
+  };
+  return fsSync;
+}
+
+test('lifecycle state of aliased and drive-root-child unmanaged servers is read through the observer while the strict repository still refuses them', {
+  skip: process.platform !== 'win32' && 'junction and drive-letter folder shapes are Windows only'
+}, async t => {
+  const f = fixture(t);
+  const root = path.dirname(f.input.userDataPath);
+  const realServer = path.join(root, 'real-server');
+  const realParent = path.join(root, 'real-parent');
+  fs.mkdirSync(realServer);
+  fs.mkdirSync(path.join(realParent, 'nested-server'), { recursive: true });
+  const junctionServer = path.join(root, 'junction-server');
+  const linkedParent = path.join(root, 'linked-parent');
+  try {
+    fs.symlinkSync(realServer, junctionServer, 'junction');
+    fs.symlinkSync(realParent, linkedParent, 'junction');
+  } catch (error) {
+    t.skip(`directory junctions are unavailable on this host: ${error.code}`);
+    return;
+  }
+  const managedReal = path.join(root, 'managed-real');
+  fs.mkdirSync(path.join(managedReal, '.minecraft-core-state'), { recursive: true });
+  fs.writeFileSync(path.join(managedReal, '.minecraft-core-state', 'modpack.json'), '{"modpackManaged":true}');
+  const managedJunction = path.join(root, 'managed-junction');
+  fs.symlinkSync(managedReal, managedJunction, 'junction');
+  const driveRootChild = 'X:\\MinecraftServer';
+  const servers = {
+    'junction-server': junctionServer,
+    'nested-server': path.join(linkedParent, 'nested-server'),
+    'drive-root-child': driveRootChild,
+    'managed-junction': managedJunction
+  };
+  f.input.store.set('instances', Object.entries(servers).map(([id, serverPath]) => ({ id, type: 'server', path: serverPath })));
+  f.input.instanceResolver.resolveInstance = async instanceId => ({ instanceId, serverPath: servers[instanceId], priorRunning: false });
+  f.input.durableFsFactory = refusingUnsupportedRoots(f.input.durableFsFactory);
+  f.input.fsSync = driveRootChildFs(driveRootChild, fs.statSync(realServer));
+  const composition = await createProductionModpackComposition(f.input);
+  t.after(() => composition.dispose());
+  await composition.initialize();
+
+  for (const instanceId of ['junction-server', 'nested-server', 'drive-root-child']) {
+    const state = await composition.lifecycleService.getState(instanceId);
+    assert.equal(state.modpackManaged, false, instanceId);
+    assert.equal(state.lifecycleMode, 'unmanaged', instanceId);
+    assert.deepEqual(await composition.lifecycleService.listHistory(instanceId), { instanceId, items: [], nextCursor: null });
+    assert.equal(composition.stateObserver.read(servers[instanceId]), null, instanceId);
+  }
+  // The strict repository stays strict for every lifecycle path.
+  assert.throws(() => composition.stateRepository.read(junctionServer), { code: 'INVALID_REQUEST' });
+  assert.throws(() => composition.stateRepository.read(servers['nested-server']), { code: 'RECOVERY_REQUIRED' });
+  assert.throws(() => composition.stateRepository.read(driveRootChild), { code: 'RECOVERY_REQUIRED' });
+  // Evidence behind an alias is never read as unmanaged.
+  await assert.rejects(composition.lifecycleService.getState('managed-junction'), { code: 'INVALID_REQUEST' });
+  assert.throws(() => composition.stateObserver.read(managedJunction), { code: 'INVALID_REQUEST' });
+});
+
+test('production composition exposes the client process guard activity', async t => {
+  const { ClientProcessGuard } = require('../../electron/services/client-modpacks/client-process-guard.cjs');
+  const f = fixture(t);
+  const composition = await createProductionModpackComposition(f.input);
+  t.after(() => composition.dispose());
+  await composition.initialize();
+  assert.deepEqual(composition.listActiveClientMutations(), []);
+  const original = ClientProcessGuard.prototype.listActiveMutations;
+  ClientProcessGuard.prototype.listActiveMutations = function listActiveMutations() {
+    return Object.freeze(['client-mutation:in-flight']);
+  };
+  try {
+    assert.deepEqual(composition.listActiveClientMutations(), ['client-mutation:in-flight']);
+  } finally {
+    ClientProcessGuard.prototype.listActiveMutations = original;
+  }
+});
+
 function controlledHashWorker() {
   const worker = new EventEmitter();
   const requests = [];

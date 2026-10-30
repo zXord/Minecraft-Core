@@ -7,6 +7,9 @@ const MANAGEMENT_INFO_MAX_BYTES = 8 * 1024 * 1024;
 const HOST_UNREACHABLE_REASON = 'host-unreachable';
 const UNREACHABLE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'EPIPE', 'ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL',
   'ETIMEDOUT', 'EHOSTUNREACH', 'EHOSTDOWN', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL']);
+// Set by an agent that hands a socket to the request only after connecting it (the
+// pinned management agent checks the certificate first, tls-utils.cjs).
+const PRECONNECTED_SOCKET = Symbol.for('minecraft-core.preconnected-socket');
 const fail = (code = 'CLIENT_PACK_UNAVAILABLE', reason) => {
   const error = new ModpackError(code, 'The management request could not be completed');
   // Non-enumerable, so serialized errors and public payloads never carry it.
@@ -16,6 +19,7 @@ const fail = (code = 'CLIENT_PACK_UNAVAILABLE', reason) => {
 
 // No redirect handling, remote error text, or raw dependency errors cross this boundary.
 // onProgress observes 'connecting', 'connected' (TCP, or the TLS handshake for https) and 'responded'.
+// A new connection is 'connecting' from dispatch, also while its agent still holds the socket; a reused one starts 'connected'.
 async function requestManagementJson(input, { method = 'GET', body, headers, agent, signal, timeoutMs = 10000, maxBytes = 262144, onProgress } = {}) {
   let url;
   try { url = new URL(input); } catch { throw fail(); }
@@ -62,14 +66,15 @@ async function requestManagementJson(input, { method = 'GET', body, headers, age
         });
       });
       request.on('socket', socket => {
-        if (request.reusedSocket) { progress('connected'); return; }
-        progress('connecting');
+        if (request.reusedSocket || socket[PRECONNECTED_SOCKET] === true) { progress('connected'); return; }
         socket.once(url.protocol === 'https:' ? 'secureConnect' : 'connect', () => { if (stage === 'connecting') progress('connected'); });
       });
       request.on('error', error => finish(fail(undefined, unreachable(error?.code))));
       if (signal?.aborted) { abort(); return; }
       request.end(body);
+      // The agent assigns a reused socket synchronously; the 'socket' event always comes later.
+      if (!request.reusedSocket) progress('connecting');
     } catch { finish(fail()); }
   });
 }
-module.exports = { requestManagementJson, MANAGEMENT_INFO_MAX_BYTES, HOST_UNREACHABLE_REASON };
+module.exports = { requestManagementJson, MANAGEMENT_INFO_MAX_BYTES, HOST_UNREACHABLE_REASON, PRECONNECTED_SOCKET };

@@ -5,7 +5,7 @@ const https = require('node:https');
 const net = require('node:net');
 const path = require('node:path');
 const selfsigned = require('selfsigned');
-const { requestManagementJson, MANAGEMENT_INFO_MAX_BYTES, HOST_UNREACHABLE_REASON } = require('../electron/services/management-session-transport.cjs');
+const { requestManagementJson, MANAGEMENT_INFO_MAX_BYTES, HOST_UNREACHABLE_REASON, PRECONNECTED_SOCKET } = require('../electron/services/management-session-transport.cjs');
 const { ManagementSessionBroker } = require('../electron/services/management-session-broker.cjs');
 async function fixture(t, handler) {
   const server = http.createServer(handler); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -139,6 +139,25 @@ test('progress is observed once per stage, reused sockets start connected and ob
   assert.deepEqual((await requestManagementJson(url, { ...options, agent, onProgress: stage => second.push(stage) })).body, { success: true });
   assert.deepEqual(first, ['connecting', 'connected', 'responded']); assert.deepEqual(second, ['connected', 'responded']);
   assert.deepEqual((await requestManagementJson(url, { ...options, onProgress: () => { throw new Error('observer failure'); } })).body, { success: true });
+});
+// The pinned management agent hands a socket to the request only after its handshake and certificate check.
+test('a request whose agent still holds the socket is connecting from dispatch', async () => {
+  class HoldingAgent extends http.Agent { createConnection() { return undefined; } }
+  const stages = [];
+  await assert.rejects(requestManagementJson('http://synthetic.invalid:8080/api/server/info', { ...options, timeoutMs: 40,
+    agent: new HoldingAgent(), onProgress: stage => stages.push(stage) }), unreachable);
+  assert.deepEqual(stages, ['connecting']);
+});
+test('a socket the agent connected before handing it over is connected, and a silent host was reached', async t => {
+  class ConnectedAgent extends http.Agent {
+    createConnection(connectOptions, callback) {
+      const socket = net.connect({ host: connectOptions.host, port: connectOptions.port }); socket.once('error', callback);
+      socket.once('connect', () => { socket.removeListener('error', callback); socket[PRECONNECTED_SOCKET] = true; callback(null, socket); });
+    }
+  }
+  const url = await fixture(t, () => {}); const agent = new ConnectedAgent(); t.after(() => agent.destroy()); const stages = [];
+  await assert.rejects(requestManagementJson(url, { ...options, timeoutMs: 300, agent, onProgress: stage => stages.push(stage) }), reached());
+  assert.deepEqual(stages, ['connecting', 'connected']);
 });
 test('real broker and default HTTP transport recover while exact saved config bytes stay unchanged', async t => {
   const methods = [], seed = 'a'.repeat(64), token = 'b'.repeat(64);

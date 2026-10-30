@@ -14,8 +14,14 @@ inspectorModule.createClientProcessInspector = () => async () => { deniedSystemP
 const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
 const { ModpackStateRepository } = require('../../electron/services/modpacks/state/modpack-state-repository.cjs');
 const { createClientPackComposition } = require('../../electron/bootstrap/create-client-pack-composition.cjs');
+const { clientPackManagementFields } = require('../../electron/services/client-modpacks/client-pack-management.cjs');
 const { createServerProcessRunner } = require('../../electron/services/server-process-runner.cjs');
 inspectorModule.createClientProcessInspector = originalInspectorFactory;
+
+const savedHttpConfig = Object.freeze({ serverProtocol: 'http', serverIp: 'saved.test', serverPort: '8443', clientId: 'remote-client',
+  clientName: 'Synthetic', inviteSecret: 'private', sessionToken: 'saved-token' });
+// A v26.6.1 host: success and no matching pack fields.
+const legacyHostInfo = async () => ({ statusCode: 200, body: { success: true } });
 
 // Independently hashed, hand-specified canonical identity for the fixture below;
 // never derive the expected fingerprint with serverPackFingerprint.
@@ -23,10 +29,14 @@ const fingerprint = 'a483152d67a62ce78f4bfb9fd2ee9846469060a21b9dc02a4111d31b880
 const unexpected = () => assert.fail('Status and asset listing must not acquire or prepare artifacts');
 
 async function fixture(t, { managed = true, missing = false, managedJar = false, client = false, readClientConfig,
-  processEvidenceFactory, managementSessionRequestJson } = {}) {
+  processEvidenceFactory, managementSessionRequestJson, serverAlias = false, clientFields = {}, getPinnedHttpsAgent,
+  clientConnectionCore, clock = { now: () => 0 } } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-client-composition-'));
   const serverPath = path.join(root, 'registered-server');
   fs.mkdirSync(serverPath);
+  // An alias registers the server through a junction to its real folder.
+  const registeredServerPath = serverAlias ? path.join(root, 'registered-server-link') : serverPath;
+  if (serverAlias) fs.symlinkSync(serverPath, registeredServerPath, 'junction');
   if (managedJar) { fs.mkdirSync(path.join(serverPath, 'mods')); fs.writeFileSync(path.join(serverPath, 'mods/expected.jar'), 'pack'); }
   let composition;
   t.after(async () => {
@@ -57,15 +67,17 @@ async function fixture(t, { managed = true, missing = false, managedJar = false,
   // The legacy summary is not an authority for managed status or release identity.
   fs.writeFileSync(path.join(serverPath, '.minecraft-core.json'), JSON.stringify({ modpackManaged: true, modpackVersion: 'wrong-summary-version', modpackReleaseId: '999' }));
   const workspaceRegistry = { createStagingOutput: unexpected, resolveOwnedWorkspace: unexpected, releaseOwner: unexpected };
-  const instances = [{ id: 'server-one', type: 'server', path: serverPath }];
+  const instances = [{ id: 'server-one', type: 'server', path: registeredServerPath }];
   const clientPath = path.join(root, 'registered-client');
-  if (client) { fs.mkdirSync(clientPath); instances.push({ id: 'local-client', type: 'client', path: clientPath }); }
+  if (client) { fs.mkdirSync(clientPath); instances.push({ id: 'local-client', type: 'client', path: clientPath, ...clientFields }); }
   const evidence = processEvidenceFactory ? await processEvidenceFactory({ root, serverPath, clientPath }) : {};
   composition = createClientPackComposition({
     userDataPath: path.join(root, 'app-data'),
     store: { get(key) { assert.equal(key, 'instances'); return instances; } },
     readClientConfig,
     managementSessionRequestJson,
+    getPinnedHttpsAgent,
+    clientConnectionCore,
     clientProcessInspector: async () => ({ complete: true, processes: [] }),
     ...evidence,
     clientDurableFsFactory: durableFsFactory,
@@ -92,10 +104,11 @@ async function fixture(t, { managed = true, missing = false, managedJar = false,
     archiveExtractor: { extractArchive: unexpected, materializer: { loadInspection: unexpected } },
     artifactDownloader: { downloadPart: unexpected }, artifactCache: { pathForSha256: unexpected },
     candidateHashService: { hashFile: unexpected, async dispose() {} },
-    reparseInspector: { async isReparsePoint() { return false; } }, randomUUID: crypto.randomUUID, clock: { now: () => 0 }
+    reparseInspector: { async isReparsePoint() { return false; } }, randomUUID: crypto.randomUUID, clock
   });
   await composition.initialize();
-  return { service: composition.companionService, composition, instances, clientPath, repositoryFs, serverPath, evidence };
+  return { service: composition.companionService, composition, instances, clientPath, repository, repositoryFs, serverPath,
+    registeredServerPath, evidence };
 }
 
 for (const provider of ['exact', 'absent', 'failed']) test(`evidence composition ${provider} server proof controls matching-client guarded launch`, async t => {
@@ -209,4 +222,131 @@ test('production composition only resolves registered server identities', async 
   const { service } = await fixture(t);
   await assert.rejects(service.getStatus({ serverId: 'unregistered-server' }), { code: 'INVALID_REQUEST' });
   await assert.rejects(service.listAssets({ serverId: 'unregistered-server' }), { code: 'INVALID_REQUEST' });
+});
+
+const junctionsOnly = { skip: process.platform !== 'win32' && 'directory junctions are Windows only' };
+
+test('a junction-registered unmanaged server reads as unmanaged for companions and management fields', junctionsOnly, async t => {
+  const f = await fixture(t, { missing: true, serverAlias: true });
+  assert.equal(await f.service.getStatus({ serverId: 'server-one' }), null);
+  assert.deepEqual(await clientPackManagementFields('server-one', serverId => f.service.getStatus({ serverId })), { clientModpack: null });
+  // Exactly what a server without modpack state answers.
+  await assert.rejects(f.service.listAssets({ serverId: 'server-one' }), { code: 'CLIENT_PACK_UNAVAILABLE' });
+  // The strict repository itself still refuses the alias.
+  assert.throws(() => f.repository.read(f.registeredServerPath), { code: 'INVALID_REQUEST' });
+});
+
+test('a managed server registered through a junction still fails closed with clientModpackError', junctionsOnly, async t => {
+  const f = await fixture(t, { serverAlias: true });
+  await assert.rejects(f.service.getStatus({ serverId: 'server-one' }), { code: 'INVALID_REQUEST' });
+  await assert.rejects(f.service.listAssets({ serverId: 'server-one' }), { code: 'INVALID_REQUEST' });
+  const fields = await clientPackManagementFields('server-one', serverId => f.service.getStatus({ serverId }));
+  assert.equal(fields.clientModpack, null);
+  assert.equal(fields.clientModpackError.code, 'CLIENT_PACK_UNAVAILABLE');
+});
+
+test('a pinless https client config takes the pin of its registered client (A36, A49)', async t => {
+  const registeredPin = Array.from({ length: 32 }, (_, index) => ((index * 37 + 11) % 256).toString(16).padStart(2, '0').toUpperCase()).join(':');
+  const pin = registeredPin.replaceAll(':', '').toLowerCase();
+  const agents = [];
+  const requests = [];
+  const f = await fixture(t, {
+    client: true,
+    clientFields: { serverIp: 'saved.test', serverPort: '8443', serverProtocol: 'https', managementCertFingerprint: registeredPin },
+    readClientConfig: async () => ({ ...savedHttpConfig, serverProtocol: 'https' }),
+    async getPinnedHttpsAgent(host, port, expected) {
+      agents.push([host, port, expected]);
+      return { pinnedTo: expected };
+    },
+    async managementSessionRequestJson(url, options) {
+      requests.push([url.href, options.agent?.pinnedTo]);
+      return { statusCode: 200, body: { success: true } };
+    }
+  });
+  const context = await f.composition.acquireLegacyManagementContext(f.clientPath);
+  assert.equal(context.managementCertFingerprint, pin);
+  assert.equal(context.sessionToken, 'saved-token');
+  assert.equal((await f.composition.managementSessionBroker.readServerInfo('local-client')).response.success, true);
+  assert.deepEqual(agents, [['saved.test', 8443, pin]]);
+  assert.deepEqual(requests, [['https://saved.test:8443/api/server/info', pin]]);
+});
+
+test('an injected connection core is used, and only its owner disposes the broker', async t => {
+  const { createClientConnectionCore } = require('../../electron/bootstrap/create-client-connection-core.cjs');
+  let instances = [];
+  const core = createClientConnectionCore({
+    store: { get: key => (key === 'instances' ? instances : null) },
+    clock: { now: () => 0 },
+    readClientConfig: async () => ({ ...savedHttpConfig }),
+    managementSessionRequestJson: legacyHostInfo
+  });
+  t.after(() => core.dispose());
+  const resolvedPaths = [];
+  const observedCore = Object.freeze({ ...core, async resolveClientByPath(value) {
+    resolvedPaths.push(value);
+    return core.resolveClientByPath(value);
+  } });
+  const f = await fixture(t, { client: true, clientConnectionCore: observedCore });
+  instances = f.instances;
+  assert.equal(f.composition.managementSessionBroker, core.managementSessionBroker);
+  assert.equal(f.composition.resolveClientByPath, observedCore.resolveClientByPath);
+  assert.equal(f.composition.acquireLegacyManagementContext, core.acquireLegacyManagementContext);
+  const launch = await f.composition.clientPackIntegration.beginManagedLaunch({ clientPath: f.clientPath });
+  await launch.abortBeforeSpawn();
+  assert.deepEqual(resolvedPaths, [f.clientPath]);
+  await f.composition.dispose();
+  assert.equal(core.managementSessionBroker.disposed, false, 'the core owner disposes its broker');
+  core.dispose();
+  core.dispose();
+  assert.equal(core.managementSessionBroker.disposed, true);
+
+  const own = await fixture(t, { client: true });
+  const ownBroker = own.composition.managementSessionBroker;
+  assert.notEqual(ownBroker, core.managementSessionBroker);
+  await own.composition.dispose();
+  assert.equal(ownBroker.disposed, true);
+});
+
+test('a client folder registered twice still resolves for launch and legacy reads (v26.6.1 parity)', async t => {
+  const f = await fixture(t, { client: true, readClientConfig: async () => ({ ...savedHttpConfig }),
+    managementSessionRequestJson: legacyHostInfo });
+  const expected = { clientId: 'local-client', clientPath: f.clientPath };
+  // A second registration of the same folder, listed first, under an id that sorts later.
+  f.instances.unshift({ id: 'zz-duplicate-client', type: 'client', path: f.clientPath });
+  assert.deepEqual(await f.composition.resolveClientByPath(f.clientPath), expected);
+  f.instances.reverse();
+  assert.deepEqual(await f.composition.resolveClientByPath(f.clientPath), expected, 'never chosen by array order');
+  const launch = await f.composition.clientPackIntegration.beginManagedLaunch({ clientPath: f.clientPath });
+  await launch.abortBeforeSpawn();
+  assert.equal((await f.composition.acquireLegacyManagementContext(f.clientPath)).sessionToken, 'saved-token');
+
+  if (process.platform === 'win32') {
+    // v26.6.1 re-added a folder picked with another spelling under the same id.
+    const respelled = f.clientPath.toUpperCase();
+    f.instances.push({ id: 'local-client', type: 'client', path: respelled });
+    const resolved = await f.composition.resolveClientByPath(f.clientPath);
+    assert.equal(resolved.clientId, 'local-client');
+    assert.equal(resolved.clientPath, [f.clientPath, respelled].sort()[0]);
+    f.instances.reverse();
+    assert.deepEqual(await f.composition.resolveClientByPath(f.clientPath), resolved);
+    const again = await f.composition.clientPackIntegration.beginManagedLaunch({ clientPath: f.clientPath });
+    await again.abortBeforeSpawn();
+  }
+
+  // One id registered for two different folders stays ambiguous.
+  f.instances.push({ id: 'local-client', type: 'client', path: path.join(path.dirname(f.clientPath), 'another-client') });
+  await assert.rejects(f.composition.resolveClientByPath(f.clientPath), { code: 'INVALID_REQUEST' });
+});
+
+test('local client content edits bound the host requirement read with the composition clock', async t => {
+  const timeouts = [];
+  const f = await fixture(t, { client: true, clock: { now: () => 1_000_000 }, readClientConfig: async () => ({ ...savedHttpConfig }),
+    async managementSessionRequestJson(_url, options) {
+      timeouts.push(options.timeoutMs);
+      return { statusCode: 200, body: { success: true } };
+    } });
+  assert.equal(await f.composition.clientPackIntegration.runLocalMutation({ clientId: 'local-client', clientPath: f.clientPath },
+    () => 'local edit'), 'local edit');
+  assert.deepEqual(timeouts, [3000]);
+  assert.deepEqual(f.composition.listActiveMutations(), []);
 });

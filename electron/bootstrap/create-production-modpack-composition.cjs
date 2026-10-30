@@ -41,7 +41,7 @@ const {
   createCompositeInstanceResolver
 } = require('../services/modpacks/planning/server-destination-reservation-service.cjs');
 const { ProductionModpackSourceResolver } = require('../services/modpacks/providers/production-source-resolver.cjs');
-const { ModpackStateRepository } = require('../services/modpacks/state/modpack-state-repository.cjs');
+const { ModpackStateRepository, createModpackStateObserver } = require('../services/modpacks/state/modpack-state-repository.cjs');
 const { validateServerPorts } = require('../utils/port-validator.cjs');
 const { createModpackPaths } = require('../services/modpacks/paths.cjs');
 
@@ -321,8 +321,12 @@ async function createProductionModpackComposition(input = {}) {
       destinationReservations: destinationReservationService
     });
     const stateRepository = stateRepositoryRouter({ durableFsFactory, fsApi: fsSync, clock, userDataPath });
+    // Read-only classification (state display, policy and companion reads). It
+    // answers null for a server whose modpack state is proven absent without the
+    // parent-scoped strict router; every lifecycle path keeps the strict repository.
+    const stateObserver = createModpackStateObserver({ repository: stateRepository, fsApi: fsSync });
     clientPacks = require('./create-client-pack-composition.cjs').createClientPackComposition({
-      ...input, stateRepository, sourceResolver, artifactAcquisition, archiveInspector, archiveExtractor,
+      ...input, stateRepository, stateObserver, sourceResolver, artifactAcquisition, archiveInspector, archiveExtractor,
       workspaceRegistry, candidateHashService, reparseInspector
     });
     const snapshotServer = createProductionServerSnapshot({ fsApi: fsSync, reparseInspector, stateRepository });
@@ -590,6 +594,7 @@ async function createProductionModpackComposition(input = {}) {
         return { instanceId };
       },
       stateRepository,
+      stateObserver,
       stateEventSink: state => nativeNotificationBridge.publishStateChanged(state),
       outcomeActionIssuer: lifecycleOutcomeActionIssuer,
       assertAdmission,
@@ -713,6 +718,7 @@ async function createProductionModpackComposition(input = {}) {
       managementSessionBroker: clientPacks.managementSessionBroker,
       resolveClientByPath: clientPacks.resolveClientByPath,
       acquireLegacyManagementContext: clientPacks.acquireLegacyManagementContext,
+      listActiveClientMutations: clientPacks.listActiveMutations,
       providers,
       artifactAcquisition,
       workspaceRegistry,
@@ -723,6 +729,7 @@ async function createProductionModpackComposition(input = {}) {
       planningAdapter,
       planRegistry,
       stateRepository,
+      stateObserver,
       mutationRuntime,
       localArtifactSource,
       destinationReservationService,

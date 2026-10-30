@@ -18,6 +18,7 @@ function tracedGraph(markStartupTrace) {
 }
 
 const {
+  channelOperationId,
   createProductionDurableFsFactory,
   createModpackServiceGraph,
   deriveRecoveryRuntimeTuple,
@@ -27,6 +28,49 @@ const { createMainBootstrap } = require('../../electron/bootstrap/create-main-bo
 const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
 const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
 const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
+const { createModpackStateObserver } = require('../../electron/services/modpacks/state/modpack-state-repository.cjs');
+const { isLegacyInstanceConfigFs } = require('../../electron/utils/instance-config-fs.cjs');
+const { updateServerConfig, writeServerConfig } = require('../../electron/utils/config-manager.cjs');
+const { WindowsDurableFsClient } = require('../../electron/utils/windows-durable-fs-client.cjs');
+
+const EMPTY_RECOVERY_SERVICES = Object.freeze({
+  registry: { async initialize() { return { records: [], corrupt: [], blocks: [], globalBlock: false }; } },
+  recoveryService: { async recoverAll() { return { recovered: [], unresolved: [] }; } },
+  runtimeVerifier: { async verifyBeforeRecovery() { return { quiescent: true }; } }
+});
+
+// A composition whose policy hooks answer like an unmanaged server: the observer
+// reads no modpack state and every destination is free of client packs.
+function unmanagedPolicyComposition(overrides = {}) {
+  return fakeModpackComposition({
+    stateObserver: { read: () => null, listHistory: () => ({ items: [], nextCursor: null }) },
+    stateRepository: { read() { assert.fail('policy classification reads through the state observer'); } },
+    clientPackIntegration: { async assertServerDestination() {} },
+    ...overrides
+  });
+}
+
+function addModpackEvidence(serverPath) {
+  fs.mkdirSync(path.join(serverPath, '.minecraft-core-state'), { recursive: true });
+  fs.writeFileSync(path.join(serverPath, '.minecraft-core-state', 'modpack.json'), '{}\n');
+}
+
+function renameDurableFsFactory(onCall, prefix) {
+  let sequence = 0;
+  return allowedRoots => {
+    onCall([...allowedRoots]);
+    return createDurableFs({
+      fsApi: fs,
+      durableClient: {
+        flushDirectory() {},
+        moveWriteThrough(sourcePath, destinationPath) { fs.renameSync(sourcePath, destinationPath); },
+        replaceFileWriteThrough(sourcePath, destinationPath) { fs.renameSync(sourcePath, destinationPath); }
+      },
+      allowedRoots,
+      tempNameFactory: () => `${prefix}-${++sequence}`
+    });
+  };
+}
 
 test('production durable helper state is rooted beneath the explicit app user-data directory', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-helper-root-'));
@@ -540,14 +584,17 @@ test('startup recovery composes and initializes the complete modpack IPC graph b
     recoveryService: { async recoverAll() { return { recovered: [], unresolved: [] }; } },
     runtimeVerifier: { async verifyBeforeRecovery() { return { quiescent: true }; } }
   };
+  const clientPath = path.join(os.tmpdir(), 'minecraft-core-service-graph-client');
+  const instances = [{ id: 'local', name: 'Local', type: 'client', path: clientPath }];
+  const savedConfig = { serverProtocol: 'http', serverIp: 'saved.test', serverPort: '8443', clientId: 'remote-client',
+    clientName: 'Synthetic', inviteSecret: 'private', sessionToken: 'legacy-token' };
+  let connectionCore = null;
   const composition = fakeModpackComposition({
     providers: composedProviders,
-    managementSessionBroker: { async acquire() { return { token: 'synthetic' }; }, async acquireWithProvenance() { return { snapshot: { token: 'synthetic' }, registrationAttempted: false }; } },
-    async resolveClientByPath() { return { clientId: 'local' }; },
-    async acquireLegacyManagementContext(value, options) {
-      assert.equal(value, 'synthetic-client'); assert.deepEqual(options, { deadline: 123 });
-      return { sessionToken: 'legacy-token', baseOrigin: 'https://saved.test', assertCurrent: async () => {} };
-    },
+    // A composition's own connection services are never exposed by the graph.
+    managementSessionBroker: { marker: 'composition-broker' },
+    async resolveClientByPath() { assert.fail('the graph resolves clients through its connection core'); },
+    async acquireLegacyManagementContext() { assert.fail('the graph acquires legacy contexts through its connection core'); },
     async initialize() { order.push('modpacks:initialize'); },
     releaseMonitor: {
       async checkAll() {}, async checkOne() {},
@@ -558,16 +605,22 @@ test('startup recovery composes and initializes the complete modpack IPC graph b
       start() { order.push('notifications:start'); },
       stop() { order.push('notifications:stop'); }
     },
-    dispose() { order.push('modpacks:dispose'); }
+    dispose() { order.push(`modpacks:dispose broker-disposed=${connectionCore.managementSessionBroker.disposed}`); }
   });
   let factoryCalls = 0;
   const { graph } = graphFixture({
+    store: { get: key => (key === 'instances' ? instances : null) },
+    async readClientConfig(value) {
+      assert.equal(value, clientPath);
+      return { ...savedConfig };
+    },
     startup: {
       afterWindowCreated(window, graphValue) {
         order.push('startup:after-window');
         assert.equal(window, windowToken);
         assert.equal(graphValue, graph);
-      }
+      },
+      dispose() { order.push(`startup:dispose broker-disposed=${connectionCore.managementSessionBroker.disposed}`); }
     },
     async recoveryFactory() { return recoveryServices; },
     async modpackFactory(input) {
@@ -575,18 +628,32 @@ test('startup recovery composes and initializes the complete modpack IPC graph b
       order.push('modpacks:compose');
       assert.equal(input.rawRecoveryServices, recoveryServices);
       assert.equal(typeof input.instanceResolver.resolveInstance, 'function');
+      connectionCore = input.clientConnectionCore;
       return composition;
     }
   });
 
+  // The connection core is built with the graph, so client sessions and legacy
+  // management reads work before (and without) the modpack composition.
   assert.equal(graph.modpacks.lifecycleService, null);
+  const broker = graph.modpacks.managementSessionBroker;
+  assert.equal(typeof broker?.acquireWithProvenance, 'function');
+  assert.deepEqual(await graph.modpacks.resolveClientByPath(clientPath), { clientId: 'local', clientPath: path.resolve(clientPath) });
+  await assert.rejects(graph.modpacks.resolveClientByPath(path.join(clientPath, 'unregistered')), { code: 'INVALID_REQUEST' });
+  assert.equal(graph.clientPackLaunchOptions.acquireLegacyManagementContext, graph.modpacks.acquireLegacyManagementContext);
+  const early = await graph.clientPackLaunchOptions.acquireLegacyManagementContext(clientPath, { deadline: 1_750_000_005_000 });
+  assert.equal(early.sessionToken, 'legacy-token'); assert.equal(early.baseOrigin, 'http://saved.test:8443');
+
   await graph.startup.initializeRecovery(graph);
   assert.equal(factoryCalls, 1);
   assert.equal(graph.modpacks.lifecycleService, composition.lifecycleService);
-  assert.equal((await graph.modpacks.managementSessionBroker.acquire('local')).token, 'synthetic');
-  assert.equal((await graph.modpacks.resolveClientByPath('synthetic')).clientId, 'local');
-  const legacy = await graph.clientPackLaunchOptions.acquireLegacyManagementContext('synthetic-client', { deadline: 123 });
-  assert.equal(legacy.sessionToken, 'legacy-token'); assert.equal(legacy.baseOrigin, 'https://saved.test');
+  assert.equal(connectionCore.managementSessionBroker, broker);
+  assert.equal(graph.modpacks.managementSessionBroker, broker);
+  assert.equal(graph.modpacks.resolveClientByPath, connectionCore.resolveClientByPath);
+  assert.equal(graph.modpacks.acquireLegacyManagementContext, connectionCore.acquireLegacyManagementContext);
+  assert.equal(graph.clientPackLaunchOptions.acquireLegacyManagementContext, connectionCore.acquireLegacyManagementContext);
+  const legacy = await graph.clientPackLaunchOptions.acquireLegacyManagementContext(clientPath, { deadline: 1_750_000_005_000 });
+  assert.equal(legacy.sessionToken, 'legacy-token'); assert.equal(legacy.baseOrigin, 'http://saved.test:8443');
   assert.equal(graph.modpacks.providers, composedProviders);
   assert.equal(graph.modpacks.localArtifactSource, composition.localArtifactSource);
   assert.equal(graph.modpacks.destinationReservationService, composition.destinationReservationService);
@@ -600,7 +667,23 @@ test('startup recovery composes and initializes the complete modpack IPC graph b
   await graph.startup.afterWindowCreated?.(windowToken, graph);
   assert.deepEqual(order.slice(-3), ['startup:after-window', 'notifications:start', 'monitor:start']);
   await graph.startup.dispose?.(graph);
-  assert.deepEqual(order.slice(-3), ['monitor:stop', 'notifications:stop', 'modpacks:dispose']);
+  // The connection core outlives everything that may still use it and closes last.
+  assert.deepEqual(order.slice(-4), ['monitor:stop', 'notifications:stop', 'modpacks:dispose broker-disposed=false',
+    'startup:dispose broker-disposed=false']);
+  assert.equal(broker.disposed, true);
+  await assert.rejects(graph.modpacks.acquireLegacyManagementContext(clientPath), { code: 'CANCELLED' });
+});
+
+test('service graph disposes its connection core even when composition disposal fails', async () => {
+  const failure = new Error('composition disposal failed');
+  const { graph } = graphFixture({
+    async recoveryFactory() { return EMPTY_RECOVERY_SERVICES; },
+    async modpackFactory() { return fakeModpackComposition({ async dispose() { throw failure; } }); }
+  });
+  await graph.startup.initializeRecovery(graph);
+  const broker = graph.modpacks.managementSessionBroker;
+  await assert.rejects(graph.startup.dispose(graph), error => error === failure);
+  assert.equal(broker.disposed, true);
 });
 
 test('disabled native notifications withhold the OS adapter while preserving persistent modpack notifications', async () => {
@@ -750,7 +833,7 @@ test('service graph cache publication cannot complete before the production dura
   assert.deepEqual(requestedRoots, [[path.resolve(userDataPath)]]);
 });
 
-test('service graph gives the production coordinator exact-root revision durability', async (t) => {
+test('service graph writes configs and revisions of unmanaged servers without the strict writer; evidence gets the exact root', async (t) => {
   const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-graph-durable-'));
   t.after(() => fs.rmSync(serverPath, { recursive: true, force: true }));
   const configPath = path.join(serverPath, '.minecraft-core.json');
@@ -763,55 +846,323 @@ test('service graph gives the production coordinator exact-root revision durabil
     }
   };
   const requestedRoots = [];
-  let sequence = 0;
+  const strictFactory = renameDurableFsFactory(roots => requestedRoots.push(roots), 'graph-revision');
+  let compositionInput = null;
   const { graph } = graphFixture({
     coordinator: undefined,
     serverMutationPolicy: undefined,
     store,
-    async recoveryFactory() { return {
-      registry: { async initialize() { return { records: [], corrupt: [], blocks: [], globalBlock: false }; } },
-      recoveryService: { async recoverAll() { return { recovered: [], unresolved: [] }; } },
-      runtimeVerifier: { async verifyBeforeRecovery() { return { quiescent: true }; } }
-    }; },
-    async modpackFactory() { return fakeModpackComposition({
-      stateRepository: { read: () => null },
-      clientPackIntegration: { async assertServerDestination() {} }
-    }); },
-    durableFsFactory(allowedRoots) {
-      requestedRoots.push([...allowedRoots]);
-      return createDurableFs({
-        fsApi: fs,
-        durableClient: {
-          flushDirectory() {},
-          moveWriteThrough(sourcePath, destinationPath) {
-            fs.renameSync(sourcePath, destinationPath);
-          },
-          replaceFileWriteThrough(sourcePath, destinationPath) {
-            fs.renameSync(sourcePath, destinationPath);
-          }
-        },
-        allowedRoots,
-        tempNameFactory: () => `graph-revision-${++sequence}`
-      });
-    }
+    async recoveryFactory() { return EMPTY_RECOVERY_SERVICES; },
+    async modpackFactory(input) {
+      compositionInput = input;
+      return unmanagedPolicyComposition();
+    },
+    durableFsFactory: strictFactory
   });
   await graph.startup.initializeRecovery(graph);
+  // Modpack lifecycle paths keep the strict production writer.
+  assert.equal(compositionInput.durableFsFactory, strictFactory);
+  assert.notEqual(graph.coordinator.durableFsFactory, strictFactory);
+  assert.equal(isLegacyInstanceConfigFs(graph.coordinator.durableFsFactory([serverPath])), true);
+  assert.deepEqual(requestedRoots, []);
   const saveDisabledMods = graph.serverMutationPolicy.wrapHandler(
     'save-disabled-mods',
     async () => ({ success: true })
   );
 
   await saveDisabledMods({ sender: { id: 1 } }, serverPath, []);
-
-  const persisted = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  assert.equal(persisted.contentRevision, 1);
-  assert.equal(persisted.preserved, true);
-  assert.deepEqual(requestedRoots, [[serverPath]]);
+  writeServerConfig(serverPath, { maxRam: 6 });
+  updateServerConfig(serverPath, current => ({ ...current, port: 25570 }));
   const startLease = await graph.coordinator.acquireStart(
     { instanceId: 'server-durable', serverPath },
     { operation: 'start-server', operationId: 'start-after-durable-write', parentMutationLease: null }
   );
+  startLease.markDirty();
+  startLease.markRunning({ pid: 4242 });
   assert.equal(startLease.release(), true);
+
+  const persisted = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.equal(persisted.contentRevision, 2);
+  assert.equal(persisted.preserved, true);
+  assert.equal(persisted.maxRam, 6);
+  assert.equal(persisted.port, 25570);
+  assert.deepEqual(requestedRoots, [], 'a server without modpack evidence never needs the strict writer');
+
+  addModpackEvidence(serverPath);
+  await saveDisabledMods({ sender: { id: 1 } }, serverPath, []);
+  assert.deepEqual(requestedRoots, [[serverPath]]);
+  assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).contentRevision, 3);
+  writeServerConfig(serverPath, { maxRam: 8 });
+  assert.deepEqual(requestedRoots, [[serverPath], [path.resolve(serverPath)]]);
+  assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).maxRam, 8);
+});
+
+test('unmanaged config writes and revision bumps start no ArchiveWorker through the wired production factory', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-graph-worker-spawns-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const userDataPath = path.join(root, 'user-data');
+  const serverPath = path.join(root, 'server');
+  fs.mkdirSync(userDataPath);
+  fs.mkdirSync(serverPath);
+  const runtimeRoots = { resourcesPath: root, runtimeRoot: root, isPackaged: false, arch: 'x64' };
+  const nativeClients = [];
+  const spawns = [];
+  const spawnSpy = (file, args) => {
+    spawns.push([file, ...args]);
+    throw Object.assign(new Error('the spawn spy refuses to start ArchiveWorker.exe'), { code: 'EACCES' });
+  };
+  const productionFactory = createProductionDurableFsFactory({
+    fsSync: fs,
+    fsPromises: fs.promises,
+    randomUUID: crypto.randomUUID,
+    runtimeRoots,
+    userDataPath,
+    durableClientFactory(options) {
+      nativeClients.push([...options.allowedRoots]);
+      return new WindowsDurableFsClient({ ...options, verifyWorker() {}, spawnSync: spawnSpy, spawn: spawnSpy });
+    }
+  });
+  const store = { get: key => (key === 'instances' ? [{ id: 'server-spawn', name: 'Spawn', type: 'server', path: serverPath }] : null) };
+  const { graph } = graphFixture({
+    userDataPath,
+    runtimeRoots,
+    randomUUID: crypto.randomUUID,
+    coordinator: undefined,
+    serverMutationPolicy: undefined,
+    store,
+    durableFsFactory: productionFactory,
+    async recoveryFactory() { return EMPTY_RECOVERY_SERVICES; },
+    async modpackFactory() { return unmanagedPolicyComposition(); }
+  });
+  await graph.startup.initializeRecovery(graph);
+
+  writeServerConfig(serverPath, { maxRam: 6 });
+  updateServerConfig(serverPath, current => ({ ...current, maxRam: 7 }));
+  await graph.serverMutationPolicy.wrapHandler('save-disabled-mods', async () => ({ success: true }))(
+    { sender: { id: 1 } }, serverPath, []);
+  const startLease = await graph.coordinator.acquireStart(
+    { instanceId: 'server-spawn', serverPath },
+    { operation: 'start-server', operationId: 'start-without-worker', parentMutationLease: null }
+  );
+  startLease.markDirty();
+  startLease.markRunning({ pid: 4243 });
+  assert.equal(startLease.release(), true);
+
+  const persisted = JSON.parse(fs.readFileSync(path.join(serverPath, '.minecraft-core.json'), 'utf8'));
+  assert.equal(persisted.maxRam, 7);
+  assert.equal(persisted.contentRevision, 2);
+  assert.deepEqual(nativeClients, []);
+  assert.deepEqual(spawns, []);
+  assert.deepEqual(fs.readdirSync(serverPath).filter(name => name.includes('minecraft-core-tmp')), []);
+
+  // Control: a server with modpack evidence reaches the native writer, which is
+  // the only path that starts ArchiveWorker.exe.
+  addModpackEvidence(serverPath);
+  assert.throws(() => writeServerConfig(serverPath, { maxRam: 9 }), { code: 'COMMIT_FAILED' });
+  assert.deepEqual(nativeClients, [[path.resolve(serverPath)]]);
+  assert.ok(spawns.length > 0);
+  assert.ok(spawns.every(([file]) => path.basename(file) === 'ArchiveWorker.exe'));
+});
+
+test('the graph policy gives colon channels valid coordinator operation ids', async (t) => {
+  const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-graph-operation-ids-'));
+  t.after(() => fs.rmSync(serverPath, { recursive: true, force: true }));
+  const coordinator = new ServerMutationCoordinator({ readContentRevision: () => 0, bumpContentRevision: () => 1 });
+  coordinator.completeStartupRecovery([]);
+  const operationIds = [];
+  for (const method of ['runMutation', 'runManyMutations']) {
+    const original = coordinator[method].bind(coordinator);
+    coordinator[method] = (selectors, options, work) => {
+      operationIds.push(options.operationId);
+      return original(selectors, options, work);
+    };
+  }
+  const store = { get: key => (key === 'instances' ? [{ id: 'server-ids', name: 'Ids', type: 'server', path: serverPath }] : null) };
+  const { graph } = graphFixture({
+    coordinator,
+    serverMutationPolicy: undefined,
+    store,
+    async recoveryFactory() { return EMPTY_RECOVERY_SERVICES; },
+    async modpackFactory() { return unmanagedPolicyComposition(); }
+  });
+  await graph.startup.initializeRecovery(graph);
+  const handled = [];
+  for (const [channel, payload] of [
+    ['backups:delete', { serverPath, name: 'world-backup.zip' }],
+    ['mod-watch:add', { serverPath, projectId: 'fixture-project' }]
+  ]) {
+    const wrapped = graph.serverMutationPolicy.wrapHandler(channel, async () => {
+      handled.push(channel);
+      return { success: true };
+    });
+    assert.deepEqual(await wrapped({ sender: { id: 1 } }, payload), { success: true });
+  }
+  assert.deepEqual(handled, ['backups:delete', 'mod-watch:add']);
+  assert.equal(operationIds.length, 2);
+  assert.match(operationIds[0], /^backups-delete-/);
+  assert.match(operationIds[1], /^mod-watch-add-/);
+  for (const operationId of operationIds) assert.match(operationId, /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
+});
+
+test('the graph builds writer operation ids the coordinator accepts before any policy sanitising', () => {
+  const uuid = '0f8e2a4c-6b1d-4e3f-9a7b-5c2d1e0f3a4b';
+  const ids = ['backups:delete', 'mod-watch:add', 'save-server-settings', 'server.properties/write']
+    .map(channel => channelOperationId(channel, () => uuid));
+  assert.deepEqual(ids, [
+    `backups-delete-${uuid}`,
+    `mod-watch-add-${uuid}`,
+    `save-server-settings-${uuid}`,
+    `server-properties-write-${uuid}`
+  ]);
+  for (const id of ids) assert.match(id, /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
+});
+
+test('the graph classifies servers through the modpack state observer', async (t) => {
+  const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-graph-observer-'));
+  t.after(() => fs.rmSync(serverPath, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(serverPath, 'addon.jar'), 'addon');
+  const store = { get: key => (key === 'instances' ? [{ id: 'server-observed', name: 'Observed', type: 'server', path: serverPath }] : null) };
+  const stateObserver = { read: () => null, listHistory: () => ({ items: [], nextCursor: null }) };
+  // The strict repository refuses folders the observer can still classify.
+  const stateRepository = { read() { throw new ModpackError('INVALID_REQUEST', 'The strict repository refuses this folder'); } };
+  const graphFor = composition => {
+    const coordinator = new ServerMutationCoordinator({ readContentRevision: () => 0, bumpContentRevision: () => 1 });
+    coordinator.completeStartupRecovery([]);
+    return graphFixture({
+      coordinator,
+      serverMutationPolicy: undefined,
+      store,
+      async recoveryFactory() { return EMPTY_RECOVERY_SERVICES; },
+      async modpackFactory() { return composition; }
+    }).graph;
+  };
+
+  const graph = graphFor(fakeModpackComposition({ stateObserver, stateRepository,
+    clientPackIntegration: { async assertServerDestination() {} } }));
+  assert.equal(graph.modpacks.stateObserver, null);
+  await graph.startup.initializeRecovery(graph);
+  assert.equal(graph.modpacks.stateObserver, stateObserver);
+  assert.equal(graph.modpacks.stateRepository, stateRepository);
+  const deleteMod = graph.serverMutationPolicy.wrapHandler('delete-mod', async () => true);
+  assert.equal(await deleteMod({ sender: { id: 1 } }, serverPath, 'addon.jar'), true);
+
+  // A composition without an observer keeps the strict read, which fails closed.
+  const strictOnly = graphFor(fakeModpackComposition({ stateRepository, clientPackIntegration: { async assertServerDestination() {} } }));
+  await strictOnly.startup.initializeRecovery(strictOnly);
+  assert.equal(strictOnly.modpacks.stateObserver, stateRepository);
+  await assert.rejects(strictOnly.serverMutationPolicy.wrapHandler('delete-mod', async () => assert.fail('strict refusal'))(
+    { sender: { id: 1 } }, serverPath, 'addon.jar'), { code: 'MANAGED_MOD_EDIT_BLOCKED' });
+});
+
+test('a junction-registered unmanaged server keeps its mod edits and its next start without the strict writer', {
+  skip: process.platform !== 'win32' && 'directory junctions are Windows only'
+}, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-graph-junction-server-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const realServer = path.join(root, 'real-server');
+  fs.mkdirSync(realServer);
+  fs.writeFileSync(path.join(realServer, 'addon.jar'), 'addon');
+  fs.writeFileSync(path.join(realServer, '.minecraft-core.json'), JSON.stringify({ contentRevision: 4 }));
+  const serverPath = path.join(root, 'server-junction');
+  try {
+    fs.symlinkSync(realServer, serverPath, 'junction');
+  } catch (error) {
+    t.skip(`directory junctions are unavailable on this host: ${error.code}`);
+    return;
+  }
+  const strictRoots = [];
+  // Like production, the strict writer refuses a root that contains a reparse point.
+  const strictFactory = roots => {
+    strictRoots.push([...roots]);
+    throw new ModpackError('RECOVERY_REQUIRED', 'Durable filesystem roots cannot contain a reparse point');
+  };
+  const strictRepository = {
+    read() { throw new ModpackError('INVALID_REQUEST', 'The strict repository refuses a junction'); },
+    listHistory() { throw new ModpackError('INVALID_REQUEST', 'The strict repository refuses a junction'); }
+  };
+  const store = { get: key => (key === 'instances' ? [{ id: 'server-junction', name: 'Junction', type: 'server', path: serverPath }] : null) };
+  const { graph } = graphFixture({
+    coordinator: undefined,
+    serverMutationPolicy: undefined,
+    store,
+    durableFsFactory: strictFactory,
+    async recoveryFactory() { return EMPTY_RECOVERY_SERVICES; },
+    async modpackFactory() {
+      return fakeModpackComposition({
+        stateObserver: createModpackStateObserver({ repository: strictRepository, fsApi: fs }),
+        stateRepository: strictRepository,
+        clientPackIntegration: { async assertServerDestination() {} }
+      });
+    }
+  });
+  await graph.startup.initializeRecovery(graph);
+  const deleteMod = graph.serverMutationPolicy.wrapHandler('delete-mod', async (_event, folder, fileName) => {
+    fs.unlinkSync(path.join(folder, fileName));
+    return true;
+  });
+
+  assert.equal(await deleteMod({ sender: { id: 1 } }, serverPath, 'addon.jar'), true);
+  assert.equal(fs.existsSync(path.join(realServer, 'addon.jar')), false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(realServer, '.minecraft-core.json'), 'utf8')).contentRevision, 5);
+  const startLease = await graph.coordinator.acquireStart(
+    { instanceId: 'server-junction', serverPath },
+    { operation: 'start-server', operationId: 'start-junction-server', parentMutationLease: null }
+  );
+  assert.equal(startLease.release(), true);
+  assert.deepEqual(strictRoots, []);
+});
+
+test('the graph exposes the client process guard activity for the update guard', async () => {
+  const { graph } = graphFixture({
+    async recoveryFactory() { return EMPTY_RECOVERY_SERVICES; },
+    async modpackFactory() {
+      return fakeModpackComposition({ listActiveClientMutations: () => Object.freeze(['client-mutation:fixture']) });
+    }
+  });
+  assert.equal(graph.modpacks.listActiveClientMutations, null);
+  await graph.startup.initializeRecovery(graph);
+  assert.deepEqual(graph.modpacks.listActiveClientMutations(), ['client-mutation:fixture']);
+});
+
+test('runtime roots reached through a junction use their canonical drive path; a case-only difference keeps the given spelling', {
+  skip: process.platform !== 'win32' && 'drive-letter runtime roots are Windows only'
+}, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-runtime-roots-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const install = path.join(base, 'install');
+  fs.mkdirSync(install);
+  const canonical = fs.realpathSync.native(install);
+  const linked = path.join(base, 'linked-install');
+  try {
+    fs.symlinkSync(install, linked, 'junction');
+  } catch (error) {
+    t.skip(`directory junctions are unavailable on this host: ${error.code}`);
+    return;
+  }
+  let compositionInput = null;
+  const junctioned = graphFixture({
+    runtimeRoots: { resourcesPath: linked, runtimeRoot: linked, isPackaged: false, arch: 'x64' },
+    async recoveryFactory() { return EMPTY_RECOVERY_SERVICES; },
+    async modpackFactory(input) {
+      compositionInput = input;
+      return fakeModpackComposition();
+    }
+  }).graph;
+  assert.equal(junctioned.runtimeRoots.resourcesPath, canonical);
+  assert.equal(junctioned.runtimeRoots.runtimeRoot, canonical);
+  await junctioned.startup.initializeRecovery(junctioned);
+  assert.equal(compositionInput.runtimeRoots, junctioned.runtimeRoots);
+  assert.equal(compositionInput.clientWorkerDurableConfig.workerPath,
+    path.join(canonical, 'vendor', 'archive-worker', 'x64', 'ArchiveWorker.exe'));
+
+  const caseVariant = canonical.replace(/[a-z]/g, letter => letter.toUpperCase());
+  assert.notEqual(caseVariant, canonical);
+  assert.equal(fs.realpathSync.native(caseVariant), canonical);
+  const caseOnly = graphFixture({
+    runtimeRoots: { resourcesPath: caseVariant, runtimeRoot: caseVariant, isPackaged: false, arch: 'x64' }
+  }).graph;
+  assert.equal(caseOnly.runtimeRoots.resourcesPath, caseVariant);
+  assert.equal(caseOnly.runtimeRoots.runtimeRoot, caseVariant);
 });
 
 test('service graph preserves explicit provider adapters instead of constructing hidden globals', () => {

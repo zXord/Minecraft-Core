@@ -33,12 +33,15 @@ const { createWindowsBootSequenceProvider } = require('../services/client-modpac
 const { RestorePointService, normalizeMetadata } = require('../services/modpack-lifecycle/restore-point-service.cjs');
 const { establishStartupRecoveryBoundary } = require('../services/modpack-lifecycle/startup-recovery-bootstrap.cjs');
 const { createVerifiedRestoreExtractor } = require('../services/modpack-lifecycle/verified-restore-extractor.cjs');
+const { inspectFolderEvidence } = require('../services/modpacks/instance-ownership.cjs');
 const { createDurableFs } = require('../utils/durable-fs.cjs');
+const { createInstanceConfigFsFactory, createLegacyInstanceConfigFs } = require('../utils/instance-config-fs.cjs');
 const {
   configureServerConfigDurableFsFactory,
   readServerConfig
 } = require('../utils/config-manager.cjs');
 const instanceContext = require('../utils/instance-context.cjs');
+const { createClientConnectionCore } = require('./create-client-connection-core.cjs');
 const { WindowsDurableFsClient } = require('../utils/windows-durable-fs-client.cjs');
 const { isNetworkAccess } = require('../utils/server-network-properties.cjs');
 const { getRequiredJavaVersion } = require('../services/minecraft-launcher/utils.cjs');
@@ -53,6 +56,28 @@ function absoluteDirectory(value, name) {
 function requireFunction(value, name) {
   if (typeof value !== 'function') throw new TypeError(`${name} must be a function`);
   return value;
+}
+
+// Worker verification refuses reparse points, so an install reached through a
+// junction, symlink, SUBST drive or 8.3 short name uses its canonical drive-letter
+// path. A path that differs from it only in letter case keeps the given spelling.
+function canonicalRuntimeRoot(value, fsSync) {
+  let canonical;
+  try {
+    canonical = fsSync.realpathSync.native(value);
+  } catch {
+    return value;
+  }
+  if (typeof canonical !== 'string' || !/^[A-Za-z]:[\\/]/u.test(canonical) ||
+      canonical.toLocaleLowerCase('en-US') === value.toLocaleLowerCase('en-US')) return value;
+  const resolved = path.resolve(canonical);
+  return resolved === path.parse(resolved).root ? value : resolved;
+}
+
+// Coordinator operation ids allow only letters, digits, '_' and '-'; channels such
+// as 'backups:delete' and 'mod-watch:add' contain ':'.
+function channelOperationId(channel, randomUUID) {
+  return `${channel.replace(/[^A-Za-z0-9_-]/g, '-')}-${randomUUID()}`;
 }
 
 function freezeRecord(value) {
@@ -581,11 +606,12 @@ function createModpackServiceGraph(deps = {}) {
   }
 
   const userDataPath = absoluteDirectory(deps.userDataPath || app.getPath?.('userData'), 'userData');
+  const fsSync = deps.fsSync || fs;
   const suppliedRoots = deps.runtimeRoots || {};
   const defaultRuntimeRoot = path.resolve(__dirname, '..', '..');
   const runtimeRoots = Object.freeze({
-    resourcesPath: absoluteDirectory(suppliedRoots.resourcesPath || process.resourcesPath || defaultRuntimeRoot, 'resourcesPath'),
-    runtimeRoot: absoluteDirectory(suppliedRoots.runtimeRoot || defaultRuntimeRoot, 'runtimeRoot'),
+    resourcesPath: canonicalRuntimeRoot(absoluteDirectory(suppliedRoots.resourcesPath || process.resourcesPath || defaultRuntimeRoot, 'resourcesPath'), fsSync),
+    runtimeRoot: canonicalRuntimeRoot(absoluteDirectory(suppliedRoots.runtimeRoot || defaultRuntimeRoot, 'runtimeRoot'), fsSync),
     isPackaged: suppliedRoots.isPackaged === undefined ? Boolean(app.isPackaged) : suppliedRoots.isPackaged,
     arch: suppliedRoots.arch || process.arch
   });
@@ -594,7 +620,6 @@ function createModpackServiceGraph(deps = {}) {
   }
 
   const clock = normalizedClock(deps.clock || { now: () => Date.now() });
-  const fsSync = deps.fsSync || fs;
   const fsPromises = deps.fsPromises || fsp;
   const dnsLookup = requireFunction(deps.dnsLookup || dns.promises.lookup, 'dnsLookup');
   const httpsRequest = requireFunction(deps.httpsRequest || https.request, 'httpsRequest');
@@ -609,6 +634,15 @@ function createModpackServiceGraph(deps = {}) {
   );
   const clientDurableFsFactory = deps.clientDurableFsFactory || createProductionDurableFsFactory({
     fsSync, fsPromises, randomUUID, runtimeRoots, userDataPath, requireConfirmedClose: true
+  });
+  // Instance configs and their revision counters: a folder without modpack
+  // evidence keeps the v26.6.1 writer (no ArchiveWorker); any evidence, or
+  // evidence that cannot be ruled out, keeps the strict production writer.
+  // Every modpack lifecycle path below keeps productionDurableFsFactory.
+  const instanceConfigFsFactory = createInstanceConfigFsFactory({
+    strictFactory: productionDurableFsFactory,
+    inspect: folder => inspectFolderEvidence(folder, { fsApi: fsSync }),
+    legacyFs: createLegacyInstanceConfigFs({ fsApi: fsSync, tempNameFactory: randomUUID })
   });
 
   const modpackPaths = createModpackPaths(userDataPath);
@@ -663,24 +697,33 @@ function createModpackServiceGraph(deps = {}) {
     (Object.hasOwn(suppliedCoordinatorOptions, 'durableFs') ||
       Object.hasOwn(suppliedCoordinatorOptions, 'durableFsFactory'));
   const coordinatorOptions = coordinatorOptionsArePlain && !coordinatorHasDurability
-    ? { ...suppliedCoordinatorOptions, durableFsFactory: productionDurableFsFactory }
+    ? { ...suppliedCoordinatorOptions, durableFsFactory: instanceConfigFsFactory }
     : suppliedCoordinatorOptions;
   const coordinator = deps.coordinator || new ServerMutationCoordinator(coordinatorOptions);
   const clientPackIpcDisposers = new Set();
+  // Client resolution and management sessions need no modpack services: built
+  // now (no I/O), shared with the composition, and disposed after it.
+  const clientConnectionCore = createClientConnectionCore({
+    store,
+    readClientConfig: deps.readClientConfig,
+    getPinnedHttpsAgent: deps.getPinnedHttpsAgent,
+    managementSessionRequestJson: deps.managementSessionRequestJson,
+    randomUUID,
+    clock
+  });
   const beginManagedLaunch = request => {
     if (!modpackServices?.clientPackIntegration) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client services are not ready');
     return modpackServices.clientPackIntegration.beginManagedLaunch(request);
   };
-  const acquireLegacyManagementContext = (clientPath, options) => {
-    if (!modpackServices?.acquireLegacyManagementContext) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client services are not ready');
-    return modpackServices.acquireLegacyManagementContext(clientPath, options);
-  };
+  // Read-only classification. A composition without an observer keeps the strict
+  // repository, which answers the same where the observer answers and refuses more.
+  const getStateObserver = () => modpackServices?.stateObserver || modpackServices?.stateRepository || null;
   const serverMutationPolicy = deps.serverMutationPolicy || createServerMutationPolicy({
     coordinator,
     getClientPackIntegration: () => modpackServices?.clientPackIntegration || null,
-    getModpackStateRepository: () => modpackServices?.stateRepository || null,
+    getModpackStateRepository: getStateObserver,
     getInstances: () => store.get('instances') || [],
-    createOperationId: channel => `${channel}-${randomUUID()}`
+    createOperationId: channel => channelOperationId(channel, randomUUID)
   });
   let recoveryServices = null;
   let rawRecoveryServices = null;
@@ -756,6 +799,7 @@ function createModpackServiceGraph(deps = {}) {
         durableFsFactory: deps.modpackDurableFsFactory || deps.recoveryDurableFsFactory ||
           productionDurableFsFactory,
         clientDurableFsFactory,
+        clientConnectionCore,
         clientWorkerDurableConfig: { ...durableWorkerPaths(runtimeRoots), appOwnedRoot: path.join(userDataPath, 'archive-worker', 'durable-fs') },
         fsPromises,
         fsSync,
@@ -799,12 +843,14 @@ function createModpackServiceGraph(deps = {}) {
   const modpacks = {};
   Object.defineProperties(modpacks, {
     stateRepository: { enumerable: true, get: () => modpackServices?.stateRepository || null },
+    stateObserver: { enumerable: true, get: getStateObserver },
     clientPackService: { enumerable: true, get: () => modpackServices?.clientPackService || null },
     companionService: { enumerable: true, get: () => modpackServices?.companionService || null },
     clientPackIntegration: { enumerable: true, get: () => modpackServices?.clientPackIntegration || null },
-    managementSessionBroker: { enumerable: true, get: () => modpackServices?.managementSessionBroker || null },
-    resolveClientByPath: { enumerable: true, get: () => modpackServices?.resolveClientByPath || null },
-    acquireLegacyManagementContext: { enumerable: true, get: () => modpackServices?.acquireLegacyManagementContext || null },
+    listActiveClientMutations: { enumerable: true, get: () => modpackServices?.listActiveClientMutations || null },
+    managementSessionBroker: { enumerable: true, get: () => clientConnectionCore.managementSessionBroker },
+    resolveClientByPath: { enumerable: true, get: () => clientConnectionCore.resolveClientByPath },
+    acquireLegacyManagementContext: { enumerable: true, get: () => clientConnectionCore.acquireLegacyManagementContext },
     providers: { enumerable: true, get: () => modpackServices?.providers || providers },
     localArtifactSource: { enumerable: true, get: () => modpackServices?.localArtifactSource || null },
     destinationReservationService: { enumerable: true, get: () => modpackServices?.destinationReservationService || null },
@@ -887,11 +933,18 @@ function createModpackServiceGraph(deps = {}) {
     }
   };
   const dispose = async graph => {
-    modpackServices?.releaseMonitor?.stop?.();
-    modpackServices?.nativeNotificationBridge?.stop?.();
-    await Promise.all([...clientPackIpcDisposers].map(disposeIpc => disposeIpc()));
-    await modpackServices?.dispose?.();
-    if (typeof startupInput.dispose === 'function') await startupInput.dispose(graph);
+    try {
+      modpackServices?.releaseMonitor?.stop?.();
+      modpackServices?.nativeNotificationBridge?.stop?.();
+      await Promise.all([...clientPackIpcDisposers].map(disposeIpc => disposeIpc()));
+      await modpackServices?.dispose?.();
+      if (typeof startupInput.dispose === 'function') await startupInput.dispose(graph);
+    } finally {
+      // Last: client pack work that is still settling may use its sessions. A session
+      // read nothing tracks (a local edit's or a launch's requirement check) ends at
+      // its own deadline or here.
+      clientConnectionCore.dispose();
+    }
   };
   const scheduleArtifactCachePrune = () => {
     try { return modpackServices?.scheduleArtifactCachePrune?.() === true; }
@@ -909,7 +962,7 @@ function createModpackServiceGraph(deps = {}) {
     dispose
   });
 
-  configureServerConfigDurableFsFactory(productionDurableFsFactory);
+  configureServerConfigDurableFsFactory(instanceConfigFsFactory);
 
   return Object.freeze({
     app,
@@ -925,7 +978,10 @@ function createModpackServiceGraph(deps = {}) {
     artifacts: Object.freeze({ cache: artifactCache, downloader: artifactDownloader, selections: selectionRegistry }),
     coordinator,
     serverMutationPolicy,
-    clientPackLaunchOptions: Object.freeze({ beginManagedLaunch, acquireLegacyManagementContext }),
+    clientPackLaunchOptions: Object.freeze({
+      beginManagedLaunch,
+      acquireLegacyManagementContext: clientConnectionCore.acquireLegacyManagementContext
+    }),
     registerClientPackIpcDisposer(disposeIpc) {
       if (typeof disposeIpc !== 'function') throw new TypeError('Client IPC disposer is invalid');
       clientPackIpcDisposers.add(disposeIpc);
@@ -944,6 +1000,7 @@ function createModpackServiceGraph(deps = {}) {
 }
 
 module.exports = {
+  channelOperationId,
   createLiveInstanceResolver,
   createModpackServiceGraph,
   createProductionDurableFsFactory,

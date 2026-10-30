@@ -13,8 +13,9 @@ const { ClientProcessGuard } = require('../services/client-modpacks/client-proce
 const { ClientRuntimeOwnership } = require('../services/client-modpacks/client-runtime-ownership.cjs');
 const { ClientRuntimeInstaller } = require('../services/client-modpacks/client-runtime-installer.cjs');
 const { ManagementPackClient } = require('../services/client-modpacks/management-pack-client.cjs');
-const { ManagementSessionBroker } = require('../services/management-session-broker.cjs');
 const { createClientPackIntegration } = require('../services/client-modpacks/client-pack-integration.cjs');
+const { createModpackStateObserver } = require('../services/modpacks/state/modpack-state-repository.cjs');
+const { createClientConnectionCore } = require('./create-client-connection-core.cjs');
 const fail = () => new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client pack services are unavailable');
 const key = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
 function inside(root, value) { const relative = path.relative(root, value); return !relative || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`)); }
@@ -57,17 +58,17 @@ function createClientPackComposition(input) {
   const runtimeRoot = path.join(root, 'runtime-ownership');
   for (const directory of [root, journalRoot, processRoot, runtimeRoot]) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const getInstances = () => { const values = store.get('instances'); if (!Array.isArray(values)) throw fail(); return values; };
-  const resolveClient = async clientId => {
-    const matches = getInstances().filter(i => i?.id === clientId && i.type === 'client' && typeof i.path === 'string' && path.isAbsolute(i.path));
-    if (matches.length !== 1) throw new ModpackError('INVALID_REQUEST', 'Choose a registered client instance');
-    return Object.freeze({ clientId, clientPath: path.resolve(matches[0].path) });
-  };
-  const resolveClientByPath = async clientPath => {
-    if (typeof clientPath !== 'string' || !path.isAbsolute(clientPath)) throw new ModpackError('INVALID_REQUEST', 'Choose a registered client instance');
-    const matches = getInstances().filter(i => i?.type === 'client' && typeof i.path === 'string' && key(i.path) === key(clientPath));
-    if (matches.length !== 1) throw new ModpackError('INVALID_REQUEST', 'Choose a registered client instance');
-    return resolveClient(matches[0].id);
-  };
+  // The service graph owns the connection core so client sessions outlive this
+  // composition; a core built here is owned, and disposed, by this composition.
+  const ownsConnectionCore = !input.clientConnectionCore;
+  const connectionCore = input.clientConnectionCore || createClientConnectionCore({ store, readClientConfig: input.readClientConfig,
+    getPinnedHttpsAgent: input.getPinnedHttpsAgent, managementSessionRequestJson: input.managementSessionRequestJson, randomUUID, clock });
+  const { resolveClient, resolveClientByPath, managementSessionBroker, acquireLegacyManagementContext } = connectionCore;
+  if (typeof resolveClient !== 'function' || typeof resolveClientByPath !== 'function' || !managementSessionBroker ||
+      typeof acquireLegacyManagementContext !== 'function' || typeof connectionCore.dispose !== 'function') throw fail();
+  // Read-only classification: a server whose modpack state is proven absent reads
+  // as unmanaged whatever its folder shape; present or unprovable state stays strict.
+  const stateObserver = input.stateObserver || createModpackStateObserver({ repository: stateRepository, fsApi: input.fsSync || fs });
   const resolveServer = async serverId => {
     const matches = getInstances().filter(i => i?.id === serverId && i.type === 'server' && typeof i.path === 'string' && path.isAbsolute(i.path));
     if (matches.length !== 1) throw new ModpackError('INVALID_REQUEST', 'Choose a registered server instance');
@@ -82,7 +83,7 @@ function createClientPackComposition(input) {
   const companionService = new CompanionService({ store: companionStore, resolveServer,
     readServerState: async (id, { force = false, signal } = {}) => {
       const { serverPath } = await resolveServer(id);
-      const installed = await stateRepository.read(serverPath);
+      const installed = await stateObserver.read(serverPath);
       await managedServerModHealth.assertHealthy({ serverId: id, serverPath, record: installed, force, signal });
       const registered = await resolveServer(id);
       if (registered.serverPath !== serverPath) throw new ModpackError('PLAN_STALE', 'The managed server changed during verification');
@@ -97,26 +98,13 @@ function createClientPackComposition(input) {
   const ownership = new ClientRuntimeOwnership({ root: runtimeRoot, durableFs: authorityFs, workerDurableConfig: clientWorkerDurableConfig });
   const runtimeInstaller = new ClientRuntimeInstaller({ ownership });
   const sessionClock = () => { const value = clock.now(); return value instanceof Date ? value.getTime() : value; };
-  const managementSessionBroker = new ManagementSessionBroker({ resolveClient,
-    readClientConfig: input.readClientConfig || (value => require('../utils/config-manager.cjs').readClientConfig(value)),
-    getPinnedHttpsAgent: input.getPinnedHttpsAgent || ((...args) => require('../utils/tls-utils.cjs').getPinnedHttpsAgent(...args)),
-    requestJson: input.managementSessionRequestJson, randomUUID, clock: sessionClock });
-  const acquireLegacyManagementContext = async (clientPath, options = {}) => {
-    const deadline = Math.min(options.deadline ?? Infinity, sessionClock() + 30000);
-    const target = await resolveClientByPath(clientPath);
-    const context = await managementSessionBroker.acquireLegacyContext(target.clientId, { ...options, deadline });
-    const current = await resolveClientByPath(clientPath);
-    if (current.clientId !== target.clientId || key(current.clientPath) !== key(target.clientPath)) throw new ModpackError('PLAN_STALE', 'The client connection changed');
-    await context.assertCurrent({ ...options, deadline });
-    return context;
-  };
   const managementClient = new ManagementPackClient({ sessionBroker: managementSessionBroker, clock: sessionClock });
   const clientPackService = new ClientPackService({ resolveClient, managementClient, candidatePreparer: clientCandidatePreparer,
     sourceResolver, artifactAcquisition, archiveInspector, processGuard, transaction, stateStore, runtimeInstaller,
     listServerPaths: () => getInstances().filter(i => i?.type === 'server' && typeof i.path === 'string' && path.isAbsolute(i.path)).map(i => i.path),
     reparseInspector, clock: () => clock.now() });
   const clientPackIntegration = createClientPackIntegration({ resolveClient, resolveClientByPath,
-    processGuard, transaction, stateStore, managementClient, clientPackService });
+    processGuard, transaction, stateStore, managementClient, clientPackService, clock: sessionClock });
   let initialized = false; let disposal;
   async function cleanupRegisteredClients() {
     for (const instance of getInstances().filter(i => i?.type === 'client')) {
@@ -127,6 +115,8 @@ function createClientPackComposition(input) {
     }
   }
   return Object.freeze({ companionService, clientPackService, clientPackIntegration, managementSessionBroker, resolveClientByPath, acquireLegacyManagementContext,
+    // In-flight exclusive client pack mutations, for the app update guard.
+    listActiveMutations: () => processGuard.listActiveMutations(),
     async initialize() {
       if (initialized) return;
       markStartupTrace('client-packs:companion-store-init:start');
@@ -140,7 +130,7 @@ function createClientPackComposition(input) {
       initialized = true;
     },
     dispose() {
-      managementSessionBroker.dispose();
+      if (ownsConnectionCore) connectionCore.dispose();
       if (!disposal) disposal = (async () => {
         const results = await Promise.allSettled([clientPackService.dispose(), companionService.dispose(), managedServerModHealth.dispose()]);
         await cleanupRegisteredClients();

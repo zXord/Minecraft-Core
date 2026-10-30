@@ -93,7 +93,11 @@ function setupIpcHandlers(win, dependencies = {}) {
     const serverMutationPolicy = dependencies.serverMutationPolicy || createServerMutationPolicy({
       coordinator: dependencies.serverMutationCoordinator,
       getClientPackIntegration: dependencies.modpacks ? () => dependencies.modpacks.clientPackIntegration : null,
-      getModpackStateRepository: dependencies.modpacks ? () => dependencies.modpacks.stateRepository : null,
+      // Read-only classification through the state observer; without one, the
+      // strict repository (which refuses more) still decides.
+      getModpackStateRepository: dependencies.modpacks
+        ? () => dependencies.modpacks.stateObserver || dependencies.modpacks.stateRepository
+        : null,
       getInstances: () => store.get('instances') || []
     });
     // Get all handler modules
