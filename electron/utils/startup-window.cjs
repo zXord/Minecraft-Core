@@ -53,12 +53,21 @@ function applyWindowsTaskbarDetails(window, {
   return true;
 }
 
-function createStartupPageUrl() {
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function createStartupPageUrl({ heading = 'Starting Minecraft Core…', detail = 'Preparing your workspace' } = {}) {
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
 <style>body{margin:0;display:grid;place-items:center;min-height:100vh;background:#0f172a;color:#e2e8f0;font-family:system-ui,sans-serif}main{text-align:center}h1{font-size:1.25rem;margin:0 0 .5rem}p{margin:0;color:#94a3b8}</style>
-</head><body><main><h1>Starting Minecraft Core…</h1><p>Preparing your workspace</p></main></body></html>`;
+</head><body><main><h1>${escapeHtml(heading)}</h1><p>${escapeHtml(detail)}</p></main></body></html>`;
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
@@ -146,18 +155,63 @@ function createWindowReadyTracker(window) {
   });
 }
 
-async function startApplicationAfterReady({ createStartupWindow, runMainStartup, waitForMainWindowReady, closeStartupWindow = closeWindow } = {}) {
+function hideWindow(window) {
+  try {
+    if (window && !window.isDestroyed?.()) window.hide?.();
+  } catch {
+    // A window that cannot be hidden must not replace the startup failure.
+  }
+}
+
+function readPublishedMainWindow(getMainWindow) {
+  try {
+    return getMainWindow?.() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function startApplicationAfterReady({
+  createStartupWindow,
+  runMainStartup,
+  waitForMainWindowReady,
+  closeStartupWindow = closeWindow,
+  onStartupFailure = null,
+  getMainWindow = null
+} = {}) {
   if (typeof createStartupWindow !== 'function') throw new TypeError('createStartupWindow must be a function');
   if (typeof runMainStartup !== 'function') throw new TypeError('runMainStartup must be a function');
   if (typeof waitForMainWindowReady !== 'function') throw new TypeError('waitForMainWindowReady must be a function');
+  if (onStartupFailure !== null && typeof onStartupFailure !== 'function') {
+    throw new TypeError('onStartupFailure must be a function');
+  }
+  if (getMainWindow !== null && typeof getMainWindow !== 'function') throw new TypeError('getMainWindow must be a function');
 
-  const startupWindow = await createStartupWindow();
+  // The splash is cosmetic: a startup that cannot show one still starts.
+  let startupWindow = null;
   try {
-    const mainWindow = await runMainStartup();
+    startupWindow = (await createStartupWindow()) || null;
+  } catch {
+    startupWindow = null;
+  }
+
+  let mainWindow = null;
+  try {
+    mainWindow = await runMainStartup();
     await waitForMainWindowReady(mainWindow);
-    await closeStartupWindow(startupWindow);
-    return mainWindow;
   } catch (error) {
+    if (onStartupFailure) {
+      // The open splash keeps window-all-closed from quitting while the hook
+      // reports the failure. A main window that already exists has live IPC,
+      // so it is hidden before anything is shown to the user.
+      const failedMainWindow = mainWindow || readPublishedMainWindow(getMainWindow);
+      hideWindow(failedMainWindow);
+      try {
+        await onStartupFailure(error, Object.freeze({ splash: startupWindow, mainWindow: failedMainWindow }));
+      } catch {
+        // The original startup failure stays primary.
+      }
+    }
     try {
       await closeStartupWindow(startupWindow);
     } catch {
@@ -165,6 +219,24 @@ async function startApplicationAfterReady({ createStartupWindow, runMainStartup,
     }
     throw error;
   }
+  await closeStartupWindow(startupWindow);
+  return mainWindow;
+}
+
+/**
+ * Decides how the main window first appears. A login with --start-minimized,
+ * the start-minimized setting and a tray starts hidden; a degraded start shows
+ * the window without stealing focus so its warning banner is still seen.
+ */
+function resolveInitialWindowVisibility({
+  startMinimizedArg = false,
+  startMinimizedSetting = false,
+  hasTray = false,
+  degraded = false
+} = {}) {
+  const startsMinimized = Boolean(startMinimizedArg) && Boolean(startMinimizedSetting) && Boolean(hasTray);
+  if (!startsMinimized) return 'show';
+  return degraded ? 'show-inactive' : 'hidden';
 }
 
 module.exports = {
@@ -172,6 +244,7 @@ module.exports = {
   createStartupPageUrl,
   createStartupWindow,
   createWindowReadyTracker,
+  resolveInitialWindowVisibility,
   startApplicationAfterReady,
   waitForStartupWindowDocument
 };

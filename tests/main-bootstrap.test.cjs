@@ -172,6 +172,65 @@ test('a mismatched or packaged real-E2E argument cannot suppress production noti
   }).nativeNotificationsEnabled, true);
 });
 
+test('a harness-shaped real-E2E child whose TEMP lives inside the isolated root suppresses native notifications', () => {
+  const nestedRoot = path.join(os.tmpdir(), 'minecraft-core-harness-parent', 'minecraft-core-real-lifecycle-e2e-a64');
+  const harnessRoot = path.join(os.tmpdir(), 'minecraft-core-real-lifecycle-e2e-a64');
+  for (const root of [nestedRoot, harnessRoot]) {
+    const childTemp = path.join(root, 'environment', 'temp');
+    const flags = createRuntimeFlags({
+      env: {
+        NODE_ENV: 'development',
+        MINECRAFT_CORE_USER_DATA_DIR: path.join(root, 'user-data'),
+        MINECRAFT_CORE_REAL_E2E_DISABLE_NATIVE_NOTIFICATIONS: '1',
+        TEMP: childTemp,
+        TMP: childTemp
+      },
+      argv: ['electron.exe', '.', `--minecraft-core-real-e2e-root=${root}`],
+      platform: 'win32',
+      isPackaged: false,
+      tempDirectory: childTemp
+    });
+
+    assert.equal(flags.nativeNotificationsEnabled, false, root);
+    assert.equal(flags.testMode, false);
+    assert.equal(flags.watchdogEnabled, true);
+    assert.equal(flags.automaticReleaseChecksEnabled, true);
+    assert.equal(flags.publicManagementListenersEnabled, true);
+  }
+});
+
+test('a TEMP redirect only honours a real-E2E root that strictly contains it and passes every other gate', () => {
+  const root = path.join(os.tmpdir(), 'minecraft-core-harness-parent', 'minecraft-core-real-gates-e2e-a64');
+  const childTemp = path.join(root, 'environment', 'temp');
+  const env = {
+    NODE_ENV: 'development',
+    MINECRAFT_CORE_USER_DATA_DIR: path.join(root, 'user-data'),
+    MINECRAFT_CORE_REAL_E2E_DISABLE_NATIVE_NOTIFICATIONS: '1'
+  };
+  const argv = ['electron.exe', '.', `--minecraft-core-real-e2e-root=${root}`];
+  const flags = overrides => createRuntimeFlags({ env, argv, platform: 'win32', isPackaged: false, tempDirectory: childTemp, ...overrides });
+
+  assert.equal(flags({}).nativeNotificationsEnabled, false);
+  assert.equal(flags({ tempDirectory: path.join(os.tmpdir(), 'elsewhere', 'temp') }).nativeNotificationsEnabled, true);
+  assert.equal(flags({ tempDirectory: root }).nativeNotificationsEnabled, true, 'the root itself is not inside the root');
+  assert.equal(flags({ tempDirectory: `${root}-sibling` }).nativeNotificationsEnabled, true);
+  assert.equal(flags({ isPackaged: true }).nativeNotificationsEnabled, true);
+  assert.equal(flags({ env: { ...env, NODE_ENV: 'production' } }).nativeNotificationsEnabled, true);
+  assert.equal(flags({ env: { ...env, MINECRAFT_CORE_REAL_E2E_DISABLE_NATIVE_NOTIFICATIONS: '0' } }).nativeNotificationsEnabled, true);
+  assert.equal(flags({ env: { ...env, MINECRAFT_CORE_USER_DATA_DIR: path.join(os.tmpdir(), 'other-user-data') } }).nativeNotificationsEnabled, true);
+  assert.equal(flags({ argv: [...argv, `--minecraft-core-real-e2e-root=${root}`] }).nativeNotificationsEnabled, true);
+
+  const unprefixed = path.join(os.tmpdir(), 'minecraft-core-harness-parent', 'unrelated-root');
+  assert.equal(createRuntimeFlags({
+    env: { ...env, MINECRAFT_CORE_USER_DATA_DIR: path.join(unprefixed, 'user-data') },
+    argv: ['electron.exe', '.', `--minecraft-core-real-e2e-root=${unprefixed}`],
+    platform: 'win32',
+    isPackaged: false,
+    tempDirectory: path.join(unprefixed, 'environment', 'temp')
+  }).nativeNotificationsEnabled, true);
+  assert.throws(() => createRuntimeFlags({ env, argv, platform: 'win32', tempDirectory: '' }), TypeError);
+});
+
 test('packaged binaries ignore test-mode environment flags', () => {
   const isolated = path.join(os.tmpdir(), 'minecraft-core-packaged-test-attempt');
   const flags = createRuntimeFlags({
@@ -369,6 +428,142 @@ test('startup fails closed before window creation when no recovery boundary is i
 
   await assert.rejects(bootstrap.onReady(), /recovery/i);
   assert.equal(windowsCreated, 0);
+});
+
+function degradableFixture({ startup = {}, services = {}, recoveryError = new Error('ArchiveWorker.exe is missing') } = {}) {
+  const order = [];
+  const phases = [];
+  const issues = [];
+  const degradedCalls = [];
+  const window = Object.freeze({ id: 31 });
+  const step = name => async () => { order.push(name); };
+  const serviceGraph = {
+    paths: { userData: path.join(os.tmpdir(), 'minecraft-core-degraded-bootstrap') },
+    startup: {
+      markTiming(phase) { phases.push(phase); },
+      async initializeRecovery() { order.push('recovery'); throw recoveryError; },
+      async enterDegradedMode(error, graph) {
+        order.push('degraded');
+        degradedCalls.push({ error, graph });
+        return { mode: 'degraded' };
+      },
+      reportStartupIssue(stage, error) { issues.push({ stage, error }); },
+      initializeServerConfig: step('server-config'),
+      cleanupRuntime: step('cleanup'),
+      configureAfterReady: step('configure'),
+      afterWindowCreated: step('window:after'),
+      ...startup
+    },
+    window: { async create() { order.push('window:create'); return window; } },
+    watchdog: { start: step('watchdog') },
+    tray: { start: step('tray') },
+    updater: { start: step('updater:start') },
+    nativeNotifications: { start: step('notifications:start') },
+    managementServer: { listen: step('management:listen') },
+    ...services
+  };
+  const bootstrap = createMainBootstrap({
+    electronApi: { app: { setName() {}, setAppUserModelId() {} } },
+    serviceGraph,
+    runtimeFlags: createRuntimeFlags({ env: { NODE_ENV: 'production' }, platform: 'win32' })
+  });
+  return { bootstrap, degradedCalls, issues, order, phases, recoveryError, serviceGraph, window };
+}
+
+const FULL_STARTUP_AFTER_RECOVERY = [
+  'server-config', 'cleanup', 'configure', 'tray', 'window:create', 'window:after',
+  'updater:start', 'notifications:start', 'management:listen'
+];
+
+test('a recovery failure enters degraded mode and still opens the window and starts the updater', async () => {
+  const { bootstrap, degradedCalls, issues, order, phases, recoveryError, serviceGraph, window } = degradableFixture();
+
+  assert.equal(await bootstrap.onReady(), window);
+
+  assert.deepEqual(order, ['watchdog', 'recovery', 'degraded', ...FULL_STARTUP_AFTER_RECOVERY]);
+  assert.equal(degradedCalls.length, 1);
+  assert.equal(degradedCalls[0].error, recoveryError, 'degraded mode receives the original recovery error');
+  assert.equal(degradedCalls[0].graph, serviceGraph);
+  assert.deepEqual(issues, []);
+  assert.deepEqual(phases.slice(0, 4), ['recovery:start', 'recovery:complete', 'recovery:degraded:start', 'recovery:degraded:complete']);
+  assert.equal(await bootstrap.createWindowAfterRecovery(), window, 'window activation works after a degraded start');
+});
+
+test('a graph without a degraded mode still fails closed when recovery fails', async () => {
+  const { bootstrap, issues, order, recoveryError } = degradableFixture({ startup: { enterDegradedMode: undefined } });
+
+  await assert.rejects(bootstrap.onReady(), error => error === recoveryError);
+  assert.deepEqual(order, ['watchdog', 'recovery']);
+  assert.deepEqual(issues, []);
+});
+
+test('a rejecting degraded mode is fatal, keeps the original recovery error and reports the degraded failure', async () => {
+  const degradedFailure = new Error('degraded gate failed');
+  const { bootstrap, issues, order, recoveryError } = degradableFixture({
+    startup: { async enterDegradedMode() { throw degradedFailure; } }
+  });
+
+  await assert.rejects(bootstrap.onReady(), error => error === recoveryError);
+  assert.deepEqual(order, ['watchdog', 'recovery']);
+  assert.deepEqual(issues, [{ stage: 'recovery:degraded', error: degradedFailure }]);
+});
+
+test('each optional startup stage failure is reported while every later stage still runs', async () => {
+  const cases = [
+    { stage: 'server-config', at: 'server-config', fail: failure => ({ startup: { async initializeServerConfig() { throw failure; } } }) },
+    { stage: 'cleanup', at: 'cleanup', fail: failure => ({ startup: { async cleanupRuntime() { throw failure; } } }) },
+    { stage: 'updater:start', at: 'updater:start', fail: failure => ({ services: { updater: { start() { throw failure; } } } }) },
+    { stage: 'nativeNotifications:start', at: 'notifications:start', fail: failure => ({ services: { nativeNotifications: { async start() { throw failure; } } } }) },
+    { stage: 'managementServer:listen', at: 'management:listen', fail: failure => ({ services: { managementServer: { async listen() { throw failure; } } } }) }
+  ];
+  for (const { stage, at, fail } of cases) {
+    const failure = new Error(`${stage} failed`);
+    const overrides = fail(failure);
+    const { bootstrap, issues, order, window } = degradableFixture({
+      startup: { async initializeRecovery() { order.push('recovery'); }, ...overrides.startup },
+      services: overrides.services
+    });
+
+    assert.equal(await bootstrap.onReady(), window, stage);
+    assert.deepEqual(order, ['watchdog', 'recovery', ...FULL_STARTUP_AFTER_RECOVERY.filter(name => name !== at)], stage);
+    assert.deepEqual(issues, [{ stage, error: failure }], stage);
+    await bootstrap.dispose();
+  }
+});
+
+test('a throwing issue reporter cannot turn an optional stage failure into a fatal one', async () => {
+  const { bootstrap, order, window } = degradableFixture({
+    startup: {
+      async initializeRecovery() { order.push('recovery'); },
+      async initializeServerConfig() { throw new Error('server config unreadable'); },
+      reportStartupIssue() { throw new Error('logger unavailable'); }
+    }
+  });
+
+  assert.equal(await bootstrap.onReady(), window);
+  assert.deepEqual(order, ['watchdog', 'recovery', ...FULL_STARTUP_AFTER_RECOVERY.filter(name => name !== 'server-config')]);
+});
+
+test('watchdog, after-ready configuration, tray, window creation and after-window setup stay fatal', async () => {
+  const cases = [
+    ['watchdog', failure => ({ services: { watchdog: { start() { throw failure; } } } })],
+    ['configure', failure => ({ startup: { configureAfterReady() { throw failure; } } })],
+    ['tray', failure => ({ services: { tray: { async start() { throw failure; } } } })],
+    ['window', failure => ({ services: { window: { async create() { throw failure; } } } })],
+    ['after-window', failure => ({ startup: { async afterWindowCreated() { throw failure; } } })]
+  ];
+  for (const [name, fail] of cases) {
+    const failure = new Error(`${name} failed`);
+    const overrides = fail(failure);
+    const { bootstrap, issues, order } = degradableFixture({
+      startup: { async initializeRecovery() {}, ...overrides.startup },
+      services: overrides.services
+    });
+
+    await assert.rejects(bootstrap.onReady(), error => error === failure, name);
+    assert.deepEqual(issues, [], name);
+    assert.equal(order.includes('updater:start'), false, name);
+  }
 });
 
 test('startup adopts a window published by a void factory before after-window hooks', async () => {

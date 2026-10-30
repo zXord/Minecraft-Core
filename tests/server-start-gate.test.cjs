@@ -1478,7 +1478,12 @@ test('main installs the coordinator then runs registry recovery before cleanup',
             paths: { userData: dependencies.userDataPath },
             startup: {
               ...dependencies.startup,
-              async initializeRecovery() { calls.push('initialize-registry-recovery'); }
+              async initializeRecovery() { calls.push('initialize-registry-recovery'); },
+              // Cleanup is an optional startup stage, so the first fatal stage after it stops startup.
+              configureAfterReady() {
+                calls.push('configure-after-ready');
+                throw sentinel;
+              }
             },
             window: { create: dependencies.windowFactory, get: dependencies.getWindow },
             updater: dependencies.updater,
@@ -1501,7 +1506,6 @@ test('main installs the coordinator then runs registry recovery before cleanup',
       return {
         cleanupRuntimeFiles() {
           calls.push('cleanup-runtime');
-          throw sentinel;
         }
       };
     }
@@ -1542,7 +1546,8 @@ test('main installs the coordinator then runs registry recovery before cleanup',
       'install-coordinator',
       'create-startup-window',
       'initialize-registry-recovery',
-      'cleanup-runtime'
+      'cleanup-runtime',
+      'configure-after-ready'
     ]);
   } finally {
     delete require.cache[modulePath];

@@ -11,7 +11,12 @@ function pathKey(value, platform) {
   return platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved;
 }
 
-function resolveIsolatedRealE2ERoot({ argv, env, isPackaged, platform }) {
+function isStrictlyInside(parentKey, childKey) {
+  const relative = path.relative(parentKey, childKey);
+  return Boolean(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+function resolveIsolatedRealE2ERoot({ argv, env, isPackaged, platform, tempDirectory }) {
   if (isPackaged || env.NODE_ENV !== 'development' ||
       env.MINECRAFT_CORE_REAL_E2E_DISABLE_NATIVE_NOTIFICATIONS !== '1') return null;
   const prefix = `${REAL_E2E_ROOT_ARGUMENT}=`;
@@ -24,8 +29,12 @@ function resolveIsolatedRealE2ERoot({ argv, env, isPackaged, platform }) {
   if (!rawRoot || !rawUserData || !path.isAbsolute(rawRoot) || !path.isAbsolute(rawUserData)) return null;
 
   const root = path.resolve(rawRoot);
+  const rootKey = pathKey(root, platform);
+  const tempKey = pathKey(tempDirectory, platform);
+  // The harness creates its root in the parent's temp folder and then points
+  // the child's TEMP inside that root, so either relation identifies it.
   if (
-    pathKey(path.dirname(root), platform) !== pathKey(os.tmpdir(), platform)
+    (pathKey(path.dirname(root), platform) !== tempKey && !isStrictlyInside(rootKey, tempKey))
     || !path.basename(root).startsWith('minecraft-core-real-')
     || pathKey(rawUserData, platform) !== pathKey(path.join(root, 'user-data'), platform)
   ) {
@@ -58,12 +67,14 @@ function createRuntimeFlags({
   platform = process.platform,
   processId = process.pid,
   isPackaged = false,
-  fsApi = fs
+  fsApi = fs,
+  tempDirectory = os.tmpdir()
 } = {}) {
   if (!env || typeof env !== 'object' || Array.isArray(env) || typeof platform !== 'string' || !platform ||
       !Array.isArray(argv) || argv.some(value => typeof value !== 'string') ||
       !Number.isSafeInteger(processId) || processId < 1 || typeof isPackaged !== 'boolean' ||
-      !fsApi || typeof fsApi.readFileSync !== 'function' || typeof fsApi.unlinkSync !== 'function') {
+      !fsApi || typeof fsApi.readFileSync !== 'function' || typeof fsApi.unlinkSync !== 'function' ||
+      typeof tempDirectory !== 'string' || !tempDirectory.trim()) {
     throw new TypeError('Runtime flag dependencies are invalid');
   }
 
@@ -72,14 +83,14 @@ function createRuntimeFlags({
   const testMode = !isPackaged && env.NODE_ENV === 'test' && env.MINECRAFT_CORE_TEST_MODE === '1';
   const packagedSmokeAuthorization = isPackaged ? resolvePackagedSmokeAuthorization({ argv, fsApi }) : null;
   const packagedSmokeMode = Boolean(packagedSmokeAuthorization);
-  const isolatedRealE2ERoot = resolveIsolatedRealE2ERoot({ argv, env, isPackaged, platform });
+  const isolatedRealE2ERoot = resolveIsolatedRealE2ERoot({ argv, env, isPackaged, platform, tempDirectory });
   let isolatedUserDataPath = null;
   if (testMode) {
     const configured = env.MINECRAFT_CORE_USER_DATA_DIR;
     if (configured !== undefined && (typeof configured !== 'string' || !path.isAbsolute(configured.trim()))) {
       throw new TypeError('Test userData path must be absolute');
     }
-    isolatedUserDataPath = path.resolve(configured?.trim() || path.join(os.tmpdir(), `minecraft-core-test-${processId}`));
+    isolatedUserDataPath = path.resolve(configured?.trim() || path.join(tempDirectory, `minecraft-core-test-${processId}`));
   }
 
   return Object.freeze({

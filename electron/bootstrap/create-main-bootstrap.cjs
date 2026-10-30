@@ -36,6 +36,8 @@ function createMainBootstrap({ electronApi, serviceGraph, runtimeFlags } = {}) {
   const getWindow = optionalFunction(serviceGraph.window?.get, 'window.get');
   const initializeRecovery = optionalFunction(startup.initializeRecovery, 'startup.initializeRecovery') ||
     (() => { throw new TypeError('Startup recovery boundary is required'); });
+  const enterDegradedMode = optionalFunction(startup.enterDegradedMode, 'startup.enterDegradedMode');
+  const reportStartupIssue = optionalFunction(startup.reportStartupIssue, 'startup.reportStartupIssue');
   const initializeServerConfig = optionalFunction(startup.initializeServerConfig, 'startup.initializeServerConfig');
   const cleanupRuntime = optionalFunction(startup.cleanupRuntime, 'startup.cleanupRuntime');
   const markTiming = optionalFunction(startup.markTiming, 'startup.markTiming');
@@ -80,6 +82,29 @@ function createMainBootstrap({ electronApi, serviceGraph, runtimeFlags } = {}) {
     startedServices.push({ service, name });
   }
 
+  async function reportIssue(stage, error) {
+    try {
+      await reportStartupIssue?.(stage, error);
+    } catch {
+      // Reporting is diagnostic; it must never turn an optional failure fatal.
+    }
+  }
+
+  // Optional stages only degrade the running app: the failure is reported and
+  // startup continues, so the window, tray and updater still come up.
+  async function runOptionalStage(stage, operation) {
+    try {
+      return await operation();
+    } catch (error) {
+      await reportIssue(stage, error);
+      return undefined;
+    }
+  }
+
+  async function startOptionalService(service, method, enabled, name) {
+    await runOptionalStage(`${name}:${method}`, () => startService(service, method, enabled, name));
+  }
+
   async function createAndResolveWindow() {
     const createdWindow = await createWindow(serviceGraph);
     if (createdWindow) return createdWindow;
@@ -98,21 +123,37 @@ function createMainBootstrap({ electronApi, serviceGraph, runtimeFlags } = {}) {
     }
   }
 
+  // A failed recovery boundary is fatal unless the graph can run degraded:
+  // modpack services off, legacy features and the updater still available.
+  async function runRecoveryStage() {
+    try {
+      await runStartupStage('recovery', () => initializeRecovery(serviceGraph));
+    } catch (error) {
+      if (!enterDegradedMode) throw error;
+      try {
+        await runStartupStage('recovery:degraded', () => enterDegradedMode(error, serviceGraph));
+      } catch (degradedError) {
+        await reportIssue('recovery:degraded', degradedError);
+        throw error;
+      }
+    }
+  }
+
   async function startReady() {
     initializeBeforeReady();
     if (disposed) throw new Error('Main bootstrap is disposed');
 
     await startService(serviceGraph.watchdog, 'start', runtimeFlags.watchdogEnabled, 'watchdog');
-    await runStartupStage('recovery', () => initializeRecovery(serviceGraph));
-    await runStartupStage('server-config', () => initializeServerConfig?.(serviceGraph));
-    await runStartupStage('cleanup', () => cleanupRuntime?.());
+    await runRecoveryStage();
+    await runOptionalStage('server-config', () => runStartupStage('server-config', () => initializeServerConfig?.(serviceGraph)));
+    await runOptionalStage('cleanup', () => runStartupStage('cleanup', () => cleanupRuntime?.()));
     await configureAfterReady?.(serviceGraph);
     await startService(serviceGraph.tray, 'start', runtimeFlags.trayEnabled, 'tray');
     const window = await runStartupStage('main-window:create', createAndResolveWindow);
     await afterWindowCreated?.(window, serviceGraph);
-    await startService(serviceGraph.updater, 'start', runtimeFlags.updaterEnabled, 'updater');
-    await startService(serviceGraph.nativeNotifications, 'start', runtimeFlags.nativeNotificationsEnabled, 'nativeNotifications');
-    await startService(serviceGraph.managementServer, 'listen', runtimeFlags.publicManagementListenersEnabled, 'managementServer');
+    await startOptionalService(serviceGraph.updater, 'start', runtimeFlags.updaterEnabled, 'updater');
+    await startOptionalService(serviceGraph.nativeNotifications, 'start', runtimeFlags.nativeNotificationsEnabled, 'nativeNotifications');
+    await startOptionalService(serviceGraph.managementServer, 'listen', runtimeFlags.publicManagementListenersEnabled, 'managementServer');
     return window;
   }
 

@@ -1,17 +1,22 @@
 const { markStartupTrace, createStartupTrace } = require('./utils/startup-trace.cjs');
 markStartupTrace('early:entry');
 const path = require('path');
-const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, dialog, shell } = require('electron');
 const {
   materializeCachedDevelopmentIcon,
   resolveWindowIconPath
 } = require('./utils/asset-resolver.cjs');
 const { resolveWindowsAppUserModelId } = require('./utils/app-identity.cjs');
 const { createStartupWindow, waitForStartupWindowDocument } = require('./utils/startup-window.cjs');
+const { PACKAGED_SMOKE_ARGUMENT, REAL_E2E_ROOT_ARGUMENT } = require('./bootstrap/runtime-flags.cjs');
 markStartupTrace('early:imports:complete');
 
 const STARTUP_WINDOW_HANDOFF = Symbol.for('minecraft-core.startup-window-handoff');
 const USER_DATA_OVERRIDE_ENV = 'MINECRAFT_CORE_USER_DATA_DIR';
+const DEVELOPMENT_PROFILE_DEFAULTED_ENV = 'MINECRAFT_CORE_DEV_PROFILE_DEFAULTED';
+const DEVELOPMENT_USER_DATA_DIRECTORY = 'Minecraft Core Development';
+const REAL_E2E_NOTIFICATIONS_ENV = 'MINECRAFT_CORE_REAL_E2E_DISABLE_NATIVE_NOTIFICATIONS';
+const START_MINIMIZED_ARGUMENT = '--start-minimized';
 const APP_NAME = 'Minecraft Core';
 const earlyIdentityApps = new WeakSet();
 
@@ -74,7 +79,9 @@ function claimEarlyStartupWindow() {
   return window;
 }
 
-function shouldCreateEarlyStartupWindow({ app: electronApp = app, env = process.env } = {}) {
+function shouldCreateEarlyStartupWindow({ app: electronApp = app, env = process.env, argv = process.argv } = {}) {
+  // The login item passes --start-minimized; that start shows no splash.
+  if (Array.isArray(argv) && argv.includes(START_MINIMIZED_ARGUMENT)) return false;
   return Boolean(electronApp.isPackaged) || !(env.NODE_ENV === 'test' && env.MINECRAFT_CORE_TEST_MODE === '1');
 }
 
@@ -88,10 +95,46 @@ function isTestStartup(env = process.env) {
   return env?.NODE_ENV === 'test' && env?.MINECRAFT_CORE_TEST_MODE === '1';
 }
 
+/**
+ * Test, packaged-smoke and real-E2E harness launches must never block on a
+ * dialog. This reads argv and env only: runtime flags are never created here,
+ * because doing so would consume the packaged-smoke nonce before main loads.
+ */
+function isNonInteractiveStartup({ env = process.env, argv = process.argv } = {}) {
+  if (isTestStartup(env) || env?.[REAL_E2E_NOTIFICATIONS_ENV] === '1') return true;
+  const argumentsList = Array.isArray(argv) ? argv : [];
+  return argumentsList.some(value => typeof value === 'string' &&
+    (value.startsWith(`${PACKAGED_SMOKE_ARGUMENT}=`) || value.startsWith(`${REAL_E2E_ROOT_ARGUMENT}=`)));
+}
+
 function windowsPathKey(value) {
   return typeof value === 'string' && value.trim()
     ? path.win32.normalize(value.trim()).toLocaleLowerCase('en-US')
     : null;
+}
+
+function resolveDevelopmentUserDataPath(electronApp) {
+  if (typeof electronApp?.getPath !== 'function') {
+    throw new TypeError('Electron app must expose getPath for the development profile');
+  }
+  const appDataPath = electronApp.getPath('appData');
+  if (typeof appDataPath !== 'string' || !appDataPath.trim()) {
+    throw new TypeError('Electron appData path is unavailable for the development profile');
+  }
+  return path.join(path.resolve(appDataPath.trim()), DEVELOPMENT_USER_DATA_DIRECTORY);
+}
+
+function hasExplicitUserDataOverride({ app: electronApp, env }) {
+  const configured = env?.[USER_DATA_OVERRIDE_ENV];
+  if (typeof configured !== 'string' || !configured.trim()) return false;
+  if (env?.[DEVELOPMENT_PROFILE_DEFAULTED_ENV] !== '1') return true;
+  // Only the development profile this entry defaulted counts as not explicit;
+  // an inherited marker beside any other path is still an isolated profile.
+  try {
+    return windowsPathKey(path.resolve(configured.trim())) !== windowsPathKey(resolveDevelopmentUserDataPath(electronApp));
+  } catch {
+    return true;
+  }
 }
 
 function isOwnedDevelopmentShortcut(details, expected) {
@@ -114,7 +157,7 @@ function writeDevelopmentStartMenuShortcut({
     electronApp?.isPackaged ||
     isTestStartup(env) ||
     !isDevelopmentStartup(env) ||
-    (typeof env?.[USER_DATA_OVERRIDE_ENV] === 'string' && env[USER_DATA_OVERRIDE_ENV].trim())
+    hasExplicitUserDataOverride({ app: electronApp, env })
   ) {
     return false;
   }
@@ -185,12 +228,27 @@ function shouldAutoStartEarlyStartup({
 
 function applyEarlyUserDataOverride({ app: electronApp = app, env = process.env } = {}) {
   const configured = env?.[USER_DATA_OVERRIDE_ENV];
-  if (typeof configured !== 'string' || !configured.trim()) return null;
-  if (typeof electronApp?.setPath !== 'function') {
-    throw new TypeError('Electron app must expose setPath for an explicit userData override');
+  if (typeof configured === 'string' && configured.trim()) {
+    if (typeof electronApp?.setPath !== 'function') {
+      throw new TypeError('Electron app must expose setPath for an explicit userData override');
+    }
+    const userDataPath = path.resolve(configured.trim());
+    electronApp.setPath('userData', userDataPath);
+    return userDataPath;
   }
-  const userDataPath = path.resolve(configured.trim());
+  if (electronApp?.isPackaged || isTestStartup(env)) return null;
+
+  // Unpackaged runs (npm run dev, electron ., the development shortcut) never
+  // open the installed app's profile. The main process and app-store follow
+  // the exported override; the marker keeps the development shortcut eligible.
+  if (!env || typeof env !== 'object') throw new TypeError('Startup environment is invalid');
+  if (typeof electronApp?.setPath !== 'function') {
+    throw new TypeError('Electron app must expose setPath for the development profile');
+  }
+  const userDataPath = resolveDevelopmentUserDataPath(electronApp);
   electronApp.setPath('userData', userDataPath);
+  env[USER_DATA_OVERRIDE_ENV] = userDataPath;
+  env[DEVELOPMENT_PROFILE_DEFAULTED_ENV] = '1';
   return userDataPath;
 }
 
@@ -210,9 +268,59 @@ function applyEarlyAppIdentity({ app: electronApp = app, platform = process.plat
   return true;
 }
 
-async function terminateFailedEarlyStartup({ app: electronApp, startupWindow }) {
+function readEarlyUserDataPath(electronApp) {
+  try {
+    const userDataPath = electronApp?.getPath?.('userData');
+    return typeof userDataPath === 'string' && userDataPath.trim() ? userDataPath : null;
+  } catch {
+    return null;
+  }
+}
+
+async function reportFatalEarlyStartup({ app: electronApp, error, startupWindow, shellApi = shell, logger = console } = {}) {
+  let reporter;
+  try {
+    // Loaded only after a failure, so a normal start never pays for the
+    // reporter or the update service.
+    const { createFatalStartupReporter } = require('./utils/startup-failure-reporter.cjs');
+    const userDataPath = readEarlyUserDataPath(electronApp);
+    reporter = createFatalStartupReporter({
+      dialog,
+      shell: shellApi,
+      app: electronApp,
+      getUpdateService: () => require('./services/update-service.cjs').getUpdateService(),
+      logDirectory: userDataPath ? path.join(userDataPath, 'logs') : null,
+      userDataPath,
+      interactive: true,
+      logger
+    });
+  } catch {
+    // Without Electron's dialog API there is nothing to show; startup still quits.
+    return null;
+  }
+  return reporter.report(error, { splash: startupWindow });
+}
+
+async function terminateFailedEarlyStartup({
+  app: electronApp,
+  startupWindow,
+  error,
+  env,
+  argv,
+  reportFatalStartup,
+  shellApi,
+  logger
+}) {
   if (globalThis[STARTUP_WINDOW_HANDOFF] === startupWindow) {
     Reflect.deleteProperty(globalThis, STARTUP_WINDOW_HANDOFF);
+  }
+  if (typeof reportFatalStartup === 'function' && !isNonInteractiveStartup({ env, argv })) {
+    try {
+      // The still-open splash keeps Electron from quitting while the user reads the report.
+      await reportFatalStartup({ app: electronApp, error, startupWindow, shellApi, logger });
+    } catch {
+      // The startup failure stays primary when the report itself fails.
+    }
   }
   try {
     if (startupWindow && !startupWindow.isDestroyed?.()) {
@@ -234,6 +342,7 @@ async function startEarlyStartup({
   app: electronApp = app,
   BrowserWindow: ElectronBrowserWindow = BrowserWindow,
   env = process.env,
+  argv = process.argv,
   platform = process.platform,
   shellApi = shell,
   logger = console,
@@ -242,6 +351,7 @@ async function startEarlyStartup({
   createWindow = createStartupWindow,
   waitForWindowDocument = waitForStartupWindowDocument,
   shouldCreateStartupWindow = shouldCreateEarlyStartupWindow,
+  reportFatalStartup = reportFatalEarlyStartup,
   loadMain = () => require('./main.cjs')
 } = {}) {
   const markTrace = env === process.env ? markStartupTrace : createStartupTrace({ env });
@@ -256,7 +366,7 @@ async function startEarlyStartup({
     markTrace('early:when-ready:start');
     await electronApp.whenReady();
     markTrace('early:when-ready:complete');
-    if (!shouldCreateStartupWindow({ app: electronApp, env })) {
+    if (!shouldCreateStartupWindow({ app: electronApp, env, argv })) {
       markTrace('early:main-load:start');
       await loadMain();
       markTrace('early:main-load:complete');
@@ -304,7 +414,16 @@ async function startEarlyStartup({
     return startupWindow;
   } catch (error) {
     markTrace('early:failed');
-    await terminateFailedEarlyStartup({ app: electronApp, startupWindow });
+    await terminateFailedEarlyStartup({
+      app: electronApp,
+      startupWindow,
+      error,
+      env,
+      argv,
+      reportFatalStartup,
+      shellApi,
+      logger
+    });
     throw error;
   }
 }
@@ -319,6 +438,7 @@ module.exports = {
   applyEarlyAppIdentity,
   applyEarlyUserDataOverride,
   claimEarlyStartupWindow,
+  isNonInteractiveStartup,
   publishEarlyStartupWindow,
   prepareEarlyStartupIconPath,
   resolveEarlyStartupIconPath,

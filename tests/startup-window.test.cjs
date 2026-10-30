@@ -4,11 +4,23 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const {
   applyWindowsTaskbarDetails,
+  createStartupPageUrl,
   createStartupWindow,
   createWindowReadyTracker,
+  resolveInitialWindowVisibility,
   startApplicationAfterReady,
   waitForStartupWindowDocument
 } = require('../electron/utils/startup-window.cjs');
+
+function tick() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+function startupPageText(url) {
+  const prefix = 'data:text/html;charset=utf-8,';
+  assert.ok(url.startsWith(prefix), url);
+  return decodeURIComponent(url.slice(prefix.length));
+}
 
 test('Windows identity notification sees complete relaunch metadata with Electron ID-first setters', () => {
   for (const isPackaged of [false, true]) {
@@ -314,4 +326,159 @@ test('startup window closes when recovery prevents the privileged window from op
   );
 
   assert.deepEqual(events, ['startup:create', 'recovery:begin', 'startup:close']);
+});
+
+test('a startup failure hides the main window and awaits the failure hook before the splash closes', async () => {
+  const events = [];
+  const failure = new Error('main window closed before it became ready');
+  const splash = { close() { events.push('splash:close'); } };
+  const mainWindow = { isDestroyed: () => false, hide() { events.push('main:hide'); } };
+  let releaseHook;
+  const hookGate = new Promise(resolve => { releaseHook = resolve; });
+
+  const start = startApplicationAfterReady({
+    createStartupWindow: () => splash,
+    runMainStartup: async () => mainWindow,
+    waitForMainWindowReady: async () => { throw failure; },
+    async onStartupFailure(error, context) {
+      events.push('hook:start');
+      assert.equal(error, failure);
+      assert.equal(context.splash, splash);
+      assert.equal(context.mainWindow, mainWindow);
+      assert.equal(Object.isFrozen(context), true);
+      await hookGate;
+      events.push('hook:end');
+    }
+  });
+
+  await tick();
+  assert.deepEqual(events, ['main:hide', 'hook:start'], 'the splash stays open while the hook runs');
+  releaseHook();
+  await assert.rejects(start, error => error === failure);
+  assert.deepEqual(events, ['main:hide', 'hook:start', 'hook:end', 'splash:close']);
+});
+
+test('a failure after the window was published reports that window through getMainWindow', async () => {
+  const events = [];
+  const failure = new Error('after-window hook failed');
+  const published = { isDestroyed: () => false, hide() { events.push('published:hide'); } };
+
+  await assert.rejects(startApplicationAfterReady({
+    createStartupWindow: () => ({ close() { events.push('splash:close'); } }),
+    getMainWindow: () => published,
+    runMainStartup: async () => { throw failure; },
+    waitForMainWindowReady: async () => assert.fail('a failed startup has no window to wait for'),
+    onStartupFailure(error, { mainWindow }) {
+      assert.equal(error, failure);
+      assert.equal(mainWindow, published);
+      events.push('hook');
+    }
+  }), error => error === failure);
+
+  assert.deepEqual(events, ['published:hide', 'hook', 'splash:close']);
+});
+
+test('a throwing failure hook cannot mask the startup error or keep the splash open', async () => {
+  const events = [];
+  const failure = new Error('recovery failed');
+
+  await assert.rejects(startApplicationAfterReady({
+    createStartupWindow: () => ({ close() { events.push('splash:close'); } }),
+    runMainStartup: async () => { throw failure; },
+    waitForMainWindowReady: async () => {},
+    onStartupFailure: async () => { events.push('hook'); throw new Error('dialog failed'); }
+  }), error => error === failure);
+
+  assert.deepEqual(events, ['hook', 'splash:close']);
+});
+
+test('without a failure hook a failed startup leaves an existing main window untouched', async () => {
+  const events = [];
+  const failure = new Error('not ready');
+  const mainWindow = { isDestroyed: () => false, hide() { events.push('main:hide'); } };
+
+  await assert.rejects(startApplicationAfterReady({
+    createStartupWindow: () => ({ close() { events.push('splash:close'); } }),
+    getMainWindow: () => mainWindow,
+    runMainStartup: async () => mainWindow,
+    waitForMainWindowReady: async () => { throw failure; }
+  }), error => error === failure);
+
+  assert.deepEqual(events, ['splash:close']);
+});
+
+test('a splash close failure after a ready main window is not treated as a startup failure', async () => {
+  const closeFailure = new Error('close failed');
+  let hookCalls = 0;
+  const mainWindow = { isDestroyed: () => false, hide() { assert.fail('a ready main window is never hidden'); } };
+
+  await assert.rejects(startApplicationAfterReady({
+    createStartupWindow: () => ({}),
+    runMainStartup: async () => mainWindow,
+    waitForMainWindowReady: async () => {},
+    closeStartupWindow: () => { throw closeFailure; },
+    onStartupFailure: () => { hookCalls += 1; }
+  }), error => error === closeFailure);
+
+  assert.equal(hookCalls, 0);
+});
+
+test('startup tolerates a null splash and a splash that cannot be created', async () => {
+  const mainWindow = { id: 51 };
+  for (const createStartupWindowCase of [() => null, () => { throw new Error('splash failed'); }, async () => { throw new Error('async splash failed'); }]) {
+    const closed = [];
+    const result = await startApplicationAfterReady({
+      createStartupWindow: createStartupWindowCase,
+      runMainStartup: async () => mainWindow,
+      waitForMainWindowReady: async () => {},
+      closeStartupWindow: window => { closed.push(window); }
+    });
+    assert.equal(result, mainWindow);
+    assert.deepEqual(closed, [null]);
+  }
+
+  const failure = new Error('recovery failed');
+  const contexts = [];
+  await assert.rejects(startApplicationAfterReady({
+    createStartupWindow: () => null,
+    runMainStartup: async () => { throw failure; },
+    waitForMainWindowReady: async () => {},
+    onStartupFailure: (error, context) => { contexts.push(context); }
+  }), error => error === failure);
+  assert.deepEqual(contexts, [{ splash: null, mainWindow: null }]);
+});
+
+test('initial main-window visibility starts hidden only for a start-minimized login with the setting and a tray', () => {
+  for (const startMinimizedArg of [false, true]) {
+    for (const startMinimizedSetting of [false, true]) {
+      for (const hasTray of [false, true]) {
+        for (const degraded of [false, true]) {
+          const startsMinimized = startMinimizedArg && startMinimizedSetting && hasTray;
+          const expected = startsMinimized ? (degraded ? 'show-inactive' : 'hidden') : 'show';
+          assert.equal(
+            resolveInitialWindowVisibility({ startMinimizedArg, startMinimizedSetting, hasTray, degraded }),
+            expected,
+            JSON.stringify({ startMinimizedArg, startMinimizedSetting, hasTray, degraded })
+          );
+        }
+      }
+    }
+  }
+  assert.equal(resolveInitialWindowVisibility(), 'show');
+  assert.equal(resolveInitialWindowVisibility({ startMinimizedArg: true, startMinimizedSetting: 1, hasTray: {} }), 'hidden');
+});
+
+test('the startup page keeps its default text and escapes a custom progress heading and detail', () => {
+  const defaultPage = startupPageText(createStartupPageUrl());
+  assert.match(defaultPage, /<h1>Starting Minecraft Core…<\/h1><p>Preparing your workspace<\/p>/u);
+  assert.match(defaultPage, /default-src 'none'; style-src 'unsafe-inline'/u);
+
+  const progressPage = startupPageText(createStartupPageUrl({
+    heading: 'Downloading Minecraft Core 26.12.1…',
+    detail: '<script>alert("x")</script> & 40%'
+  }));
+  assert.match(progressPage, /<h1>Downloading Minecraft Core 26\.12\.1…<\/h1>/u);
+  assert.match(progressPage, /<p>&lt;script&gt;alert\(&quot;x&quot;\)&lt;\/script&gt; &amp; 40%<\/p>/u);
+  assert.doesNotMatch(progressPage, /<script>/u);
+  assert.match(progressPage, /default-src 'none'/u);
 });

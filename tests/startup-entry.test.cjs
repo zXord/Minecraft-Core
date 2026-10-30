@@ -1,8 +1,28 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
+const { EventEmitter } = require('node:events');
+
+const FIXTURE_APP_DATA = path.join(os.tmpdir(), 'minecraft-core-startup-entry-app-data');
+const DEVELOPMENT_PROFILE = path.join(FIXTURE_APP_DATA, 'Minecraft Core Development');
+
+// Unpackaged startup defaults to the separate development profile, so an
+// unpackaged fake must report appData and accept setPath. Reading userData
+// throws so no test can materialize an icon cache on disk.
+function developmentApp(fields = {}) {
+  return {
+    isPackaged: false,
+    getPath(name) {
+      if (name === 'appData') return FIXTURE_APP_DATA;
+      throw new Error(`unexpected getPath(${name})`);
+    },
+    setPath() {},
+    ...fields
+  };
+}
 
 async function withEarlyTrace(importEnv, events, run, { brokenSink = false } = {}) {
   const modulePath = path.resolve(__dirname, '../electron/startup-entry.cjs');
@@ -38,7 +58,7 @@ test('startup trace brackets held readiness document and main load with supplied
     const main = new Promise(resolve => { finishMain = resolve; });
     const window = { isDestroyed: () => false };
     const startup = entry.startEarlyStartup({
-      app: { whenReady() { events.push('ready'); return ready; } },
+      app: developmentApp({ whenReady() { events.push('ready'); return ready; } }),
       env: { MINECRAFT_CORE_STARTUP_TRACE: '1' },
       resolveIconPath() { events.push('resolve'); return null; },
       prepareIconPath() { events.push('prepare'); return null; },
@@ -94,7 +114,7 @@ test('startup trace early failures retain readiness and import error identity an
       await withEarlyTrace({}, events, async entry => {
         const window = { isDestroyed: () => false, close() { events.push('close'); } };
         await assert.rejects(entry.startEarlyStartup({
-          app: { whenReady() { if (failureAt === 'ready') return Promise.reject(originalError); return Promise.resolve(); }, quit() { events.push('quit'); } },
+          app: developmentApp({ whenReady() { if (failureAt === 'ready') return Promise.reject(originalError); return Promise.resolve(); }, quit() { events.push('quit'); } }),
           env: { MINECRAFT_CORE_STARTUP_TRACE: '1' },
           resolveIconPath: () => null, prepareIconPath: () => null,
           createWindow: () => window, waitForWindowDocument: async () => {},
@@ -116,7 +136,7 @@ test('startup trace reused early window has document and main boundaries but no 
     entry.publishEarlyStartupWindow(window);
     try {
       assert.equal(await entry.startEarlyStartup({
-        app: { whenReady: async () => {} }, env: { MINECRAFT_CORE_STARTUP_TRACE: '1' },
+        app: developmentApp({ whenReady: async () => {} }), env: { MINECRAFT_CORE_STARTUP_TRACE: '1' },
         resolveIconPath: () => null, prepareIconPath: () => null,
         createWindow() { assert.fail('live existing window must be reused'); },
         waitForWindowDocument: async () => {}, loadMain: () => {}
@@ -162,15 +182,16 @@ test('early entry publishes the branded startup window before it imports the mai
 
   const events = [];
   const startupWindow = Object.freeze({ id: 93, isDestroyed: () => false });
-  const app = {
+  const app = developmentApp({
     whenReady() {
       events.push('app:ready');
       return Promise.resolve();
     }
-  };
+  });
 
   await startupEntry.startEarlyStartup({
     app,
+    env: {},
     BrowserWindow: function BrowserWindow() {},
     resolveIconPath() {
       events.push('icon:resolve');
@@ -219,12 +240,13 @@ test('early entry lets the branded document finish loading before it imports the
   }
 
   const startup = startupEntry.startEarlyStartup({
-    app: {
+    app: developmentApp({
       whenReady() {
         events.push('app:ready');
         return Promise.resolve();
       }
-    },
+    }),
+    env: {},
     BrowserWindow: FakeBrowserWindow,
     resolveIconPath: () => null,
     loadMain() {
@@ -290,6 +312,7 @@ test('early entry preserves direct main test-mode startup without leaving a spla
 
   await startEarlyStartup({
     app: { isPackaged: false, whenReady: async () => { events.push('app:ready'); } },
+    env: { NODE_ENV: 'test', MINECRAFT_CORE_TEST_MODE: '1' },
     shouldCreateStartupWindow: () => false,
     createWindow: () => {
       events.push('startup:create');
@@ -372,6 +395,8 @@ test('development startup creates or overwrites the branded Start Menu shortcut 
   const cachedIconPath = 'C:\\fixture\\AppData\\Roaming\\Minecraft Core\\window-icon-cache\\minecraft-core-content.ico';
   const startupWindow = { isDestroyed: () => false };
   let shortcutWrite = null;
+  const userDataPaths = [];
+  const env = { npm_lifecycle_event: 'dev:electron' };
   t.after(() => { startupEntry.claimEarlyStartupWindow(); });
 
   await startupEntry.startEarlyStartup({
@@ -379,9 +404,10 @@ test('development startup creates or overwrites the branded Start Menu shortcut 
       isPackaged: false,
       getAppPath() { return appPath; },
       getPath(name) { assert.equal(name, 'appData'); return appDataPath; },
+      setPath(name, value) { userDataPaths.push([name, value]); },
       whenReady() { events.push('app:ready'); return Promise.resolve(); }
     },
-    env: { npm_lifecycle_event: 'dev:electron' },
+    env,
     platform: 'win32',
     shellApi: {
       writeShortcutLink(shortcutPath, operation, details) {
@@ -425,6 +451,10 @@ test('development startup creates or overwrites the branded Start Menu shortcut 
       appUserModelId: 'com.minecraft-core.app.dev'
     }
   });
+  const developmentProfile = path.join(appDataPath, 'Minecraft Core Development');
+  assert.deepEqual(userDataPaths, [['userData', developmentProfile]], 'the defaulted profile keeps the shortcut eligible');
+  assert.equal(env.MINECRAFT_CORE_USER_DATA_DIR, developmentProfile);
+  assert.equal(env.MINECRAFT_CORE_DEV_PROFILE_DEFAULTED, '1');
 });
 
 test('development startup explicitly replaces only its exact existing Start Menu shortcut', () => {
@@ -512,20 +542,28 @@ test('development shortcut is a no-op outside real unpackaged Windows startup', 
 
   for (const scenario of scenarios) {
     let shortcutWrites = 0;
+    let appDataReads = 0;
     await startupEntry.startEarlyStartup({
       app: {
         isPackaged: scenario.isPackaged,
         whenReady: async () => {},
-        getPath() { throw new Error(`${scenario.name} must not resolve Start Menu`); },
+        // Only the unpackaged development-profile default may read appData here.
+        getPath(name) {
+          assert.equal(name, 'appData', `${scenario.name} must not resolve another path`);
+          appDataReads += 1;
+          return FIXTURE_APP_DATA;
+        },
+        setPath() {},
         getAppPath() { throw new Error(`${scenario.name} must not resolve app path`); }
       },
-      env: scenario.env,
+      env: { ...scenario.env },
       platform: scenario.platform,
       shellApi: { writeShortcutLink() { shortcutWrites += 1; return true; } },
       shouldCreateStartupWindow: () => false,
       loadMain() {}
     });
     assert.equal(shortcutWrites, 0, scenario.name);
+    assert.equal(appDataReads, scenario.name === 'non-Windows' ? 1 : 0, scenario.name);
   }
 });
 
@@ -577,6 +615,7 @@ test('development shortcut failures warn and leave first-window startup running'
       isPackaged: false,
       getAppPath: () => 'C:\\fixture\\minecraft-core',
       getPath(name) { assert.equal(name, 'appData'); return 'C:\\fixture\\AppData\\Roaming'; },
+      setPath() {},
       whenReady() { events.push('app:ready'); return Promise.resolve(); }
     },
     env: { npm_lifecycle_event: 'dev:electron' },
@@ -598,11 +637,12 @@ test('early entry does not call the Windows AppUserModelID API on non-Windows pl
   const events = [];
 
   await startupEntry.startEarlyStartup({
-    app: {
+    app: developmentApp({
       setName(value) { events.push(`name:${value}`); },
       setAppUserModelId() { events.push('app-id'); },
       whenReady() { events.push('app:ready'); return Promise.resolve(); }
-    },
+    }),
+    env: {},
     platform: 'linux',
     shouldCreateStartupWindow: () => false,
     loadMain() { events.push('main:import'); }
@@ -664,10 +704,10 @@ test('a failed main import closes and unpublishes the early window before quitti
   };
 
   await assert.rejects(startupEntry.startEarlyStartup({
-    app: {
+    app: developmentApp({
       whenReady() { events.push('app:ready'); return Promise.resolve(); },
       quit() { events.push('app:quit'); }
-    },
+    }),
     env: {},
     shouldCreateStartupWindow: () => true,
     resolveIconPath: () => null,
@@ -699,10 +739,10 @@ test('failed startup does not wait indefinitely for asynchronous window cleanup'
   };
 
   const startup = startupEntry.startEarlyStartup({
-    app: {
+    app: developmentApp({
       whenReady: async () => {},
       quit() { events.push('app:quit'); }
-    },
+    }),
     env: {},
     shouldCreateStartupWindow: () => true,
     resolveIconPath: () => null,
@@ -727,10 +767,10 @@ test('a readiness failure quits startup without masking the primary error', asyn
   const failure = new Error('electron readiness failed');
 
   await assert.rejects(startupEntry.startEarlyStartup({
-    app: {
+    app: developmentApp({
       whenReady() { events.push('app:ready'); return Promise.reject(failure); },
       quit() { events.push('app:quit'); }
-    },
+    }),
     env: {},
     loadMain() { events.push('main:import'); }
   }), failure);
@@ -754,4 +794,314 @@ test('a userData override failure quits startup without masking the primary erro
   }), failure);
 
   assert.deepEqual(events, ['path:set', 'app:quit']);
+});
+
+test('a failed main import awaits the fatal reporter before the splash closes and the app quits', async t => {
+  const startupEntry = loadStartupEntry();
+  t.after(() => { startupEntry.claimEarlyStartupWindow(); });
+  const events = [];
+  const failure = new Error('main import failed');
+  const startupWindow = { isDestroyed: () => false, close() { events.push('startup:close'); } };
+  const app = developmentApp({
+    whenReady: async () => { events.push('app:ready'); },
+    quit() { events.push('app:quit'); }
+  });
+  let releaseReport;
+  const reportGate = new Promise(resolve => { releaseReport = resolve; });
+
+  const startup = startupEntry.startEarlyStartup({
+    app,
+    env: {},
+    argv: ['electron.exe', '.'],
+    shouldCreateStartupWindow: () => true,
+    resolveIconPath: () => null,
+    createWindow() { events.push('startup:create'); return startupWindow; },
+    waitForWindowDocument: async () => {},
+    loadMain() { events.push('main:import'); throw failure; },
+    async reportFatalStartup(context) {
+      events.push('report:start');
+      assert.equal(context.error, failure);
+      assert.equal(context.app, app);
+      assert.equal(context.startupWindow, startupWindow);
+      await reportGate;
+      events.push('report:end');
+    }
+  });
+
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ['app:ready', 'startup:create', 'main:import', 'report:start'],
+    'the splash stays open while the user reads the report');
+  releaseReport();
+  await assert.rejects(startup, error => error === failure);
+  assert.deepEqual(events, [
+    'app:ready', 'startup:create', 'main:import', 'report:start', 'report:end', 'startup:close', 'app:quit'
+  ]);
+  assert.equal(startupEntry.claimEarlyStartupWindow(), null);
+});
+
+test('a failing fatal reporter still closes the splash, quits and keeps the original error', async () => {
+  const startupEntry = loadStartupEntry();
+  const events = [];
+  const failure = new Error('main import failed');
+
+  await assert.rejects(startupEntry.startEarlyStartup({
+    app: developmentApp({ whenReady: async () => {}, quit() { events.push('app:quit'); } }),
+    env: {},
+    argv: ['electron.exe', '.'],
+    shouldCreateStartupWindow: () => true,
+    resolveIconPath: () => null,
+    createWindow: () => ({ isDestroyed: () => false, close() { events.push('startup:close'); } }),
+    waitForWindowDocument: async () => {},
+    loadMain() { throw failure; },
+    async reportFatalStartup() { events.push('report'); throw new Error('dialog failed'); }
+  }), error => error === failure);
+
+  assert.deepEqual(events, ['report', 'startup:close', 'app:quit']);
+});
+
+test('test, packaged-smoke and real-E2E launches never show the fatal reporter or consume the smoke nonce', async t => {
+  const startupEntry = loadStartupEntry();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-startup-entry-smoke-'));
+  t.after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    startupEntry.claimEarlyStartupWindow();
+  });
+  const nonce = 'd'.repeat(64);
+  const markerPath = path.join(root, '.minecraft-core-packaged-smoke');
+  fs.writeFileSync(markerPath, nonce, 'utf8');
+  const realUserData = path.join(root, 'user-data');
+  const scenarios = [
+    { name: 'test startup', isPackaged: false, env: { NODE_ENV: 'test', MINECRAFT_CORE_TEST_MODE: '1' }, argv: ['electron.exe', '.'] },
+    {
+      name: 'packaged smoke',
+      isPackaged: true,
+      env: {},
+      argv: ['Minecraft Core.exe', `--minecraft-core-packaged-smoke=${nonce}`, `--user-data-dir=${root}`]
+    },
+    {
+      name: 'real-E2E root argument',
+      isPackaged: false,
+      env: { MINECRAFT_CORE_USER_DATA_DIR: realUserData },
+      argv: ['electron.exe', '.', `--minecraft-core-real-e2e-root=${root}`]
+    },
+    {
+      name: 'real-E2E notification flag',
+      isPackaged: false,
+      env: { MINECRAFT_CORE_USER_DATA_DIR: realUserData, MINECRAFT_CORE_REAL_E2E_DISABLE_NATIVE_NOTIFICATIONS: '1' },
+      argv: ['electron.exe', '.']
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    const events = [];
+    const failure = new Error(`${scenario.name} main import failed`);
+    await assert.rejects(startupEntry.startEarlyStartup({
+      app: { isPackaged: scenario.isPackaged, setPath() {}, whenReady: async () => {}, quit() { events.push('app:quit'); } },
+      env: scenario.env,
+      argv: scenario.argv,
+      shouldCreateStartupWindow: () => true,
+      resolveIconPath: () => null,
+      createWindow: () => ({ isDestroyed: () => false, close() { events.push('startup:close'); } }),
+      waitForWindowDocument: async () => {},
+      loadMain() { throw failure; },
+      reportFatalStartup() { events.push('report'); }
+    }), error => error === failure, scenario.name);
+    assert.deepEqual(events, ['startup:close', 'app:quit'], scenario.name);
+    assert.equal(fs.readFileSync(markerPath, 'utf8'), nonce, `${scenario.name} must not consume the smoke nonce`);
+  }
+});
+
+test('non-interactive startup is decided from argv and env alone', () => {
+  const { isNonInteractiveStartup } = loadStartupEntry();
+  assert.equal(isNonInteractiveStartup({ env: {}, argv: ['Minecraft Core.exe'] }), false);
+  assert.equal(isNonInteractiveStartup({ env: {}, argv: ['Minecraft Core.exe', '--start-minimized'] }), false);
+  assert.equal(isNonInteractiveStartup({ env: { NODE_ENV: 'development' }, argv: ['electron.exe', '.'] }), false);
+  assert.equal(isNonInteractiveStartup({ env: { NODE_ENV: 'test', MINECRAFT_CORE_TEST_MODE: '1' }, argv: [] }), true);
+  assert.equal(isNonInteractiveStartup({ env: {}, argv: ['Minecraft Core.exe', '--minecraft-core-packaged-smoke=not-a-nonce'] }), true);
+  assert.equal(isNonInteractiveStartup({ env: {}, argv: ['electron.exe', '.', '--minecraft-core-real-e2e-root=C:\\anything'] }), true);
+  assert.equal(isNonInteractiveStartup({ env: { MINECRAFT_CORE_REAL_E2E_DISABLE_NATIVE_NOTIFICATIONS: '1' }, argv: [] }), true);
+  assert.equal(isNonInteractiveStartup({ env: null, argv: null }), false);
+});
+
+test('a start-minimized login creates no early splash and still loads the main process', async () => {
+  const startupEntry = loadStartupEntry();
+  for (const isPackaged of [true, false]) {
+    const events = [];
+    const whenReady = async () => { events.push('app:ready'); };
+    const result = await startupEntry.startEarlyStartup({
+      app: isPackaged ? { isPackaged: true, whenReady } : developmentApp({ whenReady }),
+      env: {},
+      argv: ['Minecraft Core.exe', '--start-minimized'],
+      platform: 'win32',
+      resolveIconPath() { events.push('icon:resolve'); return null; },
+      createWindow() { events.push('startup:create'); return { isDestroyed: () => false }; },
+      waitForWindowDocument: async () => { events.push('startup:document'); },
+      loadMain() { events.push('main:import'); }
+    });
+    assert.equal(result, null, `packaged=${isPackaged}`);
+    assert.deepEqual(events, ['app:ready', 'main:import'], `packaged=${isPackaged}`);
+    assert.equal(startupEntry.claimEarlyStartupWindow(), null);
+  }
+
+  const packagedApp = { isPackaged: true };
+  assert.equal(startupEntry.shouldCreateEarlyStartupWindow({ app: packagedApp, env: {}, argv: ['Minecraft Core.exe', '--start-minimized'] }), false);
+  assert.equal(startupEntry.shouldCreateEarlyStartupWindow({ app: packagedApp, env: {}, argv: ['Minecraft Core.exe'] }), true);
+  assert.equal(startupEntry.shouldCreateEarlyStartupWindow({
+    app: { isPackaged: false }, env: { NODE_ENV: 'test', MINECRAFT_CORE_TEST_MODE: '1' }, argv: ['electron.exe', '.']
+  }), false);
+});
+
+test('unpackaged startup without an override opens the Development profile and exports it for the main process', () => {
+  const { applyEarlyUserDataOverride } = loadStartupEntry();
+  const calls = [];
+  const env = {};
+
+  const result = applyEarlyUserDataOverride({
+    app: developmentApp({ setPath(name, value) { calls.push([name, value]); } }),
+    env
+  });
+
+  assert.equal(result, DEVELOPMENT_PROFILE);
+  assert.deepEqual(calls, [['userData', DEVELOPMENT_PROFILE]]);
+  assert.deepEqual(env, {
+    MINECRAFT_CORE_USER_DATA_DIR: DEVELOPMENT_PROFILE,
+    MINECRAFT_CORE_DEV_PROFILE_DEFAULTED: '1'
+  });
+  assert.throws(() => applyEarlyUserDataOverride({ app: { isPackaged: false, setPath() {} }, env: {} }), TypeError,
+    'an unpackaged run that cannot resolve appData fails instead of opening the real profile');
+});
+
+test('packaged, test-mode and explicitly overridden startups are never redirected to the Development profile', () => {
+  const { applyEarlyUserDataOverride } = loadStartupEntry();
+  const forbiddenAppData = () => assert.fail('appData must not be read');
+
+  const packagedCalls = [];
+  const packagedEnv = {};
+  assert.equal(applyEarlyUserDataOverride({
+    app: { isPackaged: true, getPath: forbiddenAppData, setPath(...args) { packagedCalls.push(args); } },
+    env: packagedEnv
+  }), null);
+  assert.deepEqual(packagedCalls, []);
+  assert.deepEqual(packagedEnv, {});
+
+  const testEnv = { NODE_ENV: 'test', MINECRAFT_CORE_TEST_MODE: '1' };
+  assert.equal(applyEarlyUserDataOverride({
+    app: { isPackaged: false, getPath: forbiddenAppData, setPath: () => assert.fail('test mode keeps its own profile') },
+    env: testEnv
+  }), null);
+  assert.deepEqual(testEnv, { NODE_ENV: 'test', MINECRAFT_CORE_TEST_MODE: '1' });
+
+  const isolated = path.join(os.tmpdir(), 'minecraft-core-explicit-profile');
+  const explicitCalls = [];
+  const explicitEnv = { MINECRAFT_CORE_USER_DATA_DIR: isolated };
+  assert.equal(applyEarlyUserDataOverride({
+    app: { isPackaged: false, getPath: forbiddenAppData, setPath(...args) { explicitCalls.push(args); } },
+    env: explicitEnv
+  }), path.resolve(isolated));
+  assert.deepEqual(explicitCalls, [['userData', path.resolve(isolated)]]);
+  assert.deepEqual(explicitEnv, { MINECRAFT_CORE_USER_DATA_DIR: isolated });
+});
+
+test('only the defaulted Development profile keeps the development shortcut eligible', () => {
+  const { writeDevelopmentStartMenuShortcut } = loadStartupEntry();
+  const writes = [];
+  const app = {
+    isPackaged: false,
+    getAppPath: () => 'C:\\fixture\\minecraft-core',
+    getPath(name) { assert.equal(name, 'appData'); return FIXTURE_APP_DATA; }
+  };
+  const shellApi = { writeShortcutLink(shortcutPath) { writes.push(shortcutPath); return true; } };
+  const options = { app, shellApi, platform: 'win32', iconPath: 'C:\\fixture\\icon.ico' };
+
+  assert.equal(writeDevelopmentStartMenuShortcut({ ...options, env: {
+    npm_lifecycle_event: 'dev:electron',
+    MINECRAFT_CORE_USER_DATA_DIR: DEVELOPMENT_PROFILE,
+    MINECRAFT_CORE_DEV_PROFILE_DEFAULTED: '1'
+  } }), true);
+  assert.equal(writeDevelopmentStartMenuShortcut({ ...options, env: {
+    npm_lifecycle_event: 'dev:electron',
+    MINECRAFT_CORE_USER_DATA_DIR: path.join(os.tmpdir(), 'minecraft-core-qa-profile'),
+    MINECRAFT_CORE_DEV_PROFILE_DEFAULTED: '1'
+  } }), false, 'an inherited marker cannot make an isolated profile rewrite the shortcut');
+  assert.deepEqual(writes, [path.join(FIXTURE_APP_DATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Minecraft Core Development.lnk')]);
+});
+
+async function withFakeElectron(electron, updateServiceModule, run) {
+  const modulePath = path.resolve(__dirname, '../electron/startup-entry.cjs');
+  const originalLoad = Module._load;
+  const loads = [];
+  Module._load = function(request, parent, isMain) {
+    if (request === 'electron') return electron;
+    if (parent?.filename === modulePath &&
+        (request === './utils/startup-failure-reporter.cjs' || request === './services/update-service.cjs')) {
+      loads.push(request);
+      if (request === './services/update-service.cjs') return updateServiceModule;
+    }
+    return originalLoad(request, parent, isMain);
+  };
+  delete require.cache[modulePath];
+  try { return await run(require(modulePath), loads); }
+  finally { delete require.cache[modulePath]; Module._load = originalLoad; }
+}
+
+test('the default fatal reporter loads lazily after a failure and offers updates over the splash', async () => {
+  const userDataPath = path.join(os.tmpdir(), 'minecraft-core-default-fatal-reporter');
+  const dialogCalls = [];
+  const electron = {
+    BrowserWindow: function BrowserWindow() {},
+    dialog: {
+      async showMessageBox(...args) {
+        const [parent, options] = args.length >= 2 ? args : [null, args[0]];
+        dialogCalls.push({ parent, options });
+        return { response: dialogCalls.length === 1 ? 0 : 3 };
+      },
+      showErrorBox() { assert.fail('Electron is ready, so the dialog has buttons'); }
+    },
+    shell: { async openExternal() {}, async openPath() { return ''; } }
+  };
+  const updateService = new EventEmitter();
+  updateService.getInstallCapability = () => ({ allowed: false, message: 'This copy is not the installed app.' });
+  updateService.checkForUpdates = async () => assert.fail('a copy that is not installed never checks');
+  updateService.downloadUpdate = async () => assert.fail('a copy that is not installed never downloads');
+  const events = [];
+  const app = {
+    isPackaged: true,
+    isReady: () => true,
+    getPath(name) { assert.equal(name, 'userData'); return userDataPath; },
+    whenReady: async () => {},
+    quit() { events.push('app:quit'); }
+  };
+
+  await withFakeElectron(electron, { getUpdateService: () => updateService }, async (entry, loads) => {
+    await entry.startEarlyStartup({
+      app, env: {}, argv: ['Minecraft Core.exe'], shouldCreateStartupWindow: () => false, loadMain() {}
+    });
+    assert.deepEqual(loads, [], 'a successful startup loads neither the reporter nor the update service');
+
+    const splash = {
+      isDestroyed: () => false,
+      close() { events.push('startup:close'); },
+      loadURL: async () => {},
+      setProgressBar() {}
+    };
+    const failure = new Error('main import failed');
+    await assert.rejects(entry.startEarlyStartup({
+      app,
+      env: {},
+      argv: ['Minecraft Core.exe'],
+      shouldCreateStartupWindow: () => true,
+      resolveIconPath: () => null,
+      createWindow: () => splash,
+      waitForWindowDocument: async () => {},
+      loadMain() { throw failure; }
+    }), error => error === failure);
+
+    assert.deepEqual(loads, ['./utils/startup-failure-reporter.cjs', './services/update-service.cjs']);
+    assert.equal(dialogCalls.length, 3);
+    assert.equal(dialogCalls[0].parent, splash);
+    assert.equal(dialogCalls[0].options.title, 'Minecraft Core could not start');
+    assert.ok(dialogCalls[0].options.detail.includes(path.join(userDataPath, 'logs')));
+    assert.equal(dialogCalls[1].options.message, 'This copy is not the installed app.');
+    assert.deepEqual(events, ['startup:close', 'app:quit']);
+  });
 });
