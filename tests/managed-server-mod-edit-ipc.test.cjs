@@ -10,6 +10,9 @@ const { ModpackStateRepository } = require('../electron/services/modpacks/state/
 const { createDurableFs } = require('../electron/utils/durable-fs.cjs');
 const { createModpackServiceGraph } = require('../electron/bootstrap/create-modpack-service-graph.cjs');
 
+const MANAGED_MESSAGE = 'Individual mod changes are disabled while this server is managed. Use Modpack to change or repair the pack, or review Detach to keep all files and manage mods individually.';
+const UNCHECKED_MESSAGE = "Mod changes are paused because this server's modpack ownership could not be checked. Open Modpack to review it, then retry.";
+
 // Exercise the real IPC composition and policy. Only unrelated factories/native boundaries are substituted.
 function loadSetup({ ipcMain, handlers, store }) {
   const logger = { info() {}, debug() {}, error() {}, warn() {} };
@@ -69,14 +72,15 @@ for (const corrupt of [false, true]) test(`production IPC reads ${corrupt ? 'cor
   const f = fixture(t);
   if (corrupt) fs.writeFileSync(path.join(f.server, '.minecraft-core-state', 'modpack.json'), '{broken');
   f.setup({ webContents: { on() {} }, once() {} }, f.dependencies);
-  await assert.rejects(f.registered.get('delete-mod')(null, f.server, 'addon.jar'), { code: 'MANAGED_MOD_EDIT_BLOCKED' });
+  await assert.rejects(f.registered.get('delete-mod')(null, f.server, 'addon.jar'),
+    { code: 'MANAGED_MOD_EDIT_BLOCKED', message: corrupt ? UNCHECKED_MESSAGE : MANAGED_MESSAGE });
   assert.deepEqual(f.stats(), { writes: 0, revision: 0 });
   assert.equal(fs.readFileSync(path.join(f.server, 'addon.jar'), 'utf8'), 'addon remains');
 });
 test('production IPC missing expected ownership services fails closed', async t => {
   const f = fixture(t); delete f.dependencies.modpacks.stateRepository;
   f.setup({ webContents: { on() {} }, once() {} }, f.dependencies);
-  await assert.rejects(f.registered.get('delete-mod')(null, f.server, 'addon.jar'), { code: 'MANAGED_MOD_EDIT_BLOCKED' });
+  await assert.rejects(f.registered.get('delete-mod')(null, f.server, 'addon.jar'), { code: 'MANAGED_MOD_EDIT_BLOCKED', message: UNCHECKED_MESSAGE });
   assert.deepEqual(f.stats(), { writes: 0, revision: 0 });
 });
 
@@ -104,7 +108,9 @@ for (const ownership of ['managed', 'unmanaged', 'absent', 'unavailable']) test(
   f.setup({ webContents: { on() {} }, once() {} }, graph);
   const write = () => f.registered.get('delete-mod')(null, f.server, 'addon.jar');
   if (ownership === 'managed' || ownership === 'unavailable') {
-    await assert.rejects(write(), { code: ownership === 'unavailable' ? 'CLIENT_PACK_UNAVAILABLE' : 'MANAGED_MOD_EDIT_BLOCKED' });
+    await assert.rejects(write(), ownership === 'unavailable'
+      ? { code: 'CLIENT_PACK_UNAVAILABLE' }
+      : { code: 'MANAGED_MOD_EDIT_BLOCKED', message: MANAGED_MESSAGE });
     assert.deepEqual(f.stats(), { writes: 0, revision: 0 });
   } else {
     assert.equal(await write(), true);

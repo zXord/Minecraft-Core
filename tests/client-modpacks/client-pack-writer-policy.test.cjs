@@ -6,6 +6,18 @@ const path = require('node:path');
 const { createServerMutationPolicy } = require('../../electron/services/server-mutation-policy.cjs');
 const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
 const { createClientPackIntegration } = require('../../electron/services/client-modpacks/client-pack-integration.cjs');
+const { markCurrentServerMutationDirty } = require('../../electron/services/server-mutation-context.cjs');
+const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
+const { HOST_UNREACHABLE_REASON } = require('../../electron/services/management-session-transport.cjs');
+const LOCAL_CONTENT_CHANNELS = ['toggle-client-mod', 'delete-client-mod', 'toggle-client-asset', 'delete-client-asset',
+  'toggle-manual-mod', 'remove-manual-mods', 'disable-client-mod', 'disable-client-mods', 'clear-client-mod-cache',
+  'migrate-client-mod-metadata', 'install-client-mod', 'update-client-mod', 'update-client-mods', 'update-manual-mod',
+  'download-client-mod-version-updates'];
+function hostUnreachable() {
+  const error = new ModpackError('CLIENT_PACK_UNAVAILABLE', 'The matching client requirement could not be read');
+  Object.defineProperty(error, 'reason', { value: HOST_UNREACHABLE_REASON });
+  return error;
+}
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'managed-writer-policy-')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const target = { clientId: 'registered', clientPath: root }; const mod = path.join(root, 'preserve.jar'); fs.writeFileSync(mod, 'original pack');
@@ -14,7 +26,10 @@ function fixture(t) {
   const integration = createClientPackIntegration({ resolveClient: async () => target, resolveClientByPath: async () => target,
     processGuard: { withMutation: async (_target, work) => { state.guards++; return work(); } },
     transaction: { status: async () => null }, stateStore: { read: async () => null },
-    managementClient: { readRequirement: async () => ({ descriptor: state.requirement, binding: { generation: 'writer-fixture' } }) }, clientPackService: {} });
+    managementClient: { readRequirement: async () => {
+      if (state.requirement === 'unreachable') throw hostUnreachable();
+      return { descriptor: state.requirement, binding: { generation: 'writer-fixture' } };
+    } }, clientPackService: {} });
   const policy = createServerMutationPolicy({ coordinator, getInstances: () => [{ id: 'registered', type: 'client', path: root }],
     getClientPackIntegration: () => integration });
   return { root, mod, state, policy, coordinator, write: async () => { state.calls++; fs.writeFileSync(mod, 'changed'); return true; } };
@@ -31,6 +46,19 @@ for (const channel of ['minecraft-check-mods', 'minecraft-check-client', 'minecr
     assert.equal(fs.readFileSync(f.mod, 'utf8'), 'original pack'); assert.equal(f.state.calls, 0); assert.equal(f.state.guards, 1);
   });
 }
+test('with an unreachable host, client-local content edits run once while host-synced mod channels stay refused', async t => {
+  for (const channel of LOCAL_CONTENT_CHANNELS) {
+    const f = fixture(t); f.state.requirement = 'unreachable';
+    const request = channel === 'migrate-client-mod-metadata' ? f.root : { clientPath: f.root };
+    assert.equal(await f.policy.wrapHandler(channel, f.write)(null, request), true, channel);
+    assert.equal(f.state.calls, 1, channel); assert.equal(f.state.guards, 1, channel);
+  }
+  for (const channel of ['minecraft-download-mods', 'minecraft-check-mods']) {
+    const f = fixture(t); f.state.requirement = 'unreachable';
+    await assert.rejects(f.policy.wrapHandler(channel, f.write)(null, { clientPath: f.root }), { code: 'CLIENT_PACK_UNAVAILABLE' });
+    assert.equal(f.state.calls, 0, channel); assert.equal(fs.readFileSync(f.mod, 'utf8'), 'original pack');
+  }
+});
 test('unmanaged writer runs under both coordinator and client guard without recursively acquiring either', async t => {
   const f = fixture(t); f.state.requirement = null;
   assert.equal(await f.policy.wrapHandler('minecraft-download-mods', f.write)(null, { clientPath: f.root }), true);
@@ -83,10 +111,23 @@ test('registry replacement cannot retype a current client as a server before met
 
 for (const channel of ['save-instances', 'write-eula']) test(`${channel} checks independent client ownership even after unregister`, async t => {
   const f = fixture(t); let checked = 0;
+  // save-instances inspects the registration it adds; write-eula the registered server it writes.
   const policy = createServerMutationPolicy({ coordinator: f.coordinator,
-    getInstances: () => [{ id: 'server', type: 'server', path: f.root }],
+    getInstances: () => (channel === 'save-instances' ? [] : [{ id: 'server', type: 'server', path: f.root }]),
     getClientPackIntegration: () => ({ async assertServerDestination(value) { assert.equal(value, f.root); checked++; throw Object.assign(new Error('owned'), { code: 'RECOVERY_REQUIRED' }); } }) });
   await assert.rejects(policy.wrapHandler(channel, f.write)(null, channel === 'save-instances'
     ? [{ id: 'server', type: 'server', path: f.root }] : { path: f.root }), { code: 'RECOVERY_REQUIRED' });
   assert.equal(checked, 1); assert.equal(f.state.calls, 0);
+});
+
+test('save-instances neither inspects nor reserves a registration it re-lists unchanged', async t => {
+  const f = fixture(t); let checked = 0; let reserved = null;
+  const registration = { id: 'server', type: 'server', path: f.root };
+  const policy = createServerMutationPolicy({ coordinator: f.coordinator, getInstances: () => [registration],
+    getClientPackIntegration: () => ({ async assertServerDestination() { checked++; throw Object.assign(new Error('owned'), { code: 'RECOVERY_REQUIRED' }); } }) });
+  const result = await policy.wrapHandler('save-instances', async () => {
+    reserved = markCurrentServerMutationDirty(f.root);
+    return { success: true };
+  })(null, [registration]);
+  assert.deepEqual(result, { success: true }); assert.equal(checked, 0); assert.equal(reserved, false);
 });

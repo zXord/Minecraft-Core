@@ -170,6 +170,17 @@ function isSameServerInstance(left, right) {
   return !!left.path && !!right.path && left.path === right.path;
 }
 
+// The same folder as the server mutation coordinator keys it (case and Unicode
+// normalization ignored), so a registration the policy leaves unreserved is
+// never written here.
+function sameInstancePath(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string' || !left.trim() || !right.trim()) {
+    return false;
+  }
+  const key = (value) => path.resolve(value.trim()).normalize('NFC').toLocaleLowerCase('en-US');
+  return key(left) === key(right);
+}
+
 function getRemovedServerInstances(currentInstances, nextInstances) {
   const nextServers = (nextInstances || []).filter((instance) => instance && instance.type === 'server');
   return (currentInstances || []).filter((instance) => {
@@ -979,6 +990,13 @@ function createSettingsHandlers({ invalidateManagementSession = () => {} } = {})
             const folderServerConfig = instance.type === 'server' && instance.path
               ? readServerConfig(instance.path, getServerConfigDefaults(instance.path))
               : null;
+            // Re-listing a registered server (same id, same folder) only reorders or
+            // renames the list. Its values were read from that folder, so nothing is
+            // ever written back to it.
+            const alreadyRegistered = instance.type === 'server' && currentInstances.some(existing =>
+              existing && existing.type === 'server' && existing.id === instance.id &&
+              sameInstancePath(existing.path, instance.path)
+            );
             const folderClientConfig = instance.type === 'client' && instance.path
               ? readClientConfig(instance.path)
               : null;
@@ -995,7 +1013,8 @@ function createSettingsHandlers({ invalidateManagementSession = () => {} } = {})
               }
 
               let migratedSecret = '';
-              if ((!folderServerConfig || !folderServerConfig.managementInviteSecret) && existingInstance?.managementInviteSecret && instance.path) {
+              if (!alreadyRegistered && folderServerConfig && !folderServerConfig.managementInviteSecret &&
+                  existingInstance?.managementInviteSecret && instance.path) {
                 try {
                   ensureEncryptionAvailable();
                   migratedSecret = unpackSecret(existingInstance.managementInviteSecret);
@@ -1027,11 +1046,24 @@ function createSettingsHandlers({ invalidateManagementSession = () => {} } = {})
                 validInstance.managementInviteHost = folderInviteHost;
               } else if (typeof instance.managementInviteHost === 'string') {
                 validInstance.managementInviteHost = instance.managementInviteHost;
-                if (instance.path) {
-                  updateServerConfig(instance.path, {
-                    ...(folderServerConfig || {}),
-                    managementInviteHost: instance.managementInviteHost
-                  }, getServerConfigDefaults(instance.path));
+                // Only a new registration's existing folder receives the host, and a
+                // folder that cannot take it never stops the list from being saved.
+                if (instance.path && folderServerConfig && !alreadyRegistered && instance.managementInviteHost) {
+                  try {
+                    updateServerConfig(instance.path, {
+                      ...folderServerConfig,
+                      managementInviteHost: instance.managementInviteHost
+                    }, getServerConfigDefaults(instance.path));
+                  } catch (error) {
+                    logger.warn('Invite host was not written to the server folder', {
+                      category: 'settings',
+                      data: {
+                        handler: 'save-instances',
+                        instanceId: instance.id,
+                        error: error.message
+                      }
+                    });
+                  }
                 }
               } else if (existingInstance && typeof existingInstance.managementInviteHost === 'string') {
                 validInstance.managementInviteHost = existingInstance.managementInviteHost;

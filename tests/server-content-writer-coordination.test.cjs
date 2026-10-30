@@ -12,6 +12,7 @@ const {
   ServerMutationCoordinator
 } = require('../electron/services/server-mutation-coordinator.cjs');
 const { readContentRevision } = require('../electron/services/server-content-revision.cjs');
+const { getCurrentServerMutationLease } = require('../electron/services/server-mutation-context.cjs');
 const { updateServerConfig } = require('../electron/utils/config-manager.cjs');
 const { createDurableFs } = require('../electron/utils/durable-fs.cjs');
 
@@ -37,7 +38,32 @@ function code(expected) {
   return error => error && error.code === expected;
 }
 
-test('player-list writers cannot write while the server run lease exists', async () => {
+async function startRunning(coordinator, serverPath, operationId) {
+  const runLease = await coordinator.acquireStart(
+    { instanceId: 'server-alpha', serverPath },
+    { operation: 'server-start', operationId, parentMutationLease: null }
+  );
+  runLease.markRunning({ pid: 201 });
+  return runLease;
+}
+
+// A modpack lifecycle operation holds the folder exclusively until it settles.
+async function holdLifecycle(coordinator, serverPath) {
+  let entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const run = coordinator.runMutation({ instanceId: 'server-alpha', serverPath }, {
+    operation: 'modpack-update', operationId: 'task-14-lifecycle', revisionMode: 'none', quiesce: null
+  }, async () => {
+    entered();
+    await gate;
+  });
+  await started;
+  return () => { release(); return run; };
+}
+
+test('player-list writers run while the server runs but never overlap modpack lifecycle work', async () => {
   const serverPath = path.join(os.tmpdir(), 'minecraft-core-task-14-players');
   const { coordinator } = createCoordinator();
   const policy = createServerMutationPolicy({
@@ -45,26 +71,29 @@ test('player-list writers cannot write while the server run lease exists', async
     getInstances: () => [{ id: 'server-alpha', type: 'server', path: serverPath }],
     createOperationId: channel => `content-${channel}`
   });
-  let called = false;
+  let calls = 0;
   const handler = policy.wrapHandler('add-player', async () => {
-    called = true;
+    calls += 1;
     return [];
   });
-  const runLease = await coordinator.acquireStart(
-    { instanceId: 'server-alpha', serverPath },
-    { operation: 'server-start', operationId: 'task-14-player-run', parentMutationLease: null }
-  );
-  runLease.markRunning({ pid: 201 });
-
+  const runLease = await startRunning(coordinator, serverPath, 'task-14-player-run');
   try {
-    await assert.rejects(
-      handler({ sender: { id: 1 } }, 'whitelist', serverPath, 'Alex'),
-      code('SERVER_RUNNING')
-    );
-    assert.equal(called, false);
+    assert.deepEqual(await handler({ sender: { id: 1 } }, 'whitelist', serverPath, 'Alex'), []);
+    assert.equal(calls, 1);
   } finally {
     runLease.release();
   }
+
+  const release = await holdLifecycle(coordinator, serverPath);
+  try {
+    await assert.rejects(
+      handler({ sender: { id: 1 } }, 'whitelist', serverPath, 'Steve'),
+      code('OPERATION_IN_PROGRESS')
+    );
+  } finally {
+    await release();
+  }
+  assert.equal(calls, 1);
 });
 
 test('launcher client assets are coordinated by their registered owning server root', async () => {
@@ -76,24 +105,28 @@ test('launcher client assets are coordinated by their registered owning server r
     getInstances: () => [{ id: 'server-alpha', type: 'server', path: serverPath }],
     createOperationId: channel => `content-${channel}`
   });
-  const handler = policy.wrapHandler('minecraft-download-assets', async () => ({ success: true }));
-  const runLease = await coordinator.acquireStart(
-    { instanceId: 'server-alpha', serverPath },
-    { operation: 'server-start', operationId: 'task-14-client-run', parentMutationLease: null }
-  );
-  runLease.markRunning({ pid: 202 });
-
+  let owners = [];
+  const handler = policy.wrapHandler('minecraft-download-assets', async () => {
+    owners.push(getCurrentServerMutationLease()?.serverPath);
+    return { success: true };
+  });
+  const request = { clientPath, type: 'resourcepacks', requiredItems: [], serverInfo: {} };
+  const runLease = await startRunning(coordinator, serverPath, 'task-14-client-run');
   try {
-    await assert.rejects(
-      handler(
-        { sender: { id: 1 } },
-        { clientPath, type: 'resourcepacks', requiredItems: [], serverInfo: {} }
-      ),
-      code('SERVER_RUNNING')
-    );
+    assert.deepEqual(await handler({ sender: { id: 1 } }, request), { success: true });
   } finally {
     runLease.release();
   }
+  assert.deepEqual(owners, [path.resolve(serverPath)]);
+
+  owners = [];
+  const release = await holdLifecycle(coordinator, serverPath);
+  try {
+    await assert.rejects(handler({ sender: { id: 1 } }, request), code('OPERATION_IN_PROGRESS'));
+  } finally {
+    await release();
+  }
+  assert.deepEqual(owners, []);
 });
 
 test('a registered standalone client root receives one content revision for a successful write', async () => {
@@ -302,25 +335,36 @@ test('browser writer delegates use the same mutation policy as desktop IPC', asy
   const { createCoordinatedBrowserHandlers } = require(
     '../electron/services/browser-writer-delegates.cjs'
   );
+  let calls = 0;
   const delegates = createCoordinatedBrowserHandlers({
     mutationPolicy: policy,
     player: {
-      'add-player': async () => ({ success: true })
+      'add-player': async () => {
+        calls += 1;
+        return { success: true };
+      }
     }
   });
-  const runLease = await coordinator.acquireStart(
-    { instanceId: 'server-alpha', serverPath },
-    { operation: 'server-start', operationId: 'task-14-browser-run', parentMutationLease: null }
-  );
-  runLease.markRunning({ pid: 203 });
+  const runLease = await startRunning(coordinator, serverPath, 'task-14-browser-run');
   try {
-    await assert.rejects(
-      delegates.player['add-player']({ sender: { id: 'browser' } }, 'ops', serverPath, 'Alex'),
-      code('SERVER_RUNNING')
+    assert.deepEqual(
+      await delegates.player['add-player']({ sender: { id: 'browser' } }, 'ops', serverPath, 'Alex'),
+      { success: true }
     );
   } finally {
     runLease.release();
   }
+
+  const release = await holdLifecycle(coordinator, serverPath);
+  try {
+    await assert.rejects(
+      delegates.player['add-player']({ sender: { id: 'browser' } }, 'ops', serverPath, 'Steve'),
+      code('OPERATION_IN_PROGRESS')
+    );
+  } finally {
+    await release();
+  }
+  assert.equal(calls, 1);
 });
 
 test('player and mod hydration paths do not create or rewrite server content', async () => {

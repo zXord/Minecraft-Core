@@ -18,6 +18,8 @@ const {
   getServerMutationCoordinator,
   markCurrentServerMutationDirty
 } = require('../services/server-mutation-context.cjs');
+const { canonicalCoordinatorSelector } = require('../services/coordinator-identity.cjs');
+const { NESTED_MANAGED_CLIENT_MESSAGE } = require('../services/server-mutation-policy.cjs');
 
 const logger = getLoggerHandlers();
 const ALLOWED_CHECKSUM_ALGORITHMS = new Set(['sha1', 'sha256', 'sha512', 'md5']);
@@ -596,22 +598,37 @@ function createFileHandlers(win, { assertServerDestination = null } = {}) {
           return folder;
         }
 
-        return await getServerMutationCoordinator().runMutation(
-          { instanceId: null, serverPath: folder },
+        const coordinator = getServerMutationCoordinator();
+        return await coordinator.runMutation(
+          canonicalCoordinatorSelector({
+            instances: appStore.get('instances'),
+            selector: { instanceId: null, serverPath: folder },
+            coordinator
+          }),
           {
             operation: 'initialize-server-folder',
             operationId: `server-folder-${crypto.randomUUID()}`,
             revisionMode: 'auto',
-            quiesce: null
+            quiesce: null,
+            ordinary: true
           },
           async lease => {
-            const instances = appStore.get('instances');
-            if (Array.isArray(instances) && instances.some(instance => instance?.type === 'client' &&
+            if (assertServerDestination) {
+              // A plain client folder may hold or sit inside a server folder, as in
+              // v26.6.1; only a client that uses a matching modpack refuses.
+              const instances = appStore.get('instances');
+              const clients = Array.isArray(instances) ? instances.filter(instance => instance?.type === 'client' &&
                 typeof instance.path === 'string' && instance.path.trim() &&
-                (isPathInside(folder, instance.path) || isPathInside(instance.path, folder)))) {
-              throw new ModpackError('INVALID_REQUEST', 'A client folder cannot be initialized as a server');
+                (isPathInside(folder, instance.path) || isPathInside(instance.path, folder))) : [];
+              for (const client of clients) {
+                try {
+                  await assertServerDestination(client.path);
+                } catch (cause) {
+                  throw new ModpackError('INVALID_REQUEST', NESTED_MANAGED_CLIENT_MESSAGE, { cause });
+                }
+              }
+              await assertServerDestination(folder);
             }
-            if (assertServerDestination) await assertServerDestination(folder);
             lease.markDirty();
 
         // Create needed directories

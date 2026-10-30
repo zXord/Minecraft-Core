@@ -6,6 +6,11 @@ const path = require('node:path');
 const { createServerMutationPolicy } = require('../electron/services/server-mutation-policy.cjs');
 const { ServerMutationCoordinator } = require('../electron/services/server-mutation-coordinator.cjs');
 const { createServerMutationContext } = require('../electron/services/server-mutation-context.cjs');
+const { ModpackStateRepository, createModpackStateObserver } = require('../electron/services/modpacks/state/modpack-state-repository.cjs');
+const { createDurableFs } = require('../electron/utils/durable-fs.cjs');
+
+const MANAGED_MESSAGE = 'Individual mod changes are disabled while this server is managed. Use Modpack to change or repair the pack, or review Detach to keep all files and manage mods individually.';
+const UNCHECKED_MESSAGE = "Mod changes are paused because this server's modpack ownership could not be checked. Open Modpack to review it, then retry.";
 
 const serverChannels = ['direct-add-mod', 'add-mod', 'install-mod', 'install-mod-with-fallback',
   'download-mod-with-fallback', 'delete-mod', 'update-mod', 'move-mod-file', 'enable-and-update-mod',
@@ -41,7 +46,7 @@ for (const paired of [false, true]) for (const channel of [...serverChannels, ..
     const f = fixture(t);
     const payload = args(channel, f.root);
     if (typeof payload[0] === 'object') payload[0].serverInfo = paired ? { paired: true } : null;
-    await assert.rejects(f.policy.wrapHandler(channel, f.write)(null, ...payload), { code: 'MANAGED_MOD_EDIT_BLOCKED' });
+    await assert.rejects(f.policy.wrapHandler(channel, f.write)(null, ...payload), { code: 'MANAGED_MOD_EDIT_BLOCKED', message: MANAGED_MESSAGE });
     assert.equal(fs.readFileSync(f.file, 'utf8'), 'preserve addon');
     assert.deepEqual(f.stats(), { revision: 0, calls: 0, reads: 1 });
   });
@@ -53,17 +58,43 @@ for (const state of [false, null]) for (const channel of serverChannels) {
     assert.deepEqual(f.stats(), { revision: 1, calls: 1, reads: 1 });
   });
 }
-test('corrupt ownership refuses writes and does not dirty revision', async t => {
+test('corrupt ownership refuses writes without claiming the server is managed and does not dirty revision', async t => {
   const f = fixture(t, new Error('unreadable state'));
-  await assert.rejects(f.policy.wrapHandler('delete-mod', f.write)(null, f.root, 'addon.jar'), { code: 'MANAGED_MOD_EDIT_BLOCKED' });
+  await assert.rejects(f.policy.wrapHandler('delete-mod', f.write)(null, f.root, 'addon.jar'), { code: 'MANAGED_MOD_EDIT_BLOCKED', message: UNCHECKED_MESSAGE });
   assert.deepEqual(f.stats(), { revision: 0, calls: 0, reads: 1 });
 });
 test('expected missing state service fails closed', async t => {
   const f = fixture(t);
   const policy = createServerMutationPolicy({ coordinator: f.coordinator,
     getInstances: () => [{ id: 'server-a', type: 'server', path: f.root }], getModpackStateRepository: () => null });
-  await assert.rejects(policy.wrapHandler('delete-mod', f.write)(null, f.root, 'addon.jar'), { code: 'MANAGED_MOD_EDIT_BLOCKED' });
+  await assert.rejects(policy.wrapHandler('delete-mod', f.write)(null, f.root, 'addon.jar'), { code: 'MANAGED_MOD_EDIT_BLOCKED', message: UNCHECKED_MESSAGE });
   assert.equal(f.stats().calls, 0);
+});
+test('an unmanaged server reached through a junction edits mods through the state observer', { skip: process.platform !== 'win32' }, async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'managed-server-junction-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const target = path.join(root, 'disk'); fs.mkdirSync(path.join(target, 'Server', 'mods'), { recursive: true });
+  fs.writeFileSync(path.join(target, 'Server', 'mods', 'addon.jar'), 'addon');
+  const link = path.join(root, 'link'); fs.symlinkSync(target, link, 'junction');
+  const serverPath = path.join(link, 'Server');
+  const strict = new ModpackStateRepository({ durableFs: createDurableFs({ allowedRoots: [root], durableClient: {
+    moveWriteThrough: fs.renameSync, replaceFileWriteThrough: fs.renameSync, flushDirectory() {}
+  } }) });
+  let revision = 0; let calls = 0;
+  const coordinator = new ServerMutationCoordinator({ readContentRevision: () => revision, bumpContentRevision: () => ++revision });
+  coordinator.completeStartupRecovery([]);
+  const policyFor = repository => createServerMutationPolicy({ coordinator,
+    getInstances: () => [{ id: 'server-j', type: 'server', path: serverPath }], getModpackStateRepository: () => repository });
+  const write = async () => { calls++; return true; };
+
+  // The strict repository cannot read a folder reached through an alias: refused, honestly.
+  await assert.rejects(policyFor(strict).wrapHandler('delete-mod', write)(null, serverPath, 'addon.jar'),
+    error => error.code === 'MANAGED_MOD_EDIT_BLOCKED' && error.message === UNCHECKED_MESSAGE && !/is managed/u.test(error.message));
+  assert.equal(calls, 0);
+  // The observer proves the server has no modpack state.
+  const observer = createModpackStateObserver({ repository: strict, fsApi: fs });
+  assert.equal(await policyFor(observer).wrapHandler('delete-mod', write)(null, serverPath, 'addon.jar'), true);
+  assert.equal(calls, 1);
 });
 test('mismatched selector rejects before state reads', async t => {
   const f = fixture(t);

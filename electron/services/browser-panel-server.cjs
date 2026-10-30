@@ -215,10 +215,7 @@ class BrowserPanelServer {
   this.authWindowMs = 10 * 60 * 1000;
   this.authMaxFailures = 6;
   this.authLockMs = 15 * 60 * 1000;
-    this.serverMutationPolicy = mutationPolicy || createServerMutationPolicy({
-      getInstances: () => appStore.get('instances') || []
-    });
-    const rawHandlerGroups = handlerGroups || {
+    this.rawHandlerGroups = handlerGroups || {
       management: createManagementServerHandlers(null),
       player: playerHandlers.createPlayerHandlers(),
       serverProperties: serverPropsHandlers.createServerPropertiesHandlers(),
@@ -229,12 +226,21 @@ class BrowserPanelServer {
         'backups:restore': (_event, request) => restoreServerBackup(request)
       }
     };
-    this.browserWriterHandlers = createCoordinatedBrowserHandlers({
-      mutationPolicy: this.serverMutationPolicy,
-      ...rawHandlerGroups
-    });
+    // Without the app's shared policy, a policy with no modpack-state or
+    // matching-client checks (tests construct the panel this way).
+    this.useMutationPolicy(mutationPolicy || createServerMutationPolicy({
+      getInstances: () => appStore.get('instances') || []
+    }));
     this.setupMiddleware();
     this.setupRoutes();
+  }
+
+  useMutationPolicy(mutationPolicy) {
+    this.serverMutationPolicy = mutationPolicy;
+    this.browserWriterHandlers = createCoordinatedBrowserHandlers({
+      mutationPolicy,
+      ...this.rawHandlerGroups
+    });
   }
 
   runCoordinatedWriter(channel, args, work) {
@@ -1827,9 +1833,23 @@ class BrowserPanelServer {
 }
 
 let browserPanelInstance = null;
+let browserPanelMutationPolicy = null;
+
+// Browser writers use the app's shared policy (with its modpack-state and
+// matching-client hooks), exactly like desktop IPC. A panel created before the
+// policy is configured switches to it here.
+function configureBrowserPanelMutationPolicy(mutationPolicy) {
+  if (!mutationPolicy || typeof mutationPolicy.wrapHandler !== 'function' ||
+      typeof mutationPolicy.wrapHandlers !== 'function') {
+    throw new TypeError('A server mutation policy is required');
+  }
+  browserPanelMutationPolicy = mutationPolicy;
+  if (browserPanelInstance) browserPanelInstance.useMutationPolicy(mutationPolicy);
+}
+
 function getBrowserPanel() {
-  if (!browserPanelInstance) browserPanelInstance = new BrowserPanelServer();
+  if (!browserPanelInstance) browserPanelInstance = new BrowserPanelServer({ mutationPolicy: browserPanelMutationPolicy });
   return browserPanelInstance;
 }
 
-module.exports = { BrowserPanelServer, getBrowserPanel };
+module.exports = { BrowserPanelServer, configureBrowserPanelMutationPolicy, getBrowserPanel };

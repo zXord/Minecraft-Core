@@ -126,10 +126,40 @@ test('R6: an unreadable file is repaired inside the server lease with its bytes 
   assert.equal(env.revisions.size, 0);
 });
 
-test('a save while the server runs is refused by the coordinator and leaves the file untouched', async (t) => {
+test('a save during modpack lifecycle work is refused by the coordinator and leaves the file untouched', async (t) => {
   const env = createCoordinatedSave(t);
   fs.mkdirSync(path.dirname(ignoredFile(env.alpha)), { recursive: true });
   fs.writeFileSync(ignoredFile(env.alpha), TORN);
+  let entered;
+  const held = new Promise(resolve => { entered = resolve; });
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const lifecycle = env.coordinator.runMutation({ instanceId: 'server-alpha', serverPath: env.alpha }, {
+    operation: 'modpack-update', operationId: 'ignored-updates-lifecycle', revisionMode: 'none', quiesce: null
+  }, async () => {
+    entered();
+    await gate;
+  });
+  await held;
+
+  try {
+    await assert.rejects(
+      env.save(env.alpha, '{}', { replaceOnlyUnreadable: true }),
+      error => error?.code === 'OPERATION_IN_PROGRESS'
+    );
+  } finally {
+    release();
+    await lifecycle;
+  }
+
+  assert.deepEqual(env.leasesSeen, []);
+  assert.equal(fs.readFileSync(ignoredFile(env.alpha), 'utf8'), TORN);
+  assert.deepEqual(fs.readdirSync(path.dirname(ignoredFile(env.alpha))), ['ignored-mod-updates.json']);
+});
+
+test('a save while the server runs is applied, as in v26.6.1', async (t) => {
+  const env = createCoordinatedSave(t);
+  fs.mkdirSync(env.alpha);
   const runLease = await env.coordinator.acquireStart(
     { instanceId: 'server-alpha', serverPath: env.alpha },
     { operation: 'server-start', operationId: 'ignored-updates-run', parentMutationLease: null }
@@ -137,15 +167,12 @@ test('a save while the server runs is refused by the coordinator and leaves the 
   runLease.markRunning({ pid: 301 });
 
   try {
-    await assert.rejects(
-      env.save(env.alpha, '{}', { replaceOnlyUnreadable: true }),
-      error => error?.code === 'SERVER_RUNNING'
-    );
+    assert.deepEqual(await env.save(env.alpha, JSON.stringify(SNAPSHOT)), { success: true, changed: true });
   } finally {
     runLease.release();
   }
 
-  assert.deepEqual(env.leasesSeen, []);
-  assert.equal(fs.readFileSync(ignoredFile(env.alpha), 'utf8'), TORN);
-  assert.deepEqual(fs.readdirSync(path.dirname(ignoredFile(env.alpha))), ['ignored-mod-updates.json']);
+  assert.equal(env.leasesSeen.length, 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(ignoredFile(env.alpha), 'utf8')), SNAPSHOT);
+  assert.equal(env.revisions.size, 0);
 });

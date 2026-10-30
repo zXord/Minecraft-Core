@@ -8,12 +8,18 @@ const crypto = require('node:crypto');
 const path = require('path');
 const { safeSend } = require('../utils/safe-send.cjs');
 const appStore = require('../utils/app-store.cjs');
-const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
+const { describeServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
+const { nativeToastsAllowed } = require('../utils/native-toast-policy.cjs');
+const { canonicalCoordinatorSelector } = require('./coordinator-identity.cjs');
+const { runInWriteLane } = require('./server-mutation-policy.cjs');
 const {
   getCurrentServerMutationLease,
   getServerMutationCoordinator,
   markCurrentServerMutationDirty
 } = require('./server-mutation-context.cjs');
+
+// Watch files are read-modify-write: the mod-watch IPC writers use this lane too.
+const MOD_WATCH_LANE = 'mod-watch';
 
 let logger = null;
 try {
@@ -92,22 +98,30 @@ function getRegisteredServerSelector(serverPath) {
 }
 
 async function runAvailabilityMutation(serverPath, operation, work) {
+  const coordinator = getServerMutationCoordinator();
   const currentLease = getCurrentServerMutationLease();
-  if (currentLease) {
+  // A mod-watch writer already holds this server and its lane. A released lease
+  // left in a timer's async context grants nothing, so it is not reused.
+  if (currentLease && typeof coordinator.isLiveLease === 'function' && coordinator.isLiveLease(currentLease)) {
     currentLease.assertOwnedPath(serverPath);
     return work();
   }
 
-  const coordinator = getServerMutationCoordinator();
+  const selector = canonicalCoordinatorSelector({
+    instances: appStore.get('instances') || [],
+    selector: getRegisteredServerSelector(serverPath),
+    coordinator
+  });
   return coordinator.runMutation(
-    getRegisteredServerSelector(serverPath),
+    selector,
     {
       operation,
       operationId: `mod-watch-${crypto.randomUUID()}`,
       revisionMode: 'auto',
-      quiesce: null
+      quiesce: null,
+      ordinary: true
     },
-    work
+    lease => runInWriteLane(coordinator, MOD_WATCH_LANE, lease.serverPath, work)
   );
 }
 
@@ -178,7 +192,7 @@ async function hydrateServerState(serverPath) {
 async function addWatch({ serverPath, projectId, modName, fileName, targetMc, targetFabric, targetLoader, targetLoaderVersion }) {
   if (!serverPath || !projectId || !targetMc) throw new Error('Missing required fields');
 
-  const { loader: detectedLoader, loaderVersion: detectedLoaderVersion } = resolveServerLoader(serverPath);
+  const { loader: detectedLoader, loaderVersion: detectedLoaderVersion } = describeServerLoader(serverPath);
   const resolvedLoader = (targetLoader || detectedLoader || (targetFabric ? 'fabric' : null)) || null;
   const resolvedLoaderVersion = targetLoaderVersion || detectedLoaderVersion || targetFabric || null;
 
@@ -209,7 +223,7 @@ async function addWatch({ serverPath, projectId, modName, fileName, targetMc, ta
 
 async function removeWatch({ serverPath, projectId, targetMc, targetFabric, targetLoader, targetLoaderVersion }) {
   const state = await hydrateServerState(serverPath);
-  const { loader: detectedLoader, loaderVersion: detectedLoaderVersion } = resolveServerLoader(serverPath);
+  const { loader: detectedLoader, loaderVersion: detectedLoaderVersion } = describeServerLoader(serverPath);
   const resolvedLoader = (targetLoader || detectedLoader || (targetFabric ? 'fabric' : null)) || null;
   const resolvedLoaderVersion = targetLoaderVersion || detectedLoaderVersion || targetFabric || null;
   const key = `${projectId}::${targetMc}::${resolvedLoader || ''}::${resolvedLoaderVersion || ''}`;
@@ -252,31 +266,59 @@ function scheduleNext(state) {
 async function performCheck() {
   const start = Date.now();
   let totalWatches = 0;
-  for (const [serverPath, state] of serverWatchState.entries()) {
+  for (const [serverPath, state] of [...serverWatchState.entries()]) {
     // An empty or not-yet-due watch set has no server mutation to publish.
     // Rewriting its schedule would invalidate unrelated modpack preflights.
     if (!state.watches?.length || (state.nextCheck && new Date(state.nextCheck).getTime() > start)) continue;
-    await runAvailabilityMutation(serverPath, 'check-mod-availability', async () => {
-      if (!state.watches?.length) return;
-      totalWatches += state.watches.length;
-      state.lastCheck = new Date().toISOString();
-      // Keep history publication and watch removal under one server reservation.
-      const remaining = [];
-      for (const watch of state.watches) {
-        const fulfilled = await checkSingleWatch(serverPath, watch).catch(() => false);
-        if (!fulfilled) {
-          remaining.push(watch);
-        }
-      }
-      state.watches = remaining;
-      scheduleNext(state);
-      await saveWatches(serverPath, state);
-    });
+    totalWatches += state.watches.length;
+    try {
+      await checkServerWatches(serverPath, state);
+    } catch (error) {
+      // One server (busy with a modpack operation, unregistered, unreadable)
+      // never stops the checks of the others.
+      log('warn', 'Mod availability check failed for a server', { error: error.message, serverPath });
+    }
   }
   log('debug', 'Mod availability periodic check complete', { totalWatches, durationMs: Date.now() - start });
 }
 
-async function checkSingleWatch(serverPath, watch) {
+async function checkServerWatches(serverPath, state) {
+  // A server removed from the instance list is not checked at all.
+  getRegisteredServerSelector(serverPath);
+  // Modrinth is asked without holding the server, so its writers and modpack
+  // work are never delayed by the network.
+  const checked = [];
+  for (const watch of [...state.watches]) {
+    checked.push({ key: makeWatchKey(watch), versionFound: await findAvailableVersion(watch) });
+  }
+  const fulfilled = [];
+  // Then one short reservation records the results. Watches added or removed
+  // meanwhile are kept as they are now.
+  await runAvailabilityMutation(serverPath, 'check-mod-availability', async () => {
+    if (!state.watches?.length) return;
+    const checkedAt = new Date().toISOString();
+    const found = new Map(checked.filter(item => item.versionFound).map(item => [item.key, item.versionFound]));
+    const checkedKeys = new Set(checked.map(item => item.key));
+    const remaining = [];
+    for (const watch of state.watches) {
+      const key = makeWatchKey(watch);
+      if (found.has(key)) {
+        fulfilled.push({ watch, versionFound: found.get(key) });
+      } else {
+        if (checkedKeys.has(key)) watch.lastChecked = checkedAt;
+        remaining.push(watch);
+      }
+    }
+    if (fulfilled.length > 0) await recordFulfilled(serverPath, fulfilled);
+    state.watches = remaining;
+    state.lastCheck = checkedAt;
+    scheduleNext(state);
+    await saveWatches(serverPath, state);
+  });
+  for (const { watch, versionFound } of fulfilled) notifyFulfilled(serverPath, watch, versionFound);
+}
+
+async function findAvailableVersion(watch) {
   // Reuse existing IPC handler logic indirectly by calling the mod API service directly
   try {
     const modApiService = require('./mod-api-service.cjs');
@@ -302,29 +344,33 @@ async function checkSingleWatch(serverPath, watch) {
         // Sort newest by datePublished
         matching.sort((a, b) => new Date(b.datePublished).getTime() - new Date(a.datePublished).getTime());
         const latest = matching[0];
-        await recordFulfilled(serverPath, watch, latest.versionNumber || latest.id || 'unknown');
-        return true;
+        return latest.versionNumber || latest.id || 'unknown';
       }
     }
   } catch (err) {
     log('warn', 'Failed checking watch', { error: err.message, projectId: watch.projectId });
   }
-  watch.lastChecked = new Date().toISOString();
-  return false;
+  return null;
 }
 
-async function recordFulfilled(serverPath, watch, versionFound) {
+async function recordFulfilled(serverPath, fulfilled) {
   const history = await loadHistory(serverPath);
-  history.unshift({
-    projectId: watch.projectId,
-    modName: watch.modName,
-    target: watch.target,
-    versionFound,
-    foundAt: new Date().toISOString()
-  });
+  const foundAt = new Date().toISOString();
+  for (const { watch, versionFound } of fulfilled) {
+    history.unshift({
+      projectId: watch.projectId,
+      modName: watch.modName,
+      target: watch.target,
+      versionFound,
+      foundAt
+    });
+  }
   // Keep history capped (optional) - limit to last 200
   if (history.length > 200) history.length = 200;
   await saveHistory(serverPath, history);
+}
+
+function notifyFulfilled(serverPath, watch, versionFound) {
   safeSend('mod-availability-notification', {
     projectId: watch.projectId,
     modName: watch.modName,
@@ -334,7 +380,9 @@ async function recordFulfilled(serverPath, watch, versionFound) {
   });
   try {
     const settings = appStore.get('appSettings') || {};
-    if (settings.modWatch?.showWindowsNotifications) {
+    // A toast re-points the Start Menu shortcut at whichever copy shows it, so
+    // only the installed app may create one.
+    if (settings.modWatch?.showWindowsNotifications && nativeToastsAllowed()) {
       const { Notification } = require('electron');
       let iconPath = null;
       try {
