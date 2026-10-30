@@ -12,6 +12,11 @@ const {
 } = require('../electron/services/server-mutation-context.cjs');
 const { ModpackError } = require('../electron/services/modpacks/errors.cjs');
 const { createDurableFs } = require('../electron/utils/durable-fs.cjs');
+const {
+  createInstanceConfigFsFactory,
+  createLegacyInstanceConfigFs
+} = require('../electron/utils/instance-config-fs.cjs');
+const { readContentRevision } = require('../electron/services/server-content-revision.cjs');
 
 const ALPHA_PATH = 'C:\\Minecraft\\Alpha';
 const BETA_PATH = 'C:\\Minecraft\\Beta';
@@ -1297,7 +1302,8 @@ test('selectors and options are closed and safe operation IDs are mandatory', as
   const invalidSelectors = [
     {},
     { serverPath: 'relative\\server' },
-    { serverPath: 'C:\\' },
+    { serverPath: '/' },
+    { serverPath: '\\\\?\\C:\\Minecraft\\Alpha' },
     { serverPath: 'C:\\Minecraft\\safe\\..\\Alpha' },
     { serverPath: 'C:/Minecraft/./Alpha' },
     { serverPath: ALPHA_PATH, path: BETA_PATH },
@@ -1401,4 +1407,948 @@ test('server mutation context installs once and carries leases only through the 
   });
   assert.equal(context.getCurrentLease(), null);
   assert.equal(context.markCurrentDirty(ALPHA_PATH), false);
+});
+
+// Ordinary writers (every policy-wrapped writer of a server folder) share a
+// folder with each other and with a running server, like v26.6.1. Modpack
+// lifecycle and recovery work stays exclusive and fails fast.
+
+function ordinaryOptions(operationId, overrides = {}) {
+  return {
+    operation: 'test-ordinary-write',
+    operationId,
+    revisionMode: 'auto',
+    quiesce: null,
+    ordinary: true,
+    ...overrides
+  };
+}
+
+function lifecycleOptions(operationId, overrides = {}) {
+  return {
+    operation: 'test-lifecycle',
+    operationId,
+    revisionMode: 'lifecycle',
+    quiesce: async () => {},
+    ...overrides
+  };
+}
+
+const STRICT_CAPABILITY = Object.freeze({
+  readFileBounded() { throw new Error('not used by the in-memory revision store'); },
+  sha256File() { throw new Error('not used by the in-memory revision store'); },
+  writeJsonAtomic() { throw new Error('not used by the in-memory revision store'); }
+});
+
+function prePublicationRefusal(failureCode = 'COMMIT_FAILED') {
+  const error = new ModpackError(failureCode, 'The revision write was refused before it started');
+  Object.defineProperty(error, 'commitPhase', { value: 'pre-publication', enumerable: true });
+  return error;
+}
+
+// Revisions live in memory. Setting control.failure to a function makes every
+// bump throw what it returns. The durable factory returns `capability`.
+function writerFixture({ revisions: initial = {}, capability, factory, ordinaryWaitTimeoutMs } = {}) {
+  const revisions = new Map();
+  for (const [serverPath, revision] of Object.entries(initial)) revisions.set(windowsKey(serverPath), revision);
+  const calls = [];
+  const control = { failure: null };
+  const context = createServerMutationContext();
+  const options = {
+    context,
+    readContentRevision(serverPath) {
+      const key = windowsKey(serverPath);
+      calls.push({ kind: 'read', key });
+      return revisions.get(key) || 0;
+    },
+    bumpContentRevision(serverPath, bumpOptions) {
+      const key = windowsKey(serverPath);
+      calls.push({ kind: 'bump', key, operationId: bumpOptions.operationId, durableFs: bumpOptions.durableFs });
+      if (control.failure) throw control.failure();
+      const current = revisions.get(key) || 0;
+      if (bumpOptions.expectedRevision !== current) throw new Error('content revision compare-and-set mismatch');
+      revisions.set(key, current + 1);
+      return current + 1;
+    }
+  };
+  if (factory) options.durableFsFactory = factory;
+  else if (capability) options.durableFsFactory = () => capability;
+  if (ordinaryWaitTimeoutMs !== undefined) options.ordinaryWaitTimeoutMs = ordinaryWaitTimeoutMs;
+  const coordinator = new ServerMutationCoordinator(options);
+  coordinator.completeStartupRecovery([]);
+  return {
+    calls,
+    context,
+    control,
+    coordinator,
+    revision: serverPath => revisions.get(windowsKey(serverPath)) || 0,
+    setRevision: (serverPath, value) => revisions.set(windowsKey(serverPath), value)
+  };
+}
+
+async function settle(turns = 5) {
+  for (let turn = 0; turn < turns; turn += 1) await new Promise(resolve => setImmediate(resolve));
+}
+
+// Waits until a run's work has started; fails instead of hanging when the run
+// settles first.
+async function entered(signal, run) {
+  await Promise.race([
+    signal.promise,
+    run.then(() => {
+      throw new Error('The run settled before its work started');
+    })
+  ]);
+}
+
+// Starts a run whose work holds its reservation until the returned gate opens.
+async function holdRun(start) {
+  const signal = deferred();
+  const gate = deferred();
+  const run = start(async (...args) => {
+    signal.resolve(args[0]);
+    await gate.promise;
+    return 'held';
+  });
+  await entered(signal, run);
+  return { gate, lease: await signal.promise, run };
+}
+
+function inProgressBy(operationId) {
+  return error => error?.code === 'OPERATION_IN_PROGRESS' && error.details?.operationId === operationId;
+}
+
+test('ordinary shared writers on one folder run together and both revisions are published', async () => {
+  const f = writerFixture({ revisions: { [ALPHA_PATH]: 4 } });
+  const firstIn = deferred();
+  const secondIn = deferred();
+  const gate = deferred();
+  const first = f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('shared-one'), async lease => {
+    lease.markDirty();
+    firstIn.resolve();
+    await gate.promise;
+    return 'one';
+  });
+  const second = f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('shared-two'), async lease => {
+    lease.markDirty();
+    secondIn.resolve();
+    await gate.promise;
+    return 'two';
+  });
+  try {
+    await entered(firstIn, first);
+    await entered(secondIn, second);
+  } finally {
+    gate.resolve();
+  }
+  assert.deepEqual(await Promise.all([first, second]), ['one', 'two']);
+  assert.equal(f.revision(ALPHA_PATH), 6);
+
+  const start = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('after-shared-writers'));
+  assert.equal(start.baseRevision, 6);
+  start.release();
+});
+
+test('a stopped-only ordinary writer waits for shared holders, then runs alone', async () => {
+  const f = writerFixture();
+  const order = [];
+  const holder = await holdRun(work => f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('shared-holder', { revisionMode: 'none' }), async lease => {
+      await work(lease);
+      order.push('shared');
+    }));
+  const exclusive = f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('stopped-only-writer', { revisionMode: 'none', stoppedOnly: true }), async () => {
+      order.push('exclusive');
+      return 'exclusive-done';
+    });
+  await settle();
+  assert.deepEqual(order, []);
+
+  holder.gate.resolve();
+  await holder.run;
+  assert.equal(await exclusive, 'exclusive-done');
+  assert.deepEqual(order, ['shared', 'exclusive']);
+});
+
+test('new shared writers queue behind a waiting exclusive writer', async () => {
+  const f = writerFixture();
+  const order = [];
+  const holder = await holdRun(work => f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('first-shared', { revisionMode: 'none' }), async lease => {
+      await work(lease);
+      order.push('first-shared');
+    }));
+  const exclusive = f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('queued-exclusive', { revisionMode: 'none', stoppedOnly: true }), async () => {
+      order.push('exclusive-start');
+      await settle();
+      order.push('exclusive-end');
+    });
+  const late = f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('late-shared', { revisionMode: 'none' }), async () => {
+      order.push('late-shared');
+    });
+  await settle();
+  assert.deepEqual(order, []);
+
+  holder.gate.resolve();
+  await Promise.all([holder.run, exclusive, late]);
+  assert.deepEqual(order, ['first-shared', 'exclusive-start', 'exclusive-end', 'late-shared']);
+});
+
+test('exclusive ordinary writers run one at a time in arrival order', async () => {
+  const f = writerFixture();
+  const order = [];
+  const holder = await holdRun(work => f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('first-exclusive', { revisionMode: 'none', stoppedOnly: true }), async lease => {
+      await work(lease);
+      order.push('first-exclusive');
+    }));
+  const second = f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('second-exclusive', { revisionMode: 'none', stoppedOnly: true }), async () => {
+      order.push('second-exclusive-start');
+      await settle();
+      order.push('second-exclusive-end');
+    });
+  const group = f.coordinator.runManyMutations([selector('beta', BETA_PATH), selector('alpha', ALPHA_PATH)],
+    ordinaryOptions('third-group', { revisionMode: 'none' }), async () => {
+      order.push('third-group');
+    });
+  await settle();
+  assert.deepEqual(order, []);
+
+  holder.gate.resolve();
+  await Promise.all([holder.run, second, group]);
+  assert.deepEqual(order, ['first-exclusive', 'second-exclusive-start', 'second-exclusive-end', 'third-group']);
+});
+
+test('an ordinary writer that waits past its bound fails with OPERATION_IN_PROGRESS', async () => {
+  const f = writerFixture({ ordinaryWaitTimeoutMs: 25 });
+  const holder = await holdRun(work => f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('slow-shared-holder', { revisionMode: 'none' }), work));
+  let workCalled = false;
+  const startedAt = Date.now();
+  try {
+    await assert.rejects(
+      f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+        ordinaryOptions('timed-out-exclusive', { revisionMode: 'none', stoppedOnly: true }), async () => {
+          workCalled = true;
+        }),
+      inProgressBy('slow-shared-holder')
+    );
+  } finally {
+    holder.gate.resolve();
+  }
+  assert.ok(Date.now() - startedAt >= 15);
+  assert.equal(workCalled, false);
+  await holder.run;
+  assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('after-timeout', { revisionMode: 'none', stoppedOnly: true }), async () => 'ran'), 'ran');
+
+  const immediate = writerFixture({ ordinaryWaitTimeoutMs: 0 });
+  const busy = await holdRun(work => immediate.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('busy-shared-holder', { revisionMode: 'none' }), work));
+  try {
+    await assert.rejects(
+      immediate.coordinator.runManyMutations([selector('alpha', ALPHA_PATH), selector('beta', BETA_PATH)],
+        ordinaryOptions('no-wait-group', { revisionMode: 'none' }), async () => assert.fail('group admitted')),
+      inProgressBy('busy-shared-holder')
+    );
+  } finally {
+    busy.gate.resolve();
+  }
+  await busy.run;
+});
+
+test('lifecycle work and ordinary writers fail fast against each other', async () => {
+  const f = writerFixture();
+  const shared = await holdRun(work => f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('shared-holder', { revisionMode: 'none' }), work));
+  let group;
+  try {
+    await assert.rejects(
+      f.coordinator.runMutation(selector('alpha', ALPHA_PATH), lifecycleOptions('lifecycle-vs-shared'),
+        async () => assert.fail('lifecycle admitted')),
+      inProgressBy('shared-holder')
+    );
+    // The group waits for alpha and is the only claimant of beta.
+    group = f.coordinator.runManyMutations([selector('alpha', ALPHA_PATH), selector('beta', BETA_PATH)],
+      ordinaryOptions('waiting-group', { revisionMode: 'none' }), async () => 'group-ran');
+    await settle();
+    await assert.rejects(
+      f.coordinator.runMutation(selector('beta', BETA_PATH), lifecycleOptions('lifecycle-vs-waiter'),
+        async () => assert.fail('lifecycle admitted')),
+      inProgressBy('waiting-group')
+    );
+  } finally {
+    shared.gate.resolve();
+  }
+  await shared.run;
+  assert.equal(await group, 'group-ran');
+
+  const exclusive = await holdRun(work => f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('exclusive-holder', { revisionMode: 'none', stoppedOnly: true }), work));
+  try {
+    await assert.rejects(
+      f.coordinator.runMutation(selector('alpha', ALPHA_PATH), lifecycleOptions('lifecycle-vs-exclusive'),
+        async () => assert.fail('lifecycle admitted')),
+      inProgressBy('exclusive-holder')
+    );
+  } finally {
+    exclusive.gate.resolve();
+  }
+  await exclusive.run;
+
+  const lifecycle = await holdRun(work => f.coordinator.runMutation(selector('alpha', ALPHA_PATH), {
+    operation: 'install-managed', operationId: 'lifecycle-holder', revisionMode: 'none', quiesce: null
+  }, work));
+  try {
+    for (const [operationId, extra] of [['shared-vs-lifecycle', {}], ['exclusive-vs-lifecycle', { stoppedOnly: true }]]) {
+      await assert.rejects(
+        f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+          ordinaryOptions(operationId, { revisionMode: 'none', ...extra }), async () => assert.fail('writer admitted')),
+        inProgressBy('lifecycle-holder')
+      );
+    }
+    await assert.rejects(
+      f.coordinator.runManyMutations([selector('alpha', ALPHA_PATH), selector('beta', BETA_PATH)],
+        ordinaryOptions('group-vs-lifecycle', { revisionMode: 'none' }), async () => assert.fail('group admitted')),
+      inProgressBy('lifecycle-holder')
+    );
+  } finally {
+    lifecycle.gate.resolve();
+  }
+  await lifecycle.run;
+});
+
+test('shared ordinary writers run while a start is starting or running', async () => {
+  const f = writerFixture({ revisions: { [ALPHA_PATH]: 2 } });
+  const start = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('overlapped-start'));
+  assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('write-while-starting'),
+    async lease => {
+      lease.markDirty();
+      return 'starting-write';
+    }), 'starting-write');
+  start.markRunning({ pid: 4100 });
+  assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('write-while-running'),
+    async lease => {
+      lease.markDirty();
+      return 'running-write';
+    }), 'running-write');
+  assert.equal(await f.coordinator.runManyMutations([selector('beta', BETA_PATH), selector('alpha', ALPHA_PATH)],
+    ordinaryOptions('group-while-running'), async leases => {
+      assert.deepEqual(leases.map(lease => lease.serverPath), [ALPHA_PATH, BETA_PATH]);
+      leases[0].markDirty();
+      return 'group';
+    }), 'group');
+  start.release();
+  assert.equal(f.revision(ALPHA_PATH), 5);
+
+  const next = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('next-start'));
+  assert.equal(next.baseRevision, 5);
+  next.release();
+});
+
+test('stopped-only ordinary writers keep the start rules', async () => {
+  const f = writerFixture();
+  const start = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('stopped-only-start'));
+  await assert.rejects(
+    f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+      ordinaryOptions('stopped-only-vs-starting', { stoppedOnly: true }), async () => assert.fail('writer admitted')),
+    inProgressBy('stopped-only-start')
+  );
+  start.markRunning({ pid: 4200 });
+  await assert.rejects(
+    f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+      ordinaryOptions('stopped-only-vs-running', { stoppedOnly: true }), async () => assert.fail('writer admitted')),
+    code('SERVER_RUNNING')
+  );
+  await assert.rejects(
+    f.coordinator.runManyMutations([selector('alpha', ALPHA_PATH), selector('beta', BETA_PATH)],
+      ordinaryOptions('stopped-only-group', { stoppedOnly: true }), async () => assert.fail('group admitted')),
+    code('SERVER_RUNNING')
+  );
+  start.release();
+  assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('stopped-only-after-stop', { stoppedOnly: true }), async () => 'ran'), 'ran');
+});
+
+test('a plain start overlaps shared ordinary holders but not an exclusive one', async () => {
+  const f = writerFixture();
+  const shared = await holdRun(work => f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('shared-holder', { revisionMode: 'none' }), work));
+  try {
+    const start = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('start-beside-shared'));
+    start.markRunning({ pid: 4300 });
+    start.release();
+  } finally {
+    shared.gate.resolve();
+  }
+  await shared.run;
+
+  const exclusiveHolders = [
+    ['exclusive-holder', work => f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+      ordinaryOptions('exclusive-holder', { revisionMode: 'none', stoppedOnly: true }), work)],
+    ['group-holder', work => f.coordinator.runManyMutations([selector('alpha', ALPHA_PATH), selector('beta', BETA_PATH)],
+      ordinaryOptions('group-holder', { revisionMode: 'none' }), work)]
+  ];
+  for (const [operationId, startHolder] of exclusiveHolders) {
+    const holder = await holdRun(startHolder);
+    try {
+      await assert.rejects(
+        f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions(`start-vs-${operationId}`)),
+        inProgressBy(operationId)
+      );
+    } finally {
+      holder.gate.resolve();
+    }
+    await holder.run;
+  }
+});
+
+test('ordinary writer options are validated', async () => {
+  const f = writerFixture();
+  for (const change of [
+    { quiesce: async () => {} },
+    { revisionMode: 'lifecycle' },
+    { ordinary: 'yes' },
+    { stoppedOnly: 1 },
+    { ordinary: false, stoppedOnly: true }
+  ]) {
+    await assert.rejects(
+      f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('invalid-ordinary', change),
+        async () => assert.fail('writer admitted')),
+      code('INVALID_REQUEST')
+    );
+  }
+  assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('ordinary-none', { revisionMode: 'none' }), async () => 'none'), 'none');
+  assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('ordinary-stopped', { stoppedOnly: true, quiesce: undefined }), async () => 'stopped'), 'stopped');
+
+  for (const ordinaryWaitTimeoutMs of [-1, 1.5, '10', Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => new ServerMutationCoordinator({ ordinaryWaitTimeoutMs }), code('INVALID_REQUEST'));
+  }
+  assert.ok(new ServerMutationCoordinator({ ordinaryWaitTimeoutMs: 0 }) instanceof ServerMutationCoordinator);
+});
+
+test('aborting a waiting ordinary writer cancels it before its work starts', async () => {
+  const f = writerFixture();
+  const holder = await holdRun(work => f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('abort-holder', { revisionMode: 'none' }), work));
+  const controller = new AbortController();
+  let workCalled = false;
+  const waiting = f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('aborted-waiter', { revisionMode: 'none', stoppedOnly: true, signal: controller.signal }), async () => {
+      workCalled = true;
+    });
+  await settle();
+  controller.abort();
+  try {
+    await assert.rejects(waiting, code('CANCELLED'));
+  } finally {
+    holder.gate.resolve();
+  }
+  await holder.run;
+  assert.equal(workCalled, false);
+  // The cancelled writer left the queue, so lifecycle work is admitted again.
+  assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), {
+    operation: 'install-managed', operationId: 'after-abort', revisionMode: 'none', quiesce: null
+  }, async () => 'admitted'), 'admitted');
+});
+
+test('a dirty start and a write while it runs chain their revisions', async () => {
+  const f = writerFixture({ revisions: { [ALPHA_PATH]: 3 } });
+  const start = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('dirty-start'));
+  start.markDirty();
+  start.markRunning({ pid: 4400 });
+  assert.equal(f.revision(ALPHA_PATH), 4);
+  await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('write-while-running'), async lease => {
+    assert.equal(lease.baseRevision, 4);
+    lease.markDirty();
+  });
+  assert.equal(f.revision(ALPHA_PATH), 5);
+  start.release();
+  assert.equal(f.revision(ALPHA_PATH), 5);
+
+  const next = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('after-dirty-start'));
+  assert.equal(next.baseRevision, 5);
+  next.release();
+});
+
+test('a clean start, a write while it runs, and late start changes chain their revisions', async () => {
+  const f = writerFixture({ revisions: { [ALPHA_PATH]: 3 } });
+  const start = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('clean-start'));
+  start.markRunning({ pid: 4401 });
+  await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('write-while-clean-run'), async lease => {
+    lease.markDirty();
+  });
+  assert.equal(f.revision(ALPHA_PATH), 4);
+  assert.equal(start.baseRevision, 4);
+  start.markDirty();
+  assert.equal(start.release(), true);
+  assert.equal(f.revision(ALPHA_PATH), 5);
+
+  const next = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('after-late-dirt'));
+  assert.equal(next.baseRevision, 5);
+  next.release();
+});
+
+test('a start that finalizes while an ordinary write is in flight rebases that write', async () => {
+  const f = writerFixture({ revisions: { [ALPHA_PATH]: 3 } });
+  const writer = await holdRun(work => f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+    ordinaryOptions('in-flight-write'), async lease => {
+      lease.markDirty();
+      return work(lease);
+    }));
+  let start;
+  try {
+    start = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('finalizing-start'));
+    start.markDirty();
+    start.markRunning({ pid: 4402 });
+    assert.equal(f.revision(ALPHA_PATH), 4);
+    assert.equal(writer.lease.baseRevision, 4);
+  } finally {
+    writer.gate.resolve();
+  }
+  assert.equal(await writer.run, 'held');
+  assert.equal(f.revision(ALPHA_PATH), 5);
+  start.release();
+
+  const next = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('after-finalizing-start'));
+  assert.equal(next.baseRevision, 5);
+  next.release();
+});
+
+test('a genuine external revision change still quarantines a strict record', async () => {
+  const f = writerFixture({ revisions: { [ALPHA_PATH]: 3, [BETA_PATH]: 3 }, capability: STRICT_CAPABILITY });
+  await assert.rejects(
+    f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('raced-write'), async lease => {
+      lease.markDirty();
+      f.setRevision(ALPHA_PATH, 9);
+    }),
+    code('COMMIT_FAILED')
+  );
+  await assert.rejects(
+    f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('blocked-after-external-change')),
+    code('RECOVERY_REQUIRED')
+  );
+
+  // A strict writer's compare-and-set refusal is tagged pre-publication but is
+  // still a genuine external change.
+  f.control.failure = () => prePublicationRefusal('PLAN_STALE');
+  await assert.rejects(
+    f.coordinator.runMutation(selector('beta', BETA_PATH), ordinaryOptions('stale-strict-write'), async lease => {
+      lease.markDirty();
+    }),
+    code('PLAN_STALE')
+  );
+  await assert.rejects(
+    f.coordinator.acquireStart(selector('beta', BETA_PATH), startOptions('blocked-after-stale-strict-write')),
+    code('RECOVERY_REQUIRED')
+  );
+});
+
+test('a legacy-writer revision failure keeps the change and fences only modpack lifecycle work', async () => {
+  const legacy = createLegacyInstanceConfigFs();
+  const f = writerFixture({ revisions: { [ALPHA_PATH]: 3 }, capability: legacy });
+  f.control.failure = () => new Error('the server config is read-only');
+
+  assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('legacy-write'), async lease => {
+    lease.markDirty();
+    return 'saved';
+  }), 'saved');
+  assert.equal(f.revision(ALPHA_PATH), 3);
+  assert.equal(f.calls.filter(call => call.kind === 'bump').at(-1).durableFs, legacy);
+
+  const start = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('legacy-start'));
+  start.markDirty();
+  assert.doesNotThrow(() => start.markRunning({ pid: 4500 }));
+  assert.equal(start.release(), true);
+
+  let lifecycleRan = false;
+  await assert.rejects(
+    f.coordinator.runMutation(selector('alpha', ALPHA_PATH), lifecycleOptions('fenced-lifecycle'), async () => {
+      lifecycleRan = true;
+    }),
+    error => error?.code === 'PLAN_STALE' && /change counter could not be saved/.test(error.message)
+  );
+  assert.equal(f.revision(ALPHA_PATH), 3);
+
+  f.control.failure = null;
+  await assert.rejects(
+    f.coordinator.runMutation(selector('alpha', ALPHA_PATH), lifecycleOptions('repairing-lifecycle'), async () => {
+      lifecycleRan = true;
+    }),
+    code('PLAN_STALE')
+  );
+  assert.equal(lifecycleRan, false);
+  assert.equal(f.revision(ALPHA_PATH), 4);
+
+  assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), lifecycleOptions('reviewed-lifecycle'),
+    async lease => {
+      assert.equal(lease.baseRevision, 4);
+      lease.markDirty();
+      f.setRevision(ALPHA_PATH, 5);
+      return 'published';
+    }), 'published');
+});
+
+test('ordinary revision bumps never clear a lifecycle fence', async () => {
+  const f = writerFixture({ revisions: { [ALPHA_PATH]: 3 }, capability: createLegacyInstanceConfigFs() });
+  f.control.failure = () => new Error('the server config is locked');
+  await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('unrecorded-write'), async lease => {
+    lease.markDirty();
+  });
+  f.control.failure = null;
+  await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('recorded-write'), async lease => {
+    lease.markDirty();
+  });
+  assert.equal(f.revision(ALPHA_PATH), 4);
+
+  await assert.rejects(
+    f.coordinator.runMutation(selector('alpha', ALPHA_PATH), lifecycleOptions('still-fenced'),
+      async () => assert.fail('lifecycle admitted')),
+    code('PLAN_STALE')
+  );
+  assert.equal(f.revision(ALPHA_PATH), 5);
+  assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), lifecycleOptions('after-repair'),
+    async lease => {
+      lease.markDirty();
+      f.setRevision(ALPHA_PATH, lease.baseRevision + 1);
+      return 'published';
+    }), 'published');
+});
+
+test('a content revision that goes backwards fences modpack lifecycle work', async () => {
+  const f = writerFixture({ revisions: { [ALPHA_PATH]: 7 } });
+  const observed = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('observe-seven'));
+  observed.release();
+  f.setRevision(ALPHA_PATH, 2);
+
+  const rolledBack = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('observe-two'));
+  assert.equal(rolledBack.baseRevision, 2);
+  rolledBack.release();
+  await assert.rejects(
+    f.coordinator.runMutation(selector('alpha', ALPHA_PATH), lifecycleOptions('after-rollback'),
+      async () => assert.fail('lifecycle admitted')),
+    code('PLAN_STALE')
+  );
+  assert.equal(f.revision(ALPHA_PATH), 3);
+
+  for (const operationId of ['re-reviewed-one', 're-reviewed-two']) {
+    assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), lifecycleOptions(operationId),
+      async lease => {
+        lease.markDirty();
+        f.setRevision(ALPHA_PATH, lease.baseRevision + 1);
+        return 'published';
+      }), 'published');
+  }
+  assert.equal(f.revision(ALPHA_PATH), 5);
+});
+
+test('a strict pre-publication refusal fences lifecycle work and keeps the server running; an untagged one still blocks', async () => {
+  const f = writerFixture({ revisions: { [ALPHA_PATH]: 3, [BETA_PATH]: 3 }, capability: STRICT_CAPABILITY });
+  f.control.failure = () => prePublicationRefusal();
+  const start = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('tagged-refusal-start'));
+  start.markDirty();
+  assert.doesNotThrow(() => start.markRunning({ pid: 4600 }));
+  assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('tagged-refusal-write'),
+    async lease => {
+      lease.markDirty();
+      return 'kept';
+    }), 'kept');
+  assert.equal(start.release(), true);
+  const again = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('after-tagged-refusal'));
+  again.release();
+  await assert.rejects(
+    f.coordinator.runMutation(selector('alpha', ALPHA_PATH), lifecycleOptions('lifecycle-after-tagged-refusal'),
+      async () => assert.fail('lifecycle admitted')),
+    code('PLAN_STALE')
+  );
+
+  f.control.failure = () => new Error('disk uncertain');
+  const strictStart = await f.coordinator.acquireStart(selector('beta', BETA_PATH), startOptions('untagged-failure-start'));
+  strictStart.markDirty();
+  assert.throws(() => strictStart.markRunning({ pid: 4601 }), code('COMMIT_FAILED'));
+  await assert.rejects(
+    f.coordinator.acquireStart(selector('beta', BETA_PATH), startOptions('blocked-after-untagged-failure')),
+    code('RECOVERY_REQUIRED')
+  );
+  await assert.rejects(
+    f.coordinator.runMutation(selector('beta', BETA_PATH), ordinaryOptions('writer-after-untagged-failure'),
+      async () => assert.fail('writer admitted')),
+    code('RECOVERY_REQUIRED')
+  );
+});
+
+test('a refused durable writer is pre-publication for ordinary writers and plain starts', async () => {
+  const f = writerFixture({
+    revisions: { [ALPHA_PATH]: 1 },
+    factory() {
+      throw new Error('ArchiveWorker.exe is unavailable');
+    }
+  });
+  const start = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('refused-writer-start'));
+  start.markDirty();
+  assert.doesNotThrow(() => start.markRunning({ pid: 4602 }));
+  start.release();
+  assert.equal(await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('refused-writer-write'),
+    async lease => {
+      lease.markDirty();
+      return 'written';
+    }), 'written');
+  const next = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('after-refused-writer'));
+  next.release();
+  await assert.rejects(
+    f.coordinator.runMutation(selector('alpha', ALPHA_PATH), lifecycleOptions('lifecycle-after-refused-writer'),
+      async () => assert.fail('lifecycle admitted')),
+    code('PLAN_STALE')
+  );
+  assert.equal(f.revision(ALPHA_PATH), 1);
+});
+
+test('an unmanaged server with a read-only config keeps starting; only modpack work is fenced', async t => {
+  const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-coordinator-read-only-'));
+  const configPath = path.join(serverPath, '.minecraft-core.json');
+  t.after(() => {
+    try {
+      fs.chmodSync(configPath, 0o644);
+    } catch {
+      // Already writable or removed.
+    }
+    fs.rmSync(serverPath, { recursive: true, force: true });
+  });
+  fs.writeFileSync(configPath, `${JSON.stringify({ contentRevision: 4, port: 25570 }, null, 2)}\n`);
+  fs.chmodSync(configPath, 0o444);
+  const strictCalls = [];
+  const coordinator = new ServerMutationCoordinator({
+    context: createServerMutationContext(),
+    durableFsFactory: createInstanceConfigFsFactory({
+      strictFactory(roots) {
+        strictCalls.push(roots);
+        throw new Error('The strict writer is never used for an unmanaged folder');
+      }
+    })
+  });
+  completeEmptyRecovery(coordinator);
+  const server = selector('read-only-server', serverPath);
+
+  const start = await coordinator.acquireStart(server, startOptions('read-only-start'));
+  assert.equal(start.baseRevision, 4);
+  start.markDirty();
+  assert.doesNotThrow(() => start.markRunning({ pid: 4900 }));
+  assert.equal(start.release(), true);
+  const restart = await coordinator.acquireStart(server, startOptions('read-only-restart'));
+  restart.release();
+  await assert.rejects(
+    coordinator.runMutation(server, lifecycleOptions('read-only-lifecycle'), async () => assert.fail('lifecycle admitted')),
+    code('PLAN_STALE')
+  );
+  assert.equal(readContentRevision(serverPath), 4);
+
+  fs.chmodSync(configPath, 0o644);
+  await assert.rejects(
+    coordinator.runMutation(server, lifecycleOptions('writable-lifecycle'), async () => assert.fail('lifecycle admitted')),
+    code('PLAN_STALE')
+  );
+  assert.equal(readContentRevision(serverPath), 5);
+  assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).port, 25570);
+  assert.equal(await coordinator.runMutation(server, lifecycleOptions('re-reviewed-lifecycle'), async lease => {
+    lease.markDirty();
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    fs.writeFileSync(configPath, `${JSON.stringify({ ...config, contentRevision: lease.baseRevision + 1 }, null, 2)}\n`);
+    return 'published';
+  }), 'published');
+  assert.deepEqual(strictCalls, []);
+});
+
+test('an unawaited settings write and an instance-list save for a new server both run', async () => {
+  // v26.6.1's custom-server setup sends both without waiting for either.
+  const f = writerFixture();
+  const other = await f.coordinator.acquireStart(selector('beta', BETA_PATH), startOptions('other-server-running'));
+  other.markRunning({ pid: 4950 });
+  const order = [];
+  const settings = f.coordinator.runMutation({ instanceId: null, serverPath: ALPHA_PATH }, ordinaryOptions('update-settings'),
+    async lease => {
+      await settle();
+      lease.markDirty();
+      order.push('settings');
+      return 'settings-saved';
+    });
+  const save = f.coordinator.runManyMutations([selector('server-new', ALPHA_PATH)], ordinaryOptions('save-instances'),
+    async leases => {
+      order.push('save');
+      leases[0].markDirty();
+      return 'instances-saved';
+    });
+  assert.deepEqual(await Promise.all([settings, save]), ['settings-saved', 'instances-saved']);
+  assert.deepEqual(order, ['settings', 'save']);
+  assert.equal(f.revision(ALPHA_PATH), 2);
+  other.release();
+
+  const start = await f.coordinator.acquireStart(selector('server-new', ALPHA_PATH), startOptions('new-server-start'));
+  assert.equal(start.baseRevision, 2);
+  start.release();
+});
+
+test('releasing a start after an advisory revision failure does not throw', async () => {
+  const f = writerFixture({ revisions: { [ALPHA_PATH]: 2 }, capability: createLegacyInstanceConfigFs() });
+  f.control.failure = () => new Error('the server config is locked');
+  const start = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('unspawned-start'));
+  start.markDirty();
+  assert.equal(start.release(), true);
+  assert.equal(start.release(), false);
+  const next = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('after-unspawned-start'));
+  next.release();
+});
+
+test('an auto-restart requested from a released start lease context is admitted', async () => {
+  const f = writerFixture();
+  const crashedRun = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('crashed-run'));
+  const exitEvent = deferred();
+  // The server's exit handler is registered while its start lease is ambient.
+  const restart = f.context.runWithLease(crashedRun, () => exitEvent.promise.then(() =>
+    f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('auto-restart', {
+      parentMutationLease: f.context.getCurrentMutationLease()
+    }))));
+  crashedRun.markRunning({ pid: 4700 });
+  crashedRun.release();
+  exitEvent.resolve();
+  const restarted = await restart;
+  assert.equal(restarted.operationId, 'auto-restart');
+  restarted.release();
+});
+
+test('a released ordinary ambient lease does not block a later writer or start', async () => {
+  const f = writerFixture();
+  const later = deferred();
+  let followUp;
+  let followUpStart;
+  let leaked;
+  await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('leaking-writer', { revisionMode: 'none' }),
+    async lease => {
+      leaked = lease;
+      followUp = later.promise.then(() => f.coordinator.runMutation(selector('alpha', ALPHA_PATH),
+        ordinaryOptions('follow-up-writer', { revisionMode: 'none' }), async () => 'follow-up'));
+      followUpStart = later.promise.then(() => f.coordinator.acquireStart(selector('beta', BETA_PATH),
+        startOptions('follow-up-start', { parentMutationLease: f.context.getCurrentMutationLease() })));
+    });
+  later.resolve();
+  assert.equal(await followUp, 'follow-up');
+  const start = await followUpStart;
+  start.release();
+  assert.throws(() => leaked.markDirty(), code('INVALID_REQUEST'));
+
+  const groupLater = deferred();
+  let groupFollowUp;
+  await f.coordinator.runManyMutations([selector('alpha', ALPHA_PATH), selector('beta', BETA_PATH)],
+    ordinaryOptions('leaking-group', { revisionMode: 'none' }), async () => {
+      groupFollowUp = groupLater.promise.then(() => f.coordinator.runMutation(selector('beta', BETA_PATH),
+        ordinaryOptions('group-follow-up', { revisionMode: 'none' }), async () => 'group-follow-up'));
+    });
+  groupLater.resolve();
+  assert.equal(await groupFollowUp, 'group-follow-up');
+});
+
+test('a released lifecycle lease still refuses nested starts and writers', async () => {
+  const f = writerFixture();
+  let captured;
+  await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), {
+    operation: 'update-managed', operationId: 'released-lifecycle', revisionMode: 'none', quiesce: null
+  }, async lease => {
+    captured = lease;
+  });
+  // The health-validator pattern: a late validation boot names the released
+  // lifecycle lease as its parent.
+  await f.context.runWithLease(captured, async () => {
+    await assert.rejects(
+      f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('late-validation-boot', {
+        parentMutationLease: captured
+      })),
+      code('INVALID_REQUEST')
+    );
+    await assert.rejects(
+      f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('late-plain-start')),
+      code('INVALID_REQUEST')
+    );
+    await assert.rejects(
+      f.coordinator.runMutation(selector('beta', BETA_PATH), ordinaryOptions('late-writer', { revisionMode: 'none' }),
+        async () => assert.fail('writer admitted')),
+      code('INVALID_REQUEST')
+    );
+  });
+
+  let ordinaryLease;
+  await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('released-ordinary', { revisionMode: 'none' }),
+    async lease => {
+      ordinaryLease = lease;
+    });
+  await assert.rejects(
+    f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('explicit-released-ordinary-parent', {
+      parentMutationLease: ordinaryLease
+    })),
+    code('INVALID_REQUEST')
+  );
+});
+
+test('a live ambient lease still rejects nesting and an ordinary lease never parents a start', async () => {
+  const f = writerFixture();
+  await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('live-ordinary', { revisionMode: 'none' }),
+    async lease => {
+      await assert.rejects(
+        f.coordinator.runMutation(selector('beta', BETA_PATH), ordinaryOptions('nested-ordinary', { revisionMode: 'none' }),
+          async () => assert.fail('nested writer admitted')),
+        code('INVALID_REQUEST')
+      );
+      await assert.rejects(
+        f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('ordinary-parented-start', {
+          parentMutationLease: lease
+        })),
+        code('INVALID_REQUEST')
+      );
+      await assert.rejects(
+        f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('implicit-start-in-ordinary')),
+        code('INVALID_REQUEST')
+      );
+    });
+  await f.coordinator.runManyMutations([selector('alpha', ALPHA_PATH), selector('beta', BETA_PATH)],
+    ordinaryOptions('live-group', { revisionMode: 'none' }), async leases => {
+      await assert.rejects(
+        f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('group-parented-start', {
+          parentMutationLease: leases[0]
+        })),
+        code('INVALID_REQUEST')
+      );
+    });
+});
+
+test('isLiveLease reports only live coordinator leases', async () => {
+  const f = writerFixture();
+  let mutationLease;
+  await f.coordinator.runMutation(selector('alpha', ALPHA_PATH), ordinaryOptions('live-check', { revisionMode: 'none' }),
+    async lease => {
+      mutationLease = lease;
+      assert.equal(f.coordinator.isLiveLease(lease), true);
+    });
+  assert.equal(f.coordinator.isLiveLease(mutationLease), false);
+
+  let groupLease;
+  await f.coordinator.runManyMutations([selector('alpha', ALPHA_PATH), selector('beta', BETA_PATH)],
+    ordinaryOptions('live-group-check', { revisionMode: 'none' }), async () => {
+      groupLease = f.context.getCurrentLease();
+      assert.equal(f.coordinator.isLiveLease(groupLease), true);
+    });
+  assert.equal(f.coordinator.isLiveLease(groupLease), false);
+
+  const start = await f.coordinator.acquireStart(selector('alpha', ALPHA_PATH), startOptions('live-start-check'));
+  assert.equal(f.coordinator.isLiveLease(start), true);
+  start.release();
+  assert.equal(f.coordinator.isLiveLease(start), false);
+
+  const forged = Object.freeze({ kind: 'mutation', assertOwnedPath: value => value, markDirty() {} });
+  for (const value of [null, undefined, {}, 'lease', forged]) {
+    assert.equal(f.coordinator.isLiveLease(value), false);
+  }
 });
