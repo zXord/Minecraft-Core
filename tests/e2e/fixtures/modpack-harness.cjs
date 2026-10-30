@@ -17,6 +17,7 @@ const FIXED_TIME = '2026-08-01T12:00:00.000Z';
 const FINGERPRINT = 'a'.repeat(64);
 const SERVER_ID = 'server-e2e';
 const SOURCE_ELECTRON_FIRST_WINDOW_TIMEOUT_MS = 120_000;
+const PACKAGED_STARTUP_HEALTH_POLL_MS = 250;
 const RUNTIME = Object.freeze({
   minecraftVersion: '1.21.1',
   loaderFamily: 'fabric',
@@ -469,6 +470,26 @@ async function launchModpackApp(options = {}) {
   return fixture;
 }
 
+// Reads startup:get-health in the renderer, with the same call as the startup
+// banner. Startup settles its health before the main window opens; a start
+// that still reports 'starting' is read again until the startup deadline, and
+// whatever it reports then is left for the smoke to validate.
+async function readPackagedStartupHealth(page, { deadlineMs, pollMs = PACKAGED_STARTUP_HEALTH_POLL_MS }) {
+  const read = () => page.evaluate(async () => {
+    const health = await window.electron.invoke('startup:get-health');
+    return {
+      status: typeof health?.status === 'string' ? health.status : null,
+      modpackServices: typeof health?.modpackServices === 'string' ? health.modpackServices : null
+    };
+  });
+  let health = await read();
+  while (health.status === 'starting' && Date.now() < deadlineMs) {
+    await new Promise(resolve => setTimeout(resolve, Math.min(pollMs, Math.max(1, deadlineMs - Date.now()))));
+    health = await read();
+  }
+  return health;
+}
+
 async function runPackagedModpackSmoke({ executablePath, userDataPath, env = {}, fixtureRoot = null } = {}) {
   if (typeof executablePath !== 'string' || !path.isAbsolute(executablePath) ||
       typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath)) {
@@ -519,6 +540,8 @@ async function runPackagedModpackSmoke({ executablePath, userDataPath, env = {},
       expectedRendererUrl,
       getRendererErrors: () => rendererErrors.errors
     });
+    // The smoke validates the health, because a degraded start still loads the renderer.
+    const startupHealth = await readPackagedStartupHealth(page, { deadlineMs: startupDeadlineMs });
     const observed = await electronApp.evaluate(async ({ app }) => {
       await new Promise(resolve => setImmediate(resolve));
       return {
@@ -563,6 +586,7 @@ async function runPackagedModpackSmoke({ executablePath, userDataPath, env = {},
         publicManagementListenersEnabled: observed.smokeEvidence?.publicManagementListenersEnabled,
         rendererPublicNetworkRequests: observed.smokeEvidence?.rendererPublicNetworkRequests
       },
+      startupHealth,
       fallbacksUsed
     };
   } finally {
@@ -2071,6 +2095,7 @@ module.exports = {
   createRecoveryFactory,
   launchModpackApp,
   prepareProfile,
+  readPackagedStartupHealth,
   runDeterministicModpackLifecycleEvidence,
   runPackagedModpackSmoke,
   waitForFirstElectronWindow

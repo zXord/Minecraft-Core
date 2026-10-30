@@ -211,10 +211,17 @@ function validateLifecycle(value) {
   }
 }
 
+// A degraded start still opens the main window and loads the renderer, so the
+// packaged app must also report every modpack service ready.
+function validateStartupHealth(value) {
+  exactObject(value, ['status', 'modpackServices']);
+  if (value.status !== 'ready' || value.modpackServices !== 'ready') throw smokeFailure();
+}
+
 function validateSmokeEvidenceInner(value) {
   exactObject(value, [
     'type', 'version', 'platform', 'architecture', 'application', 'archiveWorker', 'fallbacksUsed',
-    'environment', 'archives', 'lifecycle'
+    'environment', 'startupHealth', 'archives', 'lifecycle'
   ]);
   if (value.type !== 'minecraft-core-packaged-modpack-smoke' || value.version !== 1 || value.platform !== 'win32' ||
       value.architecture !== 'x64' || !Array.isArray(value.fallbacksUsed) || value.fallbacksUsed.length !== 0) throw smokeFailure();
@@ -240,6 +247,7 @@ function validateSmokeEvidenceInner(value) {
       value.environment.updaterEnabled !== false || value.environment.automaticReleaseChecksEnabled !== false ||
       value.environment.publicManagementListenersEnabled !== false ||
       value.environment.rendererPublicNetworkRequests !== 0) throw smokeFailure();
+  validateStartupHealth(value.startupHealth);
   exactObject(value.archives, ['extracted', 'schemes', 'rejected']);
   validateExtractedArchives(value.archives.extracted);
   validateSchemes(value.archives.schemes);
@@ -551,8 +559,9 @@ async function defaultDeterministicProbe(input) {
 }
 
 function validatePackagedDriverEvidence(value) {
-  exactObject(value, ['rendererLoaded', 'environment', 'fallbacksUsed']);
+  exactObject(value, ['rendererLoaded', 'environment', 'startupHealth', 'fallbacksUsed']);
   if (value.rendererLoaded !== true || !Array.isArray(value.fallbacksUsed) || value.fallbacksUsed.length !== 0) throw smokeFailure();
+  validateStartupHealth(value.startupHealth);
   exactObject(value.environment, [
     'appIsPackaged', 'productionComposition', 'fixtureFactoryEnabled', 'isolatedUserData', 'pathSanitized',
     'updaterEnabled', 'automaticReleaseChecksEnabled', 'publicManagementListenersEnabled', 'rendererPublicNetworkRequests'
@@ -679,6 +688,7 @@ export async function runPackagedSmoke({
       },
       fallbacksUsed: [...(packaged.fallbacksUsed || []), ...driverEvidence.fallbacksUsed],
       environment: { ...driverEvidence.environment, fixtureRootUnchanged: true },
+      startupHealth: driverEvidence.startupHealth,
       archives: {
         extracted: archiveEvidence.extracted,
         schemes: [...archiveEvidence.schemes, ...deterministicEvidence.schemes],

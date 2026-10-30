@@ -22,7 +22,7 @@ test.beforeAll(async () => {
     plugins: [{ name: 'actual-app-sidebar', setup(builder) {
       builder.onResolve({ filter: /^svelte-sonner$/ }, () => ({ path: 'Toaster', namespace: 'toast-boundary' }));
       builder.onLoad({ filter: /./, namespace: 'toast-boundary' }, () => ({
-        contents: compile('<span></span>', { filename: 'Toaster.svelte', generate: 'client', css: 'external' }).js.code.replace('export default', 'export const Toaster ='),
+        contents: compile('<span></span>', { filename: 'Toaster.svelte', generate: 'client', css: 'external' }).js.code.replace('export default', 'export const toast = Object.assign(() => {}, { success() {}, error() {}, info() {}, warning() {} }); export const Toaster ='),
         resolveDir: ROOT
       }));
       builder.onLoad({ filter: /[/\\]utils[/\\]logger\.js$/ }, () => ({

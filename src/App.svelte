@@ -93,7 +93,8 @@
   import StatusManager from "./components/common/StatusManager.svelte";
   import ConfirmationDialog from "./components/common/ConfirmationDialog.svelte";
   import UpdateNotification from "./components/common/UpdateNotification.svelte";
-  import { Toaster } from "svelte-sonner";
+  import StartupHealthBanner from "./components/common/StartupHealthBanner.svelte";
+  import { Toaster, toast } from "svelte-sonner";
   import { showExitConfirmation } from "./stores/exitStore.js";
   import ModAvailabilityNotifications from "./components/common/ModAvailabilityNotifications.svelte";
   import { deriveModpackNotificationPresentation, modpackNotificationStore } from "./stores/modpackNotificationStore.js";
@@ -1134,48 +1135,96 @@
     }
 
     // Legacy manual setup still owns its selected path and settings flow.
-    window.electron.invoke("update-settings", {
-      instanceId: createdInstance?.id,
-      serverPath: newPath,
-    });
-
-    // Persist the updated instances list - this part is crucial
-    window.electron
-      .invoke("save-instances", instances)
-      .then((result) => {
-        if (!result || !result.success) {
-          logger.error("Failed to save instances after setup", {
-            category: "storage",
-            data: {
-              component: "App",
-              instanceCount: instances.length,
-              error: result?.error,
-            },
-          });
-        } else {
-          logger.info("Instances saved successfully after setup", {
-            category: "storage",
-            data: {
-              component: "App",
-              instanceCount: instances.length,
-            },
-          });
-        }
-        // Return to main view
-        step = "done";
-      })
-      .catch((error) => {
-        logger.error(`Failed to save instances: ${error.message}`, {
-          category: "storage",
+    // The settings write and the registration both change the new server
+    // folder, so the registration waits until the settings are written.
+    try {
+      const settingsResult = await window.electron.invoke("update-settings", {
+        instanceId: createdInstance?.id,
+        serverPath: newPath,
+      });
+      if (!settingsResult || !settingsResult.success) {
+        logger.warn("Failed to save settings for the new server", {
+          category: "settings",
           data: {
             component: "App",
-            errorType: error.constructor.name,
-            instanceCount: instances.length,
+            instanceId: createdInstance?.id,
+            error: settingsResult?.error,
           },
         });
-        // Return to main view anyway
-        step = "done";
+      }
+    } catch (error) {
+      logger.warn(`Failed to save settings for the new server: ${setupFailureText(error) || "unknown error"}`, {
+        category: "settings",
+        data: {
+          component: "App",
+          instanceId: createdInstance?.id,
+          errorType: error?.constructor?.name || typeof error,
+        },
       });
+    }
+
+    // Persist the updated instances list - this part is crucial
+    await saveInstancesAfterSetup();
+    // Return to main view
+    step = "done";
+  }
+
+  // IPC failures are Errors in practice, but the setup has to finish whatever
+  // was thrown, so the reason is read without assuming its shape.
+  function setupFailureText(error) {
+    if (typeof error === "string") return error.trim();
+    return typeof error?.message === "string" ? error.message.trim() : "";
+  }
+
+  // Without this save a new Custom server is gone after the next restart, so
+  // a failed save is shown to the user with a way to try again.
+  async function saveInstancesAfterSetup({ retry = false } = {}) {
+    const unknownFailure = "The instance list could not be saved.";
+    let failure = "";
+    try {
+      const result = await window.electron.invoke("save-instances", instances);
+      if (!result || !result.success) {
+        failure = setupFailureText(result?.error) || unknownFailure;
+      }
+    } catch (error) {
+      failure = setupFailureText(error) || unknownFailure;
+    }
+
+    if (!failure) {
+      logger.info("Instances saved successfully after setup", {
+        category: "storage",
+        data: {
+          component: "App",
+          instanceCount: instances.length,
+          retry,
+        },
+      });
+      if (retry) {
+        toast.success("Server saved", {
+          description: "The new server is now in your instance list.",
+          duration: 5000,
+        });
+      }
+      return;
+    }
+
+    logger.error("Failed to save instances after setup", {
+      category: "storage",
+      data: {
+        component: "App",
+        instanceCount: instances.length,
+        error: failure,
+        retry,
+      },
+    });
+    toast.error("The new server was not saved", {
+      description: `Minecraft Core could not add it to your instance list, so it will be missing after a restart. ${failure}`,
+      duration: 15000,
+      action: {
+        label: "Try again",
+        onClick: () => void saveInstancesAfterSetup({ retry: true }),
+      },
+    });
   }
 
   // Toggle sidebar visibility
@@ -1759,6 +1808,7 @@
     {/if}
 
     <div class="main-content" class:modpack-route={step === 'done' && $route === '/modpack'}>
+      <StartupHealthBanner />
       {#if step === "chooseFolder"}
         <div class="setup-container">
           {#if instanceType === "server"}

@@ -21,6 +21,8 @@ const PRESERVE_FAILED_REAL_E2E_ENV = 'MINECRAFT_CORE_PRESERVE_FAILED_REAL_E2E';
 const MAX_EVIDENCE_OPERATION_RECORDS = 32;
 const MAX_EVIDENCE_OPERATION_BYTES = 2 * 1024 * 1024;
 const MAX_EVIDENCE_APP_LOG_BYTES = 256 * 1024;
+const STARTUP_HEALTH_TIMEOUT_MS = 60_000;
+const STARTUP_HEALTH_POLL_MS = 250;
 const recoveryLaunchAuthorities = new WeakSet();
 const lifecycleCleanupAuthorities = new WeakSet();
 
@@ -570,18 +572,54 @@ function assertNoProductionProcesses(lifecycle, { processes = null } = {}) {
   return Object.freeze([...inventory]);
 }
 
+// Same call shape as the renderer's startup banner: the channel takes no request.
+function readStartupHealth(page) {
+  return page.evaluate(async channel => window.electron.invoke(channel), 'startup:get-health');
+}
+
+// A degraded start still opens the main window with modpack services off.
+// Only a start that reports every modpack service ready may drive a real run.
+async function assertProductionStartupHealthy(page, {
+  timeoutMs = STARTUP_HEALTH_TIMEOUT_MS,
+  pollMs = STARTUP_HEALTH_POLL_MS
+} = {}) {
+  if (!page || typeof page.evaluate !== 'function' ||
+      !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 ||
+      !Number.isSafeInteger(pollMs) || pollMs < 1) {
+    throw new TypeError('Production startup health check dependencies are invalid');
+  }
+  const deadline = Date.now() + timeoutMs;
+  let health = await readStartupHealth(page);
+  while (health?.status === 'starting' && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, Math.min(pollMs, Math.max(1, deadline - Date.now()))));
+    health = await readStartupHealth(page);
+  }
+  if (health?.status === 'ready' && health?.modpackServices === 'ready') return health;
+  const failure = health?.failure && typeof health.failure === 'object'
+    ? [health.failure.reason, health.failure.technical].filter(value => typeof value === 'string' && value)
+    : [];
+  const error = new Error(
+    `Production Electron started with status ${health?.status ?? 'unavailable'} and modpack services ` +
+    `${health?.modpackServices ?? 'unavailable'}${failure.length ? ` (${failure.join(': ')})` : ''}`
+  );
+  error.code = 'STARTUP_HEALTH_NOT_READY';
+  throw error;
+}
+
 async function launchProductionElectronSafely(lifecycle, {
   inheritedEnvironment = process.env,
   assertBuildAvailable = assertRendererBuildAvailable,
   launchElectron = null,
   waitForWindow = waitForProductionWindow,
   waitForPreload = waitForProductionPreload,
+  assertStartupHealth = assertProductionStartupHealthy,
   closeElectron = closeProductionElectron,
   assertNoOwnedProcesses = assertNoProductionProcesses
 } = {}) {
   if (typeof assertBuildAvailable !== 'function' ||
       (launchElectron !== null && typeof launchElectron !== 'function') ||
       typeof waitForWindow !== 'function' || typeof waitForPreload !== 'function' ||
+      typeof assertStartupHealth !== 'function' ||
       typeof closeElectron !== 'function' || typeof assertNoOwnedProcesses !== 'function') {
     throw new TypeError('Production Electron launch dependencies are invalid');
   }
@@ -599,6 +637,7 @@ async function launchProductionElectronSafely(lifecycle, {
   try {
     const page = await waitForWindow(electronApp);
     await waitForPreload(page);
+    await assertStartupHealth(page);
     return { electronApp, page };
   } catch (readinessError) {
     const cleanupErrors = [];
@@ -1472,6 +1511,7 @@ module.exports = {
   isReverseLifecycleEnabled,
   launchProductionElectron,
   launchProductionElectronSafely,
+  assertProductionStartupHealthy,
   waitForProductionWindow,
   invoke,
   invokeModpack,

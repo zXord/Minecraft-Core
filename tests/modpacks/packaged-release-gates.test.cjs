@@ -60,6 +60,7 @@ function driverEvidence() {
       publicManagementListenersEnabled: false,
       rendererPublicNetworkRequests: 0
     },
+    startupHealth: { status: 'ready', modpackServices: 'ready' },
     fallbacksUsed: []
   };
 }
@@ -101,6 +102,7 @@ function scenarioEvidence() {
   const deterministic = deterministicEvidence();
   return {
     environment: { ...driver.environment, fixtureRootUnchanged: true },
+    startupHealth: driver.startupHealth,
     fallbacksUsed: driver.fallbacksUsed,
     archives: {
       extracted: probe.extracted,
@@ -254,6 +256,9 @@ test('packaged smoke requires closed containment, archive-layer, lifecycle, owne
     value => { value.environment.automaticReleaseChecksEnabled = true; },
     value => { value.environment.publicManagementListenersEnabled = true; },
     value => { value.environment.rendererPublicNetworkRequests = 1; },
+    value => { value.startupHealth.status = 'degraded'; },
+    value => { value.startupHealth.modpackServices = 'unavailable'; },
+    value => { delete value.startupHealth; },
     value => { value.privatePath = 'C:\\secret'; }
   ]) {
     const changed = structuredClone(good);
@@ -294,8 +299,100 @@ test('packaged smoke combines real package verification with one isolated driver
   assert.equal(result.application.executableSha256, '7b5d2ffb87d6b7336aaea9bf55d2208f62e94588b57719ebd61188d204ba5e07');
   assert.equal(result.archiveWorker.containment, 'passed');
   assert.equal(result.archiveWorker.runtimeMode, 'in-memory-single-file');
+  assert.deepEqual(result.startupHealth, { status: 'ready', modpackServices: 'ready' });
   assert.equal(result.fallbacksUsed.length, 0);
   assert.equal(fs.existsSync(observed.userDataPath), false, 'isolated userData must be removed after the smoke');
+});
+
+test('packaged smoke fails a packaged start that did not report ready modpack services', async (t) => {
+  const { runPackagedSmoke } = await smokeModule;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-packaged-smoke-health-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const appOutDir = path.join(root, 'win-unpacked');
+  fs.mkdirSync(appOutDir);
+  fs.writeFileSync(path.join(appOutDir, 'Minecraft Core.exe'), 'packaged-exe');
+
+  // A degraded start still opens the main window and loads the renderer.
+  for (const startupHealth of [
+    undefined,
+    { status: 'degraded', modpackServices: 'unavailable' },
+    { status: 'ready', modpackServices: 'unavailable' },
+    { status: 'starting', modpackServices: 'pending' },
+    { status: null, modpackServices: null }
+  ]) {
+    await assert.rejects(runPackagedSmoke({
+      repositoryRoot,
+      appOutDir,
+      temporaryBase: root,
+      verifyPackage: async () => packagedEvidence(),
+      archiveProbe: async () => archiveProbeEvidence(),
+      deterministicProbe: async () => deterministicEvidence(),
+      driver: async () => {
+        const evidence = driverEvidence();
+        if (startupHealth === undefined) delete evidence.startupHealth;
+        else evidence.startupHealth = startupHealth;
+        return evidence;
+      }
+    }), /Packaged modpack smoke evidence is incomplete/u, JSON.stringify(startupHealth ?? 'missing'));
+  }
+});
+
+// The packaged driver reads the health in the renderer, like the startup banner.
+function rendererPage(answer) {
+  const page = {
+    reads: [],
+    async evaluate(readInRenderer, ...args) {
+      const priorWindow = globalThis.window;
+      globalThis.window = { electron: { async invoke(...request) { page.reads.push(request); return answer(); } } };
+      try {
+        return await readInRenderer(...args);
+      } finally {
+        if (priorWindow === undefined) delete globalThis.window;
+        else globalThis.window = priorWindow;
+      }
+    }
+  };
+  return page;
+}
+
+test('the packaged smoke driver waits out a settling start before it reports the startup health', async () => {
+  const { readPackagedStartupHealth } = require('../e2e/fixtures/modpack-harness.cjs');
+  assert.equal(typeof readPackagedStartupHealth, 'function', 'the packaged driver reads the startup health');
+  const answers = [
+    { status: 'starting', modpackServices: 'pending' },
+    { status: 'starting', modpackServices: 'pending' },
+    { status: 'ready', modpackServices: 'ready', legacyFallbacks: 'off', failure: null, recoveryGate: null, issues: [] }
+  ];
+  const settling = rendererPage(() => answers.shift());
+  assert.deepEqual(
+    await readPackagedStartupHealth(settling, { deadlineMs: Date.now() + 10_000, pollMs: 1 }),
+    { status: 'ready', modpackServices: 'ready' }
+  );
+  assert.deepEqual(settling.reads, [['startup:get-health'], ['startup:get-health'], ['startup:get-health']]);
+
+  // A degraded start is final; it is reported at once for the smoke to refuse.
+  const degraded = rendererPage(() => ({ status: 'degraded', modpackServices: 'unavailable' }));
+  assert.deepEqual(
+    await readPackagedStartupHealth(degraded, { deadlineMs: Date.now() + 10_000, pollMs: 1 }),
+    { status: 'degraded', modpackServices: 'unavailable' }
+  );
+  assert.equal(degraded.reads.length, 1);
+
+  // At the startup deadline the last answer is reported, and the smoke refuses it.
+  const stuck = rendererPage(() => ({ status: 'starting', modpackServices: 'pending' }));
+  assert.deepEqual(
+    await readPackagedStartupHealth(stuck, { deadlineMs: Date.now() + 30, pollMs: 5 }),
+    { status: 'starting', modpackServices: 'pending' }
+  );
+  assert.ok(stuck.reads.length >= 2);
+
+  for (const answer of [null, undefined, 'ready', { success: false, error: 'Channel not allowed' }]) {
+    assert.deepEqual(
+      await readPackagedStartupHealth(rendererPage(() => answer), { deadlineMs: Date.now() + 10_000, pollMs: 1 }),
+      { status: null, modpackServices: null },
+      JSON.stringify(answer ?? 'missing')
+    );
+  }
 });
 
 test('packaged smoke serializes heavyweight probes before launching the packaged application', async (t) => {

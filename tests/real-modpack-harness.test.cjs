@@ -7,6 +7,7 @@ const path = require('node:path');
 
 const {
   REAL_MODRINTH_LIFECYCLE,
+  assertProductionStartupHealthy,
   assertRendererBuildAvailable,
   approvePackConflictChoices,
   createIsolatedRealLifecycle,
@@ -1552,6 +1553,103 @@ test('production launch preserves the readiness failure when Playwright has alre
   } finally {
     await lifecycle.dispose({ preserveRoot: false });
   }
+});
+
+function startupHealth(status, modpackServices, failure = null) {
+  return { status, modpackServices, legacyFallbacks: 'inactive', failure, recoveryGate: null, issues: [] };
+}
+
+function startupHealthPage(responses) {
+  const reads = [];
+  return {
+    reads,
+    async evaluate(_callback, channel) {
+      reads.push(channel);
+      return responses.length > 1 ? responses.shift() : responses[0];
+    }
+  };
+}
+
+test('production launch returns the window only after startup reports ready modpack services', async () => {
+  const lifecycle = await createIsolatedRealLifecycle({ scratchLabel: 'startup-health-ready' });
+  const electronApp = { marker: 'owned-electron-handle' };
+  const page = startupHealthPage([startupHealth('ready', 'ready')]);
+  const closed = [];
+
+  try {
+    const launched = await launchProductionElectronSafely(lifecycle, {
+      assertBuildAvailable() {},
+      async launchElectron() { return electronApp; },
+      async waitForWindow() { return page; },
+      async waitForPreload() {},
+      async closeElectron(received) { closed.push(received); },
+      async assertNoOwnedProcesses() {}
+    });
+
+    assert.equal(launched.electronApp, electronApp);
+    assert.equal(launched.page, page);
+    assert.deepEqual(page.reads, ['startup:get-health']);
+    assert.deepEqual(closed, []);
+  } finally {
+    await lifecycle.dispose({ preserveRoot: false });
+  }
+});
+
+test('production launch closes the exact Electron handle when startup comes up degraded', async () => {
+  const lifecycle = await createIsolatedRealLifecycle({ scratchLabel: 'startup-health-degraded' });
+  const electronApp = { marker: 'owned-electron-handle' };
+  const page = startupHealthPage([startupHealth('degraded', 'unavailable', {
+    stage: 'recovery',
+    reason: 'archive-worker-missing',
+    summary: 'Minecraft Core could not find its file safety helper, ArchiveWorker.exe.',
+    hint: 'Restore ArchiveWorker.exe.',
+    technical: 'ModpackError EXTRACTOR_UNAVAILABLE: The protected archive worker is unavailable'
+  })]);
+  const closed = [];
+  const audited = [];
+
+  try {
+    await assert.rejects(
+      launchProductionElectronSafely(lifecycle, {
+        assertBuildAvailable() {},
+        async launchElectron() { return electronApp; },
+        async waitForWindow() { return page; },
+        async waitForPreload() {},
+        async closeElectron(received) { closed.push(received); },
+        async assertNoOwnedProcesses(received) { audited.push(received); }
+      }),
+      error => error.code === 'STARTUP_HEALTH_NOT_READY' && /degraded/u.test(error.message) &&
+        /unavailable/u.test(error.message) && /archive-worker-missing/u.test(error.message)
+    );
+    assert.deepEqual(closed, [electronApp]);
+    assert.equal(audited.length, 3);
+  } finally {
+    await lifecycle.dispose({ preserveRoot: false });
+  }
+});
+
+test('the startup health check waits out a starting snapshot and refuses anything but ready services', async () => {
+  const settling = startupHealthPage([
+    startupHealth('starting', 'pending'),
+    startupHealth('starting', 'pending'),
+    startupHealth('ready', 'ready')
+  ]);
+  assert.equal((await assertProductionStartupHealthy(settling, { timeoutMs: 1_000, pollMs: 1 })).status, 'ready');
+  assert.equal(settling.reads.length, 3);
+
+  for (const health of [
+    startupHealth('starting', 'pending'),
+    startupHealth('ready', 'unavailable'),
+    null,
+    { success: false, error: 'Unsupported channel' }
+  ]) {
+    await assert.rejects(
+      assertProductionStartupHealthy(startupHealthPage([health]), { timeoutMs: 5, pollMs: 1 }),
+      error => error.code === 'STARTUP_HEALTH_NOT_READY',
+      JSON.stringify(health)
+    );
+  }
+  await assert.rejects(assertProductionStartupHealthy({}), TypeError);
 });
 
 test('production launch reports both readiness and close failures without abandoning the handle silently', async () => {

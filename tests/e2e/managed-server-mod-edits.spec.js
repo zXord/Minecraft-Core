@@ -89,7 +89,7 @@ test.beforeAll(async () => {
   loader: { '.css': 'empty' }, plugins: [{ name: 'real-managed-mod-components', setup(builder) {
     builder.onResolve({ filter: /^managed-mod-fixture$/ }, () => ({ path: 'ManagedModFixture.svelte', namespace: 'fixture' }));
     builder.onResolve({ filter: /^svelte-sonner$/ }, () => ({ path: 'Toaster.svelte', namespace: 'toast-boundary' }));
-    builder.onLoad({ filter: /./, namespace: 'toast-boundary' }, () => ({ contents: compile('<span></span>', { filename: 'Toaster.svelte', generate: 'client', css: 'external', dev: false }).js.code.replace('export default', 'export const Toaster ='), resolveDir: ROOT }));
+    builder.onLoad({ filter: /./, namespace: 'toast-boundary' }, () => ({ contents: compile('<span></span>', { filename: 'Toaster.svelte', generate: 'client', css: 'external', dev: false }).js.code.replace('export default', 'export const toast = Object.assign(() => {}, { success() {}, error() {}, info() {}, warning() {} }); export const Toaster ='), resolveDir: ROOT }));
     builder.onLoad({ filter: /./, namespace: 'fixture' }, () => ({ contents: compile(fixture, { filename: path.join(ROOT, 'ManagedModFixture.svelte'), generate: 'client', css: 'external', dev: false }).js.code, resolveDir: ROOT }));
     builder.onLoad({ filter: /[/\\]utils[/\\]logger\.js$/ }, () => ({ contents: 'export default { debug() {}, info() {}, warn() {}, error() {}, refreshInstanceDetection() {}, setInstance() {} };' }));
     builder.onLoad({ filter: /[/\\]modules[/\\]serverListeners\.js$/ }, () => ({ contents: 'export function setupIpcListeners() {}' }));
