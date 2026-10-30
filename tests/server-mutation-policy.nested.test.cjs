@@ -107,10 +107,19 @@ function fixture(t) {
     managementClient: { readRequirement: async () => ({ descriptor: null, binding: { generation: 'nested-fixture' } }) },
     clientPackService: {}
   });
+  // Records the client each client channel is held for, then holds it as production does.
+  const received = [];
+  const recordingIntegration = Object.freeze({
+    ...integration,
+    ...Object.fromEntries(['runLegacyMutation', 'runLocalMutation', 'runPersonalMutation'].map(method => [method, (target, work) => {
+      received.push([method, target.clientId, target.clientPath]);
+      return integration[method](target, work);
+    }]))
+  });
   const policy = createServerMutationPolicy({
     coordinator,
     getInstances: () => registered(),
-    getClientPackIntegration: () => integration,
+    getClientPackIntegration: () => recordingIntegration,
     getModpackStateRepository: () => ({ read: async () => null }),
     createOperationId: channel => `${channel}-${crypto.randomUUID()}`
   });
@@ -137,7 +146,7 @@ function fixture(t) {
     return lease.instanceId;
   }
 
-  return { root, coordinator, policy, server, client, startAndStop };
+  return { root, coordinator, policy, server, client, startAndStop, received };
 }
 
 // The server writers a host uses on a server whose folder overlaps a client folder.
@@ -245,6 +254,57 @@ for (const order of ['first registration listed first', 'second registration lis
       }
       const reordered = await f.policy.wrapHandler('save-instances', settings['save-instances'])(EVENT, [...registered()].reverse());
       assert.equal(reordered.success, true, reordered.error);
+    }
+  });
+}
+
+// A client's launch, host sync, own-content toggle and connection settings, with the
+// client-pack hold each one takes (launch takes its own hold when it starts the game).
+const CLIENT_CHANNELS = [
+  ['minecraft-launch', null, folder => ({ clientPath: folder, username: 'Alex' })],
+  ['minecraft-check-mods', 'runLegacyMutation', folder => ({ clientPath: folder, requiredMods: [] })],
+  ['toggle-client-asset', 'runLocalMutation', folder => ({ clientPath: folder, assetType: 'shaderpacks', fileName: 'own.zip', enable: false })],
+  ['save-client-config', 'runPersonalMutation', folder => ({ path: folder, serverIp: '192.0.2.4', serverPort: '8080' })]
+];
+
+async function runClientChannel(f, channel, payload) {
+  f.received.length = 0;
+  let ran = 0;
+  const result = await f.policy.wrapHandler(channel, async () => { ran += 1; return { success: true }; })(EVENT, payload);
+  return { success: result.success, ran, received: [...f.received] };
+}
+
+test('nested client folders each keep launch, sync, toggles and settings as their own client (v26.6.1 parity)', async t => {
+  const f = fixture(t);
+  const outer = f.client(path.join(f.root, 'Client'), 'client-outer');
+  const inner = f.client(path.join(f.root, 'Client', 'Second'), 'client-inner');
+  appStore.set('instances', [outer, inner]);
+
+  for (const cli of [outer, inner, inner, outer]) {
+    for (const [channel, method, payload] of CLIENT_CHANNELS) {
+      assert.deepEqual(await runClientChannel(f, channel, payload(cli.path)),
+        { success: true, ran: 1, received: method ? [[method, cli.id, cli.path]] : [] }, `${cli.id} ${channel}`);
+    }
+  }
+});
+
+for (const order of ['b-client listed first', 'a-client listed first']) {
+  test(`a client folder registered twice (${order}) keeps every client channel, held as its lowest id`, async t => {
+    const f = fixture(t);
+    const folder = path.join(f.root, 'Twice');
+    const later = f.client(folder, 'b-client');
+    const lowest = { ...later, id: 'a-client', clientId: 'a-client', name: 'a-client', clientName: 'a-client' };
+    appStore.set('instances', order === 'b-client listed first' ? [later, lowest] : [lowest, later]);
+
+    for (const round of [1, 2]) {
+      for (const [channel, method, payload] of CLIENT_CHANNELS) {
+        assert.deepEqual(await runClientChannel(f, channel, payload(folder)),
+          { success: true, ran: 1, received: method ? [[method, 'a-client', folder]] : [] }, `${round} ${channel}`);
+      }
+      // A writer that names the other registration by id is held as the same client.
+      assert.deepEqual(await runClientChannel(f, 'set-download-preferences', { instanceId: 'b-client', preferences: {} }),
+        { success: true, ran: 1, received: [['runPersonalMutation', 'a-client', folder]] }, `${round} set-download-preferences`);
+      appStore.set('instances', [...registered()].reverse());
     }
   });
 }

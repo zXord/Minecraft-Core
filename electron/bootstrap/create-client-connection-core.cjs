@@ -13,6 +13,41 @@ function compareCodePoints(left, right) {
   }
   return leftPoints.length - rightPoints.length;
 }
+// Every id registered for one client folder, lowest first in code-point order.
+const folderClientIds = (instances, folderKey) => [...new Set(instances.filter(i => i?.type === 'client' && typeof i.id === 'string' &&
+  typeof i.path === 'string' && path.isAbsolute(i.path) && key(i.path) === folderKey).map(i => i.id))].sort(compareCodePoints);
+
+// The host gives one session per remote client and every registration of a client
+// folder reads that folder's connection, so they share one broker entry under the
+// folder's lowest id, the client resolveClientByPath picks. An id registered nowhere,
+// or for different folders, is passed on unchanged and refused as before. When a
+// folder's lowest id changes, the previous entry is dropped so the claim moves with it.
+class FolderSessionBroker extends ManagementSessionBroker {
+  constructor({ readInstances, ...options } = {}) {
+    super(options);
+    // The last canonical id of each folder, by folder key.
+    this.readInstances = readInstances; this.canonicalIds = new Map();
+  }
+  _canonicalClientId(clientId) {
+    if (typeof clientId !== 'string') return clientId;
+    let instances;
+    try { instances = this.readInstances(); } catch { return clientId; }
+    if (!Array.isArray(instances)) return clientId;
+    const own = instances.filter(i => i?.id === clientId && i.type === 'client' && typeof i.path === 'string' && path.isAbsolute(i.path));
+    if (own.length === 0 || own.some(match => key(match.path) !== key(own[0].path))) return clientId;
+    const folderKey = key(own[0].path);
+    const [canonical] = folderClientIds(instances, folderKey);
+    const previous = this.canonicalIds.get(folderKey);
+    if (previous !== undefined && previous !== canonical) super.invalidate(previous);
+    this.canonicalIds.set(folderKey, canonical);
+    return canonical;
+  }
+  acquire(clientId, options) { return super.acquire(this._canonicalClientId(clientId), options); }
+  acquireWithProvenance(clientId, options) { return super.acquireWithProvenance(this._canonicalClientId(clientId), options); }
+  acquireLegacyContext(clientId, options) { return super.acquireLegacyContext(this._canonicalClientId(clientId), options); }
+  readServerInfo(clientId, options) { return super.readServerInfo(this._canonicalClientId(clientId), options); }
+  invalidate(clientId) { super.invalidate(this._canonicalClientId(clientId)); }
+}
 
 // Client resolution and the management session broker. They need no modpack
 // services and construction does no I/O, so the service graph builds this core
@@ -32,13 +67,12 @@ function createClientConnectionCore({ store, readClientConfig, getPinnedHttpsAge
   };
   const resolveClientByPath = async clientPath => {
     if (typeof clientPath !== 'string' || !path.isAbsolute(clientPath)) throw unregistered();
-    const ids = [...new Set(getInstances().filter(i => i?.type === 'client' && typeof i.id === 'string' && typeof i.path === 'string' &&
-      path.isAbsolute(i.path) && key(i.path) === key(clientPath)).map(i => i.id))].sort(compareCodePoints);
+    const ids = folderClientIds(getInstances(), key(clientPath));
     if (ids.length === 0) throw unregistered();
     return resolveClient(ids[0]);
   };
   const sessionClock = () => { const value = clock.now(); return value instanceof Date ? value.getTime() : value; };
-  const managementSessionBroker = new ManagementSessionBroker({ resolveClient,
+  const managementSessionBroker = new FolderSessionBroker({ resolveClient, readInstances: () => store.get('instances'),
     // A folder config without its pin or invite secret takes them from the registered clients v26.6.1 trusted.
     readClientConfig: withRegisteredConnectionFallback(readClientConfig || (value => require('../utils/config-manager.cjs').readClientConfig(value)), getInstances),
     getPinnedHttpsAgent: getPinnedHttpsAgent || ((...args) => require('../utils/tls-utils.cjs').getPinnedHttpsAgent(...args)),

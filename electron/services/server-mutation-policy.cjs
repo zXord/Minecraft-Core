@@ -270,6 +270,17 @@ function samePathKey(left, right) {
   return key !== null && key === normalizePathKey(right);
 }
 
+function compareCodePoints(left, right) {
+  const leftPoints = Array.from(left);
+  const rightPoints = Array.from(right);
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = leftPoints[index].codePointAt(0) - rightPoints[index].codePointAt(0);
+    if (difference !== 0) return difference;
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
 function normalizeInstances(value) {
   if (!Array.isArray(value)) return [];
   return value.filter(instance => instance && typeof instance === 'object' && !Array.isArray(instance));
@@ -641,8 +652,13 @@ function createServerMutationPolicy({
     const serverRoot = isRegisteredServerRoot(selector.serverPath) &&
       !(clientChannel && clients.some(client => samePathKey(client.path, selector.serverPath)));
     if (getClientPackIntegration && clients.length && clientChannel && !serverRoot) {
-      if (clients.length !== 1 || !pathIsInside(selector.serverPath, clients[0].path)) throw invalidRequest();
-      const client = clients[0];
+      // Only the client registered for the selected folder acts, never a client nested
+      // in it or around it. A folder registered twice acts as its lowest id in
+      // code-point order, the client its launch resolves, never by array order.
+      const client = clients
+        .filter(candidate => typeof candidate.id === 'string' && samePathKey(candidate.path, selector.serverPath))
+        .sort((left, right) => compareCodePoints(left.id, right.id))[0];
+      if (!client) throw invalidRequest();
       if (channel === 'minecraft-launch') return perform();
       const method = CLIENT_SAFE_SETTINGS_CHANNELS.has(channel)
         ? 'runPersonalMutation'
