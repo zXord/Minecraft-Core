@@ -1732,7 +1732,8 @@
 
   function cleanErrorMessage(msg) {
     if (!msg) return "";
-    // Remove Electron's remote method error prefix    return msg.replace(/^Error invoking remote method '[^']+':\s*/i, '');
+    // Remove Electron's remote method error prefix
+    return msg.replace(/^Error invoking remote method '[^']+':\s*/i, '');
   }
 
   function confirmDelete(backup) {

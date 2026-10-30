@@ -3,7 +3,10 @@ const appStore = require('../utils/app-store.cjs');
 const { safeSend } = require('../utils/safe-send.cjs');
 const path = require('path');
 const fs = require('fs');
+const yauzl = require('yauzl');
 const { getLoggerHandlers } = require('./logger-handlers.cjs');
+const { inspectFolderEvidence } = require('../services/modpacks/instance-ownership.cjs');
+const { createModpackStateObserver } = require('../services/modpacks/state/modpack-state-repository.cjs');
 const {
   DEFAULT_BACKUP_AUTOMATION,
   getDefaultServerConfig,
@@ -662,7 +665,98 @@ function saveBackupSettings(serverPath, settings) {
   return merged;
 }
 
-function createBackupHandlers() {
+// A full restore extracts everything the archive holds, so on a modpack-managed
+// server it would silently roll back .minecraft-core-state and the managed pack
+// files (owner decision Q11). Those restores are refused before anything is
+// written; world restores stay allowed. Servers without lifecycle evidence, which
+// is every v26.6.1 server, skip this check and restore exactly as before.
+const MANAGED_BACKUP_RESTORE_BLOCKED = 'MANAGED_BACKUP_RESTORE_BLOCKED';
+const MANAGED_BACKUP_RESTORE_MESSAGE = 'Full backup restore is disabled while this server is managed by a modpack, because it would also roll back the modpack\'s files and records. Use Modpack > Restore-point rollback to return to an earlier pack state, or review Detach in Modpack first to restore this backup. World backups can still be restored.';
+const UNCHECKED_BACKUP_RESTORE_MESSAGE = 'Full backup restore is paused because this server\'s modpack ownership could not be checked, and the restore could roll back the modpack\'s files and records. Open Modpack to review it: use Restore-point rollback, or review Detach first to restore this backup. World backups can still be restored.';
+// The folders a world backup holds and a world restore replaces (backup-service getWorldDirs).
+const WORLD_RESTORE_FOLDERS = new Set(['world', 'world_nether', 'world_the_end']);
+// Set when the IPC handlers are registered. The browser panel restores through
+// restoreServerBackup in this process and must read the same modpack state.
+let registeredStateRepositoryGetter = null;
+
+// Applies the name normalisation AdmZip uses when it extracts. The raw name is
+// read as latin1: separators and dots are ASCII, so every name decoder agrees on
+// the folder an entry lands in.
+function isWorldFolderEntry(rawName) {
+  const normalized = path.posix.normalize(`/${rawName.toString('latin1').split('\\').join('/')}`);
+  return WORLD_RESTORE_FOLDERS.has(normalized.slice(1).split('/')[0]);
+}
+
+// Reads only the central directory, so a large backup is not loaded twice.
+function backupHoldsOnlyWorldFolders(zipPath) {
+  return new Promise(resolve => {
+    yauzl.open(zipPath, { lazyEntries: true, autoClose: false, decodeStrings: false }, (openError, zipFile) => {
+      if (openError || !zipFile) {
+        resolve(false);
+        return;
+      }
+      let settled = false;
+      const settle = worldOnly => {
+        if (settled) return;
+        settled = true;
+        zipFile.close();
+        resolve(worldOnly);
+      };
+      zipFile.on('error', () => settle(false));
+      zipFile.on('entry', entry => {
+        if (isWorldFolderEntry(entry.fileName)) zipFile.readEntry();
+        else settle(false);
+      });
+      zipFile.once('end', () => settle(true));
+      zipFile.readEntry();
+    });
+  });
+}
+
+function modpackRestoreRefusal(message) {
+  return { success: false, error: message, code: MANAGED_BACKUP_RESTORE_BLOCKED };
+}
+
+// Read-only. Returns a refusal when the restore would replace files outside the
+// world folders of a server whose modpack is attached (Tier B) or whose modpack
+// state cannot be read; otherwise null.
+async function checkModpackServerRestore({ serverPath, name }, getModpackStateRepository) {
+  if (typeof serverPath !== 'string' || typeof name !== 'string') return null;
+  if (inspectFolderEvidence(serverPath, { kinds: ['server'] }).state === 'unmanaged') return null;
+  const backupDir = path.resolve(backupService.getBackupDir(serverPath));
+  const zipPath = path.resolve(backupDir, name);
+  // restoreBackup refuses other names, and missing archives, without changing anything.
+  if (path.dirname(zipPath) !== backupDir || !fs.existsSync(zipPath)) return null;
+  if (await backupHoldsOnlyWorldFolders(zipPath)) return null;
+  let current;
+  try {
+    const repository = typeof getModpackStateRepository === 'function' ? getModpackStateRepository() : null;
+    current = await createModpackStateObserver({ repository }).read(serverPath);
+  } catch {
+    return modpackRestoreRefusal(UNCHECKED_BACKUP_RESTORE_MESSAGE);
+  }
+  if (current === null || current?.state?.modpackManaged === false) return null;
+  return modpackRestoreRefusal(current?.state?.modpackManaged === true
+    ? MANAGED_BACKUP_RESTORE_MESSAGE
+    : UNCHECKED_BACKUP_RESTORE_MESSAGE);
+}
+
+// The one entry point for restoring a server backup, used by IPC and the browser panel.
+async function restoreServerBackup(request, { getModpackStateRepository = registeredStateRepositoryGetter } = {}) {
+  const { serverPath, name } = request || {};
+  const refusal = await checkModpackServerRestore({ serverPath, name }, getModpackStateRepository);
+  if (refusal) {
+    logger.warn('Backup restore refused to protect modpack state', {
+      category: 'backup',
+      data: { serverPath, backupName: name, code: refusal.code }
+    });
+    return refusal;
+  }
+  return backupService.restoreBackup(request);
+}
+
+function createBackupHandlers({ getModpackStateRepository = null } = {}) {
+  registeredStateRepositoryGetter = getModpackStateRepository;
   logger.info('Backup handlers initialized', {
     category: 'backup',
     data: { handler: 'createBackupHandlers' }
@@ -1024,7 +1118,7 @@ function createBackupHandlers() {
           }
         });
 
-        const result = await backupService.restoreBackup({ serverPath, name, serverStatus });
+        const result = await restoreServerBackup({ serverPath, name, serverStatus }, { getModpackStateRepository });
         const duration = Date.now() - startTime;
 
         logger.warn('Backup restore completed', {
@@ -3452,5 +3546,6 @@ module.exports = {
   createBackupHandlers,
   loadBackupManager,
   clearBackupIntervals,
+  restoreServerBackup,
   backupSizeTracker // Export for testing and integration purposes
 };

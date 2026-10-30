@@ -114,7 +114,9 @@ function setupIpcHandlers(win, dependencies = {}) {
     const settingsHandlers = handlerFactories.createSettingsHandlers({
       invalidateManagementSession: clientId => dependencies.modpacks?.managementSessionBroker?.invalidate(clientId)
     });
-    const backupHandlers = handlerFactories.createBackupHandlers();
+    const backupHandlers = handlerFactories.createBackupHandlers({
+      getModpackStateRepository: dependencies.modpacks ? () => dependencies.modpacks.stateRepository : null
+    });
     const managementServerHandlers = handlerFactories.createManagementServerHandlers(win);
   const browserPanelHandlers = handlerFactories.createBrowserPanelHandlers(win);
     const minecraftLauncherHandlers = handlerFactories.createMinecraftLauncherHandlers(win, dependencies.clientPackLaunchOptions || {});

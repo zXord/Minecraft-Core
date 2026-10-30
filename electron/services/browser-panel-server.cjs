@@ -22,6 +22,7 @@ const {
 } = require('./server-manager.cjs');
 // Backup and retention utilities
 const backupService = require('./backup-service.cjs');
+const { restoreServerBackup } = require('../ipc/backup-handlers.cjs');
 const { RetentionPolicy } = require('../utils/retention-policy.cjs');
 const playerHandlers = require('../ipc/player-handlers.cjs');
 const serverPropsHandlers = require('../ipc/server-properties-handlers.cjs');
@@ -225,7 +226,7 @@ class BrowserPanelServer {
       backups: {
         'backups:delete': (_event, request) => backupService.deleteBackup(request),
         'backups:rename': (_event, request) => backupService.renameBackup(request),
-        'backups:restore': (_event, request) => backupService.restoreBackup(request)
+        'backups:restore': (_event, request) => restoreServerBackup(request)
       }
     };
     this.browserWriterHandlers = createCoordinatedBrowserHandlers({
