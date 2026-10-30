@@ -954,6 +954,44 @@ test('failure between renames retains enough identity to restore one canonical s
   assert.notDeepEqual(record.directoryIdentities.candidate, record.directoryIdentities.rollback);
 });
 
+// A server that never locks world/session.lock (pre-1.15) passes the live-folder probe, so the
+// swap itself must refuse while that server still holds a file open inside the live folder.
+test('existing swap fails closed and leaves the live folder intact while a file inside it is held open', {
+  skip: process.platform !== 'win32' && 'Windows refuses directory renames over open files'
+}, async (t) => {
+  const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
+  const fixture = await existingFixture(t);
+  await transaction.buildExistingCandidate(fixture.context);
+  const prepared = await fixture.recoveryRegistry.load(fixture.context.jobId);
+  assert.equal(prepared.swapStep, 'prepared');
+
+  const heldPath = path.join(fixture.targetPath, 'world', 'level.dat');
+  const held = fs.openSync(heldPath, 'r+');
+  let closed = false;
+  t.after(() => { if (!closed) fs.closeSync(held); });
+  await assert.rejects(transaction.swapExistingCandidate(fixture.context), error => {
+    assert.ok(['COMMIT_FAILED', 'RECOVERY_REQUIRED'].includes(error.code), error.code);
+    const nativeCodes = [];
+    for (let cause = error.cause; cause; cause = cause.cause) nativeCodes.push(cause.code);
+    assert.ok(nativeCodes.some(code => ['EPERM', 'EBUSY', 'EACCES'].includes(code)), `refused by the open handle: ${nativeCodes}`);
+    return true;
+  });
+  fs.closeSync(held);
+  closed = true;
+
+  assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'server.jar'), 'utf8'), 'old-server');
+  assert.equal(fs.readFileSync(heldPath, 'utf8'), 'world-state');
+  assert.equal(fs.readFileSync(path.join(fixture.targetPath, 'server.properties'), 'utf8'), 'motd=Canonical\nserver-port=25565\n');
+  assert.equal(fs.existsSync(path.join(fixture.targetPath, 'mods')), false, 'the candidate was never published over the live folder');
+  assert.equal(fs.existsSync(fixture.paths.rollbackPath), false);
+  assert.equal(fs.readFileSync(path.join(fixture.paths.candidatePath, 'server.jar'), 'utf8'), 'new-server');
+  const record = await fixture.recoveryRegistry.load(fixture.context.jobId);
+  assert.equal(record.phase, 'committing');
+  assert.equal(record.swapStep, 'prepared');
+  assert.deepEqual(record.directoryIdentities.target, prepared.directoryIdentities.target);
+  assert.equal(record.directoryIdentities.rollback, null);
+});
+
 test('existing-server candidate preservation refuses server.properties larger than one MiB', async t => {
   const transaction = require('../../electron/services/modpack-lifecycle/server-directory-transaction.cjs');
   const fixture = await existingFixture(t, {

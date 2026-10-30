@@ -23,9 +23,20 @@ const { isServerProcessSupervisionRequired } = require('../watchdog/server-proce
 const execFileAsync = promisify(execFile);
 const MAX_LINE_BYTES = 1024 * 1024;
 const LAUNCH_KEYS = new Set([
-  'instanceId', 'javaPath', 'maxRam', 'onLine', 'operationId', 'publishEvents', 'runtime', 'runtimeValidation',
-  'serverPath', 'forgeCandidateHealthAuthorization'
+  'instanceId', 'javaPath', 'maxRam', 'onLine', 'operationId', 'publishEvents', 'runtime', 'runtimeContract',
+  'runtimeValidation', 'serverPath', 'supervision', 'forgeCandidateHealthAuthorization'
 ]);
+// 'required': a watchdog fault is fatal and terminates the exact child (lifecycle boots).
+// 'best-effort': a watchdog fault is only reported; the server keeps running.
+const SUPERVISION_MODES = new Set(['required', 'best-effort']);
+const RUNTIME_CONTRACTS = new Set(['managed', 'legacy']);
+const RUNTIME_KEYS = new Set(['minecraftVersion', 'loaderFamily', 'loaderVersion', 'javaMajor', 'os', 'architecture']);
+const LEGACY_LOADER_FAMILIES = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
+const DEGRADED_EVENT = 'server-process-supervision-degraded';
+const NOT_ACKNOWLEDGED_REASON = 'Server process supervision was not acknowledged';
+const LATE_ACK_REASON = 'Watchdog acknowledged after the deadline';
+const WATCHDOG_FAILED_REASON = 'Server process watchdog failed';
+const MAX_REASON_LENGTH = 512;
 const WAIT_KEYS = new Set(['signal', 'timeoutMs']);
 const ENDPOINT_KEYS = new Set(['allowWildcard', 'host', 'port', 'signal', 'timeoutMs']);
 const STOP_KEYS = new Set(['gracefulTimeoutMs', 'killTimeoutMs']);
@@ -112,6 +123,35 @@ function normalizeRuntime(value) {
   }
 }
 
+function isPrintableLabel(value, maxLength) {
+  return typeof value === 'string' && value.length > 0 && value.length <= maxLength && value.trim().length > 0 &&
+    ![...value].some(character => {
+      const code = character.codePointAt(0);
+      return code < 32 || (code >= 127 && code <= 159) || code === 0x2028 || code === 0x2029;
+    });
+}
+
+// v26.6.1 launched whatever version label an unmanaged server was configured or
+// detected with (snapshots, pre-releases, old betas). Unmanaged starts keep that
+// tolerance; prepared modpack runtimes stay on the strict managed tuple.
+function normalizeLegacyRuntime(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype ||
+      Object.keys(value).some(key => !RUNTIME_KEYS.has(key))) throw invalidRequest();
+  if (!isPrintableLabel(value.minecraftVersion, 64) || !LEGACY_LOADER_FAMILIES.has(value.loaderFamily) ||
+      !isPrintableLabel(value.loaderVersion, 128) || !Number.isSafeInteger(value.javaMajor) ||
+      value.javaMajor < 8 || value.javaMajor > 99 || value.os !== 'win32' || value.architecture !== 'x64') {
+    throw invalidRequest();
+  }
+  return Object.freeze({
+    minecraftVersion: value.minecraftVersion,
+    loaderFamily: value.loaderFamily,
+    loaderVersion: value.loaderVersion,
+    javaMajor: value.javaMajor,
+    os: value.os,
+    architecture: value.architecture
+  });
+}
+
 function normalizeLaunchRequest(value) {
   assertExactKeys(value, LAUNCH_KEYS);
   if (!isAbsolutePath(value.serverPath) || !isAbsolutePath(value.javaPath)) throw invalidRequest();
@@ -120,7 +160,13 @@ function normalizeLaunchRequest(value) {
     throw invalidRequest();
   }
   if (typeof value.publishEvents !== 'boolean' || typeof value.onLine !== 'function') throw invalidRequest();
-  const runtime = normalizeRuntime(value.runtime);
+  if ((value.supervision !== undefined && !SUPERVISION_MODES.has(value.supervision)) ||
+      (value.runtimeContract !== undefined && !RUNTIME_CONTRACTS.has(value.runtimeContract))) throw invalidRequest();
+  const runtimeContract = value.runtimeContract ?? 'managed';
+  // Lifecycle authority is only ever issued for prepared managed runtimes.
+  if (runtimeContract === 'legacy' &&
+      (value.runtimeValidation !== undefined || value.forgeCandidateHealthAuthorization !== undefined)) throw invalidRequest();
+  const runtime = runtimeContract === 'legacy' ? normalizeLegacyRuntime(value.runtime) : normalizeRuntime(value.runtime);
   if (value.forgeCandidateHealthAuthorization !== undefined &&
       !isAppIssuedForgeCandidateHealthAuthorization(value.forgeCandidateHealthAuthorization, {
         candidatePath: value.serverPath,
@@ -130,8 +176,15 @@ function normalizeLaunchRequest(value) {
       })) throw invalidRequest();
   return Object.freeze({
     ...value,
-    runtime
+    runtime,
+    runtimeContract,
+    supervision: value.supervision ?? 'required'
   });
+}
+
+function supervisionReason(value, fallback) {
+  const text = value instanceof Error ? value.message : value;
+  return typeof text === 'string' && text.trim() ? text.slice(0, MAX_REASON_LENGTH) : fallback;
 }
 
 function normalizeWaitRequest(value) {
@@ -432,6 +485,12 @@ function createServerProcessRunner(dependencies = {}) {
     let readyEvidence = null;
     let supervisionEstablished = false;
     let supervisionTerminationRequested = false;
+    let supervisionMode = request.supervision;
+    // 'pending' until the watchdog ACK, then 'armed'; 'unsupervised' when no watchdog
+    // armed in time (a late ACK still upgrades it), 'lost' when an armed watcher failed.
+    let supervisionState = 'pending';
+    let resolveSupervisionSettled;
+    const supervisionSettled = new Promise(resolve => { resolveSupervisionSettled = resolve; });
     let stdoutBuffer = '';
     let stderrBuffer = '';
     const readyWaiters = new Set();
@@ -448,8 +507,10 @@ function createServerProcessRunner(dependencies = {}) {
     const settleAllWaiters = (error, value) => {
       for (const waiter of [...readyWaiters]) settleWaiter(waiter, error, value);
     };
+    // Best-effort readiness is the ready marker alone; it never waits for the watchdog.
+    const readinessSupervised = () => supervisionEstablished || supervisionMode === 'best-effort';
     const settleReadyIfComplete = () => {
-      if (readyEvidence && supervisionEstablished && !fatal && !closedInfo) {
+      if (readyEvidence && readinessSupervised() && !fatal && !closedInfo) {
         settleAllWaiters(null, readyEvidence);
       }
     };
@@ -523,6 +584,8 @@ function createServerProcessRunner(dependencies = {}) {
       flush('stdout');
       flush('stderr');
       closedInfo = Object.freeze({ exitCode, signal });
+      if (supervisionState === 'pending') supervisionState = 'unsupervised';
+      resolveSupervisionSettled(supervisionState === 'armed' ? 'armed' : 'unsupervised');
       detachStreams();
       child.removeListener('error', onChildError);
       child.removeListener('close', onChildClose);
@@ -546,8 +609,36 @@ function createServerProcessRunner(dependencies = {}) {
         // Internal observers cannot interfere with exact process-close handling.
       }
     });
-    const supervisionFailure = () => {
+    const reportSupervision = (state, reason) => {
+      const event = Object.freeze({ ...ownership, state, reason });
+      queueMicrotask(() => {
+        try { eventBus.emit(DEGRADED_EVENT, event); } catch {
+          // Observers of a degraded watchdog cannot change the running server.
+        }
+      });
+    };
+    const markSupervisionArmed = () => {
+      if (closedInfo || supervisionState === 'armed' || supervisionState === 'lost') return;
+      const recovered = supervisionState === 'unsupervised';
+      supervisionState = 'armed';
+      resolveSupervisionSettled('armed');
+      if (recovered && supervisionMode === 'best-effort') reportSupervision('armed', LATE_ACK_REASON);
+    };
+    // Best-effort watchdog faults are reported once per transition. They never
+    // mark the server fatal and never terminate it.
+    const degradeSupervision = reason => {
+      if (closedInfo || supervisionState === 'lost') return;
+      const next = supervisionState === 'armed' ? 'lost' : 'unsupervised';
+      if (supervisionState === next) return;
+      supervisionState = next;
+      resolveSupervisionSettled('unsupervised');
+      reportSupervision(next, supervisionReason(reason, WATCHDOG_FAILED_REASON));
+    };
+    const supervisionFailure = reason => {
+      if (supervisionMode === 'best-effort') return degradeSupervision(reason);
       if (closedInfo) return;
+      supervisionState = supervisionState === 'armed' ? 'lost' : 'unsupervised';
+      resolveSupervisionSettled('unsupervised');
       fatal = true;
       invalidateEvidence();
       settleAllWaiters(healthFailure());
@@ -562,28 +653,45 @@ function createServerProcessRunner(dependencies = {}) {
       supervision = requestServerProcessSupervision({
         eventBus,
         identity: ownership,
-        onFailure: supervisionFailure,
-        required: supervisionRequired() === true
+        onFailure: (identity, reason) => supervisionFailure(reason),
+        required: supervisionMode === 'required' && supervisionRequired() === true,
+        ...(supervisionMode === 'best-effort' ? { onDeadline: (identity, reason) => degradeSupervision(reason) } : {})
       });
     } catch (error) {
       // The child already exists. Return its exact handle so the caller can
       // prove termination; throwing here would discard the only safe cleanup
       // authority while the operating system may still have a live process.
-      supervisionFailure();
+      supervisionFailure(error);
       supervision = Object.freeze({
+        acknowledged: false,
         ready: Promise.resolve().then(() => { throw error; })
       });
     }
-    const supervisionReady = Promise.resolve(supervision.ready).then(() => {
+    const acknowledged = supervision.acknowledged === true;
+    if (!acknowledged && supervisionMode === 'best-effort') degradeSupervision(NOT_ACKNOWLEDGED_REASON);
+    const watchdogReady = Promise.resolve(supervision.ready).then(() => {
+      // Only an exact watchdog ACK arms supervision; an unrequired, unacknowledged
+      // launch keeps its readiness semantics but is never treated as supervised.
+      if (acknowledged) markSupervisionArmed();
+      else if (supervisionState === 'pending') {
+        supervisionState = 'unsupervised';
+        resolveSupervisionSettled('unsupervised');
+      }
+      if (supervisionMode === 'best-effort') return ownership;
       if (fatal || closedInfo) throw healthFailure();
       supervisionEstablished = true;
       settleReadyIfComplete();
       return ownership;
     }, error => {
-      supervisionFailure();
+      supervisionFailure(error);
+      if (supervisionMode === 'best-effort') return ownership;
       throw healthFailure(error);
     });
-    void supervisionReady.catch(() => {});
+    void watchdogReady.catch(() => {});
+    // Best-effort callers learn the outcome without ever seeing a rejection.
+    const supervisionReady = request.supervision === 'best-effort'
+      ? supervisionSettled.then(() => ownership)
+      : watchdogReady;
 
     const handle = {
       child,
@@ -593,16 +701,27 @@ function createServerProcessRunner(dependencies = {}) {
       operationId: request.operationId,
       pid,
       publishEvents: request.publishEvents,
+      supervision: Object.freeze({
+        settled: supervisionSettled,
+        state: () => supervisionState
+      }),
       supervisionReady,
       readyMarkers: Object.freeze([...plan.readyMarkers]),
       isLive() {
         return !fatal && closedInfo === null && child.exitCode === null && child.signalCode === null && !child.killed;
       },
+      // Later watchdog faults are reported instead of terminating this server.
+      relaxSupervision() {
+        if (supervisionMode === 'best-effort') return false;
+        supervisionMode = 'best-effort';
+        settleReadyIfComplete();
+        return true;
+      },
       waitForReady(inputValue) {
         const wait = normalizeWaitRequest(inputValue);
         if (wait.signal?.aborted) return Promise.reject(cancelled());
         if (fatal || closedInfo) return Promise.reject(healthFailure());
-        if (readyEvidence && supervisionEstablished) return Promise.resolve(readyEvidence);
+        if (readyEvidence && readinessSupervised()) return Promise.resolve(readyEvidence);
         return new Promise((resolve, reject) => {
           const waiter = { resolve, reject, signal: wait.signal, timer: null, onAbort: null };
           waiter.onAbort = () => settleWaiter(waiter, cancelled());
@@ -664,7 +783,7 @@ function createServerProcessRunner(dependencies = {}) {
         processEvidence.delete(pid); // Conflicting live handles never receive a PID-only exemption.
       } else {
         evidenceEntry = { pid, handle, authority: launchAuthority, identity: null, invalidated: false,
-          isSupervised: () => supervisionEstablished };
+          isSupervised: () => supervisionState === 'armed' };
         processEvidence.set(pid, evidenceEntry);
         const entry = evidenceEntry;
         void Promise.resolve().then(() => inspectProcesses()).then(value => {

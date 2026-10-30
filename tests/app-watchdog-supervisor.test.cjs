@@ -3,7 +3,8 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const test = require('node:test');
 
-const { createAppWatchdogSupervisor, MAX_ACK_BYTES } = require('../electron/watchdog/app-watchdog-supervisor.cjs');
+const { ACK_TIMEOUT_MS, createAppWatchdogSupervisor, MAX_ACK_BYTES } = require('../electron/watchdog/app-watchdog-supervisor.cjs');
+const { getSupervisionAvailability } = require('../electron/watchdog/server-process-supervision-policy.cjs');
 const { createServerProcessRunner } = require('../electron/services/server-process-runner.cjs');
 
 class FakePipe extends PassThrough {
@@ -36,7 +37,7 @@ function owned(instanceId, pid, operationId) {
     onSupervisionFailure(value) { failures.push(value); }, operationId, pid
   } };
 }
-function fixture({ spawnError = null, watchdogPid = 7001 } = {}) {
+function fixture({ spawnError = null, watchdogPid = 7001, powerShell = true, warnings = [] } = {}) {
   const eventBus = new EventEmitter(); const spawned = []; let nonceIndex = 0;
   const timerCallbacks = new Set();
   const powershell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
@@ -48,7 +49,7 @@ function fixture({ spawnError = null, watchdogPid = 7001 } = {}) {
   const supervisor = createAppWatchdogSupervisor({
     cryptoApi: { randomBytes() { nonceIndex += 1; return Buffer.alloc(32, nonceIndex); } },
     env: {
-      SystemRoot: 'C:\\Windows',
+      ...(powerShell ? { SystemRoot: 'C:\\Windows' } : {}),
       PSModulePath: 'C:\\Users\\attacker\\Documents\\WindowsPowerShell\\Modules',
       PATH: 'C:\\hostile-bin',
       HOSTILE_JUNK: 'must-not-cross-boundary'
@@ -60,11 +61,11 @@ function fixture({ spawnError = null, watchdogPid = 7001 } = {}) {
     timers: {
       clearTimeout(timer) { timerCallbacks.delete(timer?.callback); },
       setTimeout(callback, delay) {
-        assert.equal(delay, 5000); timerCallbacks.add(callback);
+        assert.equal(delay, ACK_TIMEOUT_MS); timerCallbacks.add(callback);
         return { callback, unref() {} };
       }
     },
-    warn() {}
+    warn(message) { warnings.push(message); }
   });
   const ack = index => {
     const item = spawned[index];
@@ -199,4 +200,91 @@ test('an exit event without a matching watcher is harmless and does not block la
     pid: 9901
   }));
   assert.equal(laterListenerCalls, 1);
+});
+
+test('the required ACK deadline allows a cold PowerShell 30 seconds', () => {
+  assert.equal(ACK_TIMEOUT_MS, 30000);
+});
+
+test('watcher failure passes its reason to the exact supervision failure callback', async () => {
+  const { ack, eventBus, spawned, supervisor } = fixture(); supervisor.start();
+  const reasons = [];
+  const owner = owned('server-a', 8401, 'operation-a');
+  owner.event.onSupervisionFailure = (value, error) => { owner.failures.push(value); reasons.push(error); };
+  eventBus.emit('server-process-owned', owner.event); ack(0); await owner.acknowledgements[0].ready;
+  spawned[0].child.emit('exit', 1, null);
+  assert.deepEqual(owner.failures, [{ instanceId: 'server-a', pid: 8401, operationId: 'operation-a' }]);
+  assert.equal(reasons.length, 1);
+  assert.ok(reasons[0] instanceof Error);
+  assert.equal(reasons[0].message, 'watchdog exited unexpectedly (1/null)');
+});
+
+test('a best-effort deadline only reports, keeps the watcher alive, and a late ACK still arms', async () => {
+  const warnings = [];
+  const { ack, eventBus, fireTimers, spawned, supervisor } = fixture({ warnings }); supervisor.start();
+  const owner = owned('server-a', 8501, 'operation-a');
+  const deadlines = [];
+  owner.event.onSupervisionDeadline = (value, error) => { deadlines.push([value, error]); };
+  eventBus.emit('server-process-owned', owner.event);
+  let armed = false;
+  owner.acknowledgements[0].ready.then(() => { armed = true; });
+
+  fireTimers();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(deadlines.length, 1);
+  assert.deepEqual(deadlines[0][0], { instanceId: 'server-a', pid: 8501, operationId: 'operation-a' });
+  assert.equal(deadlines[0][1].message, 'Watchdog ACK deadline exceeded');
+  assert.deepEqual(owner.failures, []);
+  assert.deepEqual(spawned[0].child.killCalls, []);
+  assert.equal(armed, false);
+  assert.equal(warnings.length, 1);
+
+  ack(0);
+  await owner.acknowledgements[0].ready;
+  assert.equal(armed, true);
+  assert.deepEqual(owner.failures, []);
+  eventBus.emit('server-process-released', { instanceId: 'server-a', pid: 8501, operationId: 'operation-a' });
+  assert.deepEqual(spawned[0].child.killCalls, [undefined], 'the late-armed watcher remains tracked for an orderly release');
+});
+
+test('a best-effort watcher that dies after the deadline reports failure once and is not reported again', async () => {
+  const { eventBus, fireTimers, spawned, supervisor } = fixture(); supervisor.start();
+  const owner = owned('server-a', 8601, 'operation-a');
+  const deadlines = [];
+  owner.event.onSupervisionDeadline = value => { deadlines.push(value); };
+  eventBus.emit('server-process-owned', owner.event);
+  fireTimers();
+  spawned[0].child.emit('exit', 29, null);
+  spawned[0].child.emit('error', new Error('late'));
+  await assert.rejects(owner.acknowledgements[0].ready, /watchdog exited unexpectedly \(29\/null\)/u);
+  assert.equal(deadlines.length, 1);
+  assert.deepEqual(owner.failures, [{ instanceId: 'server-a', pid: 8601, operationId: 'operation-a' }]);
+});
+
+test('start publishes whether the watchdog can arm on this PC', () => {
+  const available = fixture(); available.supervisor.start();
+  assert.deepEqual(getSupervisionAvailability(), { available: true, reason: null });
+
+  const unavailable = fixture({ powerShell: false }); unavailable.supervisor.start();
+  assert.deepEqual(getSupervisionAvailability(), { available: false, reason: 'powershell-unavailable' });
+  const owner = owned('server-a', 8701, 'operation-a');
+  unavailable.eventBus.emit('server-process-owned', owner.event);
+  assert.equal(unavailable.spawned.length, 0);
+  assert.deepEqual(owner.acknowledgements, []);
+
+  available.supervisor.dispose(); unavailable.supervisor.dispose();
+});
+
+test('without an installed supervisor, availability does not refuse anything', () => {
+  const policyPath = require.resolve('../electron/watchdog/server-process-supervision-policy.cjs');
+  const original = require.cache[policyPath];
+  delete require.cache[policyPath];
+  try {
+    const fresh = require(policyPath);
+    assert.equal(fresh.isServerProcessSupervisionRequired(), false);
+    assert.deepEqual(fresh.getSupervisionAvailability(), { available: true, reason: 'not-required' });
+    assert.equal(Object.isFrozen(fresh.getSupervisionAvailability()), true);
+  } finally {
+    require.cache[policyPath] = original;
+  }
 });

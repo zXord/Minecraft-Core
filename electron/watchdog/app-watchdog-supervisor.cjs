@@ -10,7 +10,8 @@ const { enableServerProcessSupervisionRequirement } = require('./server-process-
 const OWNERSHIP_EVENT = 'server-process-owned';
 const EXIT_EVENTS = Object.freeze(['server-process-released', 'server-normal-exit', 'server-crashed']);
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-const ACK_TIMEOUT_MS = 5000;
+// A cold PowerShell and CIM start during a busy login can take many seconds.
+const ACK_TIMEOUT_MS = 30000;
 const MAX_ACK_BYTES = 512;
 
 function normalizeOwnership(value) {
@@ -61,7 +62,9 @@ function createAppWatchdogSupervisor({
   const handleOwnership = value => {
     const ownership = normalizeOwnership(value);
     if (!ownership || typeof value.acknowledge !== 'function' || typeof value.onSupervisionFailure !== 'function' ||
+        (value.onSupervisionDeadline !== undefined && typeof value.onSupervisionDeadline !== 'function') ||
         !powerShellRuntime) return false;
+    const reportsDeadline = typeof value.onSupervisionDeadline === 'function';
     const key = ownershipKey(ownership);
     const existing = watchers.get(key);
     if (existing) {
@@ -135,7 +138,14 @@ function createAppWatchdogSupervisor({
       entry.rejectReady(error);
       try { child.kill(); } catch { /* exact watcher cleanup only */ }
       warn(`App watchdog failed for ${ownership.instanceId}/${ownership.pid}: ${error.message}`);
-      try { value.onSupervisionFailure(ownership); } catch { /* observer cannot widen authority */ }
+      try { value.onSupervisionFailure(ownership, error); } catch { /* observer cannot widen authority */ }
+    };
+    // Best-effort requesters only hear about a missed deadline. The watcher keeps
+    // running, so a late ACK still arms app-death protection.
+    const reportDeadline = error => {
+      if (entry.armed || entry.expectedStop || entry.failureDelivered || watchers.get(key) !== entry) return;
+      warn(`App watchdog for ${ownership.instanceId}/${ownership.pid} is still waiting for its ACK: ${error.message}`);
+      try { value.onSupervisionDeadline(ownership, error); } catch { /* observer cannot widen authority */ }
     };
 
     child.stdout.on('data', chunk => {
@@ -159,7 +169,11 @@ function createAppWatchdogSupervisor({
     child.once('error', error => fail(error));
     child.once('exit', (code, signal) => fail(new Error(`watchdog exited unexpectedly (${code ?? 'null'}/${signal ?? 'null'})`)));
     try {
-      entry.timer = timers.setTimeout(() => fail(new Error('Watchdog ACK deadline exceeded')), ACK_TIMEOUT_MS);
+      entry.timer = timers.setTimeout(() => {
+        const error = new Error('Watchdog ACK deadline exceeded');
+        if (reportsDeadline) reportDeadline(error);
+        else fail(error);
+      }, ACK_TIMEOUT_MS);
       entry.timer?.unref?.();
       child.stdin.unref();
       child.stdout.unref();
@@ -184,7 +198,7 @@ function createAppWatchdogSupervisor({
       if (started) return false;
       eventBus.on(OWNERSHIP_EVENT, handleOwnership);
       for (const eventName of EXIT_EVENTS) eventBus.on(eventName, handleExit);
-      enableServerProcessSupervisionRequirement();
+      enableServerProcessSupervisionRequirement({ available: Boolean(powerShellRuntime) });
       started = true;
       return true;
     },

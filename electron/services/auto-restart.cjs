@@ -9,6 +9,11 @@ const {
   updateServerConfig,
   getDefaultServerConfig
 } = require('../utils/config-manager.cjs');
+const { ModpackError } = require('./modpacks/errors.cjs');
+const {
+  LIVE_SERVER_FOLDER_MESSAGE,
+  probeLiveServerFolder
+} = require('./modpack-lifecycle/live-server-folder-probe.cjs');
 
 // Load initial auto-restart state from persistent store
 const storedAutoRestart = appStore.get('autoRestart') || { enabled: false, delay: 10, maxCrashes: 3 };
@@ -364,10 +369,31 @@ function initFromServerConfig(serverPath) {
   applyAutoRestartState(config?.autoRestart || getDefaultServerConfig().autoRestart);
 }
 
-function createRecoveryRuntimePolicy({ runtimeController } = {}) {
+// The in-memory stop only covers servers this app started. A server started
+// elsewhere (run.bat, another launcher, or one that outlived an app crash
+// without an armed watchdog) still holds its world lock; lifecycle and recovery
+// operations must not copy or swap the folder under it.
+async function assertNoLiveServerInFolder(request, liveFolderProbe) {
+  let evidence = null;
+  let cause;
+  try {
+    evidence = await liveFolderProbe(request?.serverPath);
+  } catch (error) {
+    cause = error;
+  }
+  if (evidence?.live === false) return;
+  throw new ModpackError('SERVER_RUNNING', LIVE_SERVER_FOLDER_MESSAGE, {
+    cause,
+    details: typeof request?.instanceId === 'string' ? { serverId: request.instanceId } : undefined,
+    retryable: true
+  });
+}
+
+function createRecoveryRuntimePolicy({ runtimeController, liveFolderProbe = probeLiveServerFolder } = {}) {
   if (!runtimeController || typeof runtimeController !== 'object' ||
       typeof runtimeController.ensureStopped !== 'function' ||
-      typeof runtimeController.adoptValidatedHandoff !== 'function') {
+      typeof runtimeController.adoptValidatedHandoff !== 'function' ||
+      typeof liveFolderProbe !== 'function') {
     throw new TypeError('Recovery runtime controller is invalid');
   }
   const adopted = new Map();
@@ -399,6 +425,7 @@ function createRecoveryRuntimePolicy({ runtimeController } = {}) {
       if (!result || (result.stopped !== true && result.success !== true && result.alreadyStopped !== true)) {
         throw new Error('Server runtime could not be proven stopped');
       }
+      await assertNoLiveServerInFolder(request, liveFolderProbe);
       const requestedPathKey = serverPathKey(request?.serverPath);
       for (const [eventId, prior] of adopted) {
         if (prior.jobId === request?.jobId && prior.instanceId === request?.instanceId &&

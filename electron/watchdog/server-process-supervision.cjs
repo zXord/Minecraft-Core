@@ -14,9 +14,12 @@ function sameIdentity(left, right) {
     left.instanceId === right.instanceId && left.operationId === right.operationId && left.pid === right.pid;
 }
 
-function requestServerProcessSupervision({ eventBus, identity, onFailure, required }) {
+// onDeadline (optional) asks the supervisor to only report a missed ACK
+// deadline and keep the watcher alive, so a late ACK can still arm it.
+function requestServerProcessSupervision({ eventBus, identity, onFailure, required, onDeadline }) {
   if (!eventBus || typeof eventBus.emit !== 'function' || !validIdentity(identity) ||
-      typeof onFailure !== 'function' || typeof required !== 'boolean') {
+      typeof onFailure !== 'function' || typeof required !== 'boolean' ||
+      (onDeadline !== undefined && typeof onDeadline !== 'function')) {
     throw new TypeError('Server process supervision request is invalid');
   }
   const exactIdentity = Object.freeze({
@@ -28,6 +31,7 @@ function requestServerProcessSupervision({ eventBus, identity, onFailure, requir
   let acknowledged = false;
   let ready = null;
   let failureDelivered = false;
+  let deadlineDelivered = false;
   const acknowledge = evidence => {
     if (acceptingAcknowledgement && sameIdentity(exactIdentity, evidence) &&
         evidence.ready && typeof evidence.ready.then === 'function') {
@@ -35,10 +39,15 @@ function requestServerProcessSupervision({ eventBus, identity, onFailure, requir
       ready = Promise.resolve(evidence.ready);
     }
   };
-  const onSupervisionFailure = evidence => {
+  const onSupervisionFailure = (evidence, reason) => {
     if (failureDelivered || !sameIdentity(exactIdentity, evidence)) return;
     failureDelivered = true;
-    onFailure(exactIdentity);
+    onFailure(exactIdentity, reason);
+  };
+  const onSupervisionDeadline = (evidence, reason) => {
+    if (deadlineDelivered || failureDelivered || !sameIdentity(exactIdentity, evidence)) return;
+    deadlineDelivered = true;
+    onDeadline(exactIdentity, reason);
   };
 
   let emissionError = null;
@@ -46,7 +55,8 @@ function requestServerProcessSupervision({ eventBus, identity, onFailure, requir
     eventBus.emit('server-process-owned', Object.freeze({
       ...exactIdentity,
       acknowledge,
-      onSupervisionFailure
+      onSupervisionFailure,
+      ...(onDeadline ? { onSupervisionDeadline } : {})
     }));
   } catch (error) {
     emissionError = error;
@@ -55,8 +65,9 @@ function requestServerProcessSupervision({ eventBus, identity, onFailure, requir
   }
 
   if (required && !acknowledged) {
-    onSupervisionFailure(exactIdentity);
-    throw new Error('Server process supervision was not acknowledged', { cause: emissionError || undefined });
+    const error = new Error('Server process supervision was not acknowledged', { cause: emissionError || undefined });
+    onSupervisionFailure(exactIdentity, error);
+    throw error;
   }
   return Object.freeze({
     acknowledged,
