@@ -16,10 +16,17 @@ const {
 const eventBus = require('../utils/event-bus.cjs');
 const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 const { getManagementTlsConfig } = require('../utils/tls-utils.cjs');
-const { resolveServerLoader } = require('../utils/server-loader.cjs');
+const { describeServerLoader } = require('../utils/server-loader.cjs');
 const process = require('process');
 const os = require('os');
-const { clientPackManagementFields } = require('./client-modpacks/client-pack-management.cjs');
+const { startClientPackManagementFields } = require('./client-modpacks/client-pack-management.cjs');
+const { ModpackError } = require('./modpacks/errors.cjs');
+const { proveEntriesAbsent } = require('./modpacks/instance-ownership.cjs');
+const { CURRENT_STATE, STATE_DIRECTORY } = require('./modpacks/state/modpack-state-repository.cjs');
+const MODPACK_STATE_ENTRY = `${STATE_DIRECTORY}/${CURRENT_STATE}`;
+// Friends on v26.6.1 give /api/server/info about 5 s, so the matching pack
+// requirement may hold the response for at most this long after the legacy work.
+const CLIENT_PACK_FIELDS_TIMEOUT_MS = 3000;
 let clientModpackResolver = null;
 function configureClientModpackResolver(resolver) {
   if (typeof resolver !== 'function') throw new TypeError('Client modpack resolver is invalid');
@@ -29,15 +36,46 @@ function configureClientModpackResolver(resolver) {
 // Reuse centralized in-app logger
 const logger = getLoggerHandlers();
 
+// A requested folder matches a registered server by its exact spelling first, as
+// v26.6.1 matched, and otherwise by folder: letter case and trailing separators
+// are ignored.
+function serverPathKey(value) {
+  if (typeof value !== 'string' || value.includes('\0') || !path.isAbsolute(value)) return null;
+  return path.resolve(value).toLocaleLowerCase('en-US');
+}
+
+function findServerInstance(instances, serverPath) {
+  if (!Array.isArray(instances) || typeof serverPath !== 'string' || !serverPath) return null;
+  const servers = instances.filter((instance) => instance && instance.type === 'server');
+  const exact = servers.find((instance) => instance.path === serverPath);
+  if (exact) return exact;
+  const key = serverPathKey(serverPath);
+  return key === null ? null : servers.find((instance) => serverPathKey(instance.path) === key) || null;
+}
+
 function findInstanceByPath(serverPath) {
   if (!serverPath) return null;
   try {
     const appStore = require('../utils/app-store.cjs');
-    const instances = appStore.get('instances') || [];
-    return instances.find((instance) => instance && instance.type === 'server' && instance.path === serverPath) || null;
+    return findServerInstance(appStore.get('instances'), serverPath);
   } catch {
     return null;
   }
+}
+
+// resolveManagementInstanceId keys a management server by its folder when no
+// registered server matched; registered server ids are never absolute paths.
+function isFolderKeyedId(instanceId) {
+  return typeof instanceId === 'string' && path.isAbsolute(instanceId);
+}
+
+// The companion resolves registered server ids only. For a folder with no
+// registration, modpack state proven absent (the proof CompanionService uses)
+// means no matching pack requirement, as v26.6.1 hosts answered; present or
+// unprovable state stays unavailable.
+function folderClientPackRequirement(serverPath) {
+  if (proveEntriesAbsent(serverPath, [MODPACK_STATE_ENTRY])) return null;
+  throw new ModpackError('CLIENT_PACK_UNAVAILABLE', 'The matching client pack is unavailable');
 }
 
 function resolveManagementInstanceId(instanceId, serverPath) {
@@ -522,6 +560,9 @@ class ManagementServer {
       }
       
       try {
+        // Started now so the requirement overlaps the legacy work below. Its budget
+        // starts only where the fields are awaited, so that work never spends it.
+        const clientPackRequirement = this.startClientPackFields();
         // Read server properties if they exist
         const serverPropsPath = path.join(this.serverPath, 'server.properties');
         let serverProps = {};
@@ -671,10 +712,10 @@ class ManagementServer {
         
         // Check Minecraft server status
         const minecraftServerStatus = await this.checkMinecraftServerStatus();
-        const loaderInfo = resolveServerLoader(this.serverPath);
+        const loaderInfo = describeServerLoader(this.serverPath);
         const loaderType = loaderInfo.loader || 'vanilla';
         const loaderVersion = loaderInfo.loaderVersion || null;
-        const clientPackFields = await clientPackManagementFields(this.instanceId, clientModpackResolver);
+        const clientPackFields = await clientPackRequirement.settle({ timeoutMs: CLIENT_PACK_FIELDS_TIMEOUT_MS });
         
         res.json({
           success: true,
@@ -687,6 +728,10 @@ class ManagementServer {
           minecraftVersion: minecraftVersion,
           loaderType,
           loaderVersion,
+          // Recorded runtime files changed (for example by an older version's
+          // Repair): the loader comes from the server config until Modpack
+          // Verify and Repair runs.
+          ...(loaderInfo.runtimeIncomplete ? { runtimeIncomplete: true } : {}),
           requiredMods: requiredMods,
           allClientMods: allClientMods,
           appVersion: this.appVersion, // Include app version in server info
@@ -1650,6 +1695,21 @@ class ManagementServer {
     }
   }
   
+  // Starts the matching client pack fields for /api/server/info. A management
+  // server keyed by its folder asks the companion for the registered id that
+  // folder has now; with no registration, the folder itself answers.
+  startClientPackFields() {
+    if (!isFolderKeyedId(this.instanceId)) {
+      return startClientPackManagementFields(this.instanceId, clientModpackResolver);
+    }
+    const registered = findInstanceByPath(this.serverPath);
+    if (registered && registered.id) {
+      return startClientPackManagementFields(registered.id, clientModpackResolver);
+    }
+    const serverPath = this.serverPath;
+    return startClientPackManagementFields(this.instanceId, () => folderClientPackRequirement(serverPath));
+  }
+
   // Calculate file checksum for integrity verification
   calculateFileChecksum(filePath) {
     try {
@@ -1812,7 +1872,7 @@ class ManagementServer {
         }
       }
       
-      const loaderInfo = resolveServerLoader(this.serverPath);
+      const loaderInfo = describeServerLoader(this.serverPath);
       loaderType = loaderInfo.loader || loaderType;
       loaderVersion = loaderInfo.loaderVersion || loaderVersion;
     } catch {

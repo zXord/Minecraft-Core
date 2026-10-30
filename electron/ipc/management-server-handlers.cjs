@@ -1,4 +1,5 @@
 // Management server IPC handlers
+const path = require('path');
 const { getManagementServer } = require('../services/management-server.cjs');
 const appStore = require('../utils/app-store.cjs');
 const { ensureEncryptionAvailable, packSecret, unpackSecret } = require('../utils/secure-store.cjs');
@@ -21,10 +22,28 @@ function findServerInstanceById(instanceId) {
   return instances.find((inst) => inst && inst.type === 'server' && inst.id === instanceId) || null;
 }
 
+// A requested folder matches a registered server by its exact spelling first, as
+// v26.6.1 matched, and otherwise by folder: letter case and trailing separators
+// are ignored.
+function serverPathKey(value) {
+  if (typeof value !== 'string' || value.includes('\0') || !path.isAbsolute(value)) return null;
+  return path.resolve(value).toLocaleLowerCase('en-US');
+}
+
+function findServerInstanceIndex(instances, serverPath) {
+  if (!serverPath || !Array.isArray(instances)) return -1;
+  const isServer = (inst) => inst && inst.type === 'server';
+  const exact = instances.findIndex((inst) => isServer(inst) && inst.path === serverPath);
+  if (exact !== -1) return exact;
+  const key = serverPathKey(serverPath);
+  return key === null ? -1 : instances.findIndex((inst) => isServer(inst) && serverPathKey(inst.path) === key);
+}
+
 function findServerInstanceByPath(serverPath) {
   if (!serverPath) return null;
   const instances = getServerInstances();
-  return instances.find((inst) => inst && inst.type === 'server' && inst.path === serverPath) || null;
+  const idx = findServerInstanceIndex(instances, serverPath);
+  return idx === -1 ? null : instances[idx];
 }
 
 function resolveServerInstance(payload = {}) {
@@ -39,7 +58,7 @@ function resolveServerInstance(payload = {}) {
 
 function updateServerInstance(serverPath, updates) {
   const instances = getServerInstances();
-  const idx = instances.findIndex((inst) => inst && inst.type === 'server' && inst.path === serverPath);
+  const idx = findServerInstanceIndex(instances, serverPath);
   if (idx === -1) return null;
   const updated = { ...instances[idx], ...updates };
   instances[idx] = updated;
