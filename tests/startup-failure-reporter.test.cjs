@@ -6,6 +6,9 @@ const {
   DATA_SAFETY_LINE,
   FATAL_DIALOG_BUTTONS,
   RELEASES_DOWNLOAD_URL,
+  UPDATE_CHECK_TIMEOUT_MS,
+  UPDATE_DOWNLOAD_IDLE_TIMEOUT_MS,
+  UPDATE_DOWNLOAD_TIMEOUT_MS,
   createFatalStartupReporter,
   describeStartupFailure,
   runStandaloneUpdate
@@ -46,7 +49,7 @@ function pageText(url) {
   return decodeURIComponent(url.slice(DATA_URL_PREFIX.length));
 }
 
-function scriptedDialog(fatalResponses) {
+function scriptedDialog(fatalResponses, { onNotice = null } = {}) {
   const calls = [];
   return {
     calls,
@@ -55,6 +58,16 @@ function scriptedDialog(fatalResponses) {
       calls.push({ kind: 'message-box', parent, options });
       if (options.buttons?.length === FATAL_DIALOG_BUTTONS.length) {
         return { response: fatalResponses.length ? fatalResponses.shift() : FATAL_DIALOG_BUTTONS.indexOf('Quit') };
+      }
+      if (options.signal) {
+        // Electron keeps the box open until the user answers or the signal
+        // aborts, which closes it as if the user had cancelled it.
+        return new Promise(resolve => {
+          const cancel = () => resolve({ response: options.cancelId });
+          if (options.signal.aborted) cancel();
+          else options.signal.addEventListener('abort', cancel, { once: true });
+          onNotice?.(response => resolve({ response }));
+        });
       }
       return { response: 0 };
     },
@@ -124,6 +137,28 @@ function emitDownloaded(service) {
   service.emit('download-progress', { percent: 100 });
   service.emit('update-downloaded', { version: '26.12.1' });
   return { success: true, message: 'Download started' };
+}
+
+// An updater that started downloading and then never reports anything again.
+function stalledDownload() {
+  return new Promise(() => {});
+}
+
+// Lets real setImmediate callbacks and promise jobs run while only setTimeout is mocked.
+async function settle(rounds = 8) {
+  for (let round = 0; round < rounds; round += 1) await new Promise(resolve => setImmediate(resolve));
+}
+
+function track(promise) {
+  const state = { settled: false, value: undefined };
+  promise.then(value => { state.settled = true; state.value = value; });
+  return state;
+}
+
+function assertUpdateListenersRemoved(service) {
+  for (const name of ['download-progress', 'update-downloaded', 'update-error']) {
+    assert.equal(service.listenerCount(name), 0, `${name} listener removed`);
+  }
 }
 
 test('the reporter re-exports the health model describeStartupFailure', () => {
@@ -479,4 +514,213 @@ test('runStandaloneUpdate reports check, download and refused-install failures w
   for (const service of [refusedInstall, thrownDownload, erroredDownload]) {
     assert.equal(service.listenerCount('update-error'), 0);
   }
+});
+
+test('runStandaloneUpdate ends a download the updater stops reporting on after the idle bound', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const service = availableUpdate(stalledDownload);
+  const result = track(runStandaloneUpdate({ updateService: service }));
+  await settle();
+  assert.deepEqual(service.calls, ['capability', 'check', ['download', { installAfterDownload: true }]]);
+
+  t.mock.timers.tick(UPDATE_DOWNLOAD_IDLE_TIMEOUT_MS - 1);
+  await settle();
+  assert.equal(result.settled, false, 'the wait is not cut short');
+
+  t.mock.timers.tick(1);
+  await settle();
+  assert.equal(result.settled, true, 'the download wait is bounded');
+  assert.deepEqual(result.value, { status: 'download-timed-out', message: result.value.message, version: '26.12.1' });
+  assert.match(result.value.message, /did not finish downloading/u);
+  assert.match(result.value.message, /Open download page/u);
+  assertUpdateListenersRemoved(service);
+});
+
+test('download progress extends the idle bound, but the overall bound still ends the wait', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const service = availableUpdate(stalledDownload);
+  const result = track(runStandaloneUpdate({ updateService: service }));
+  await settle();
+  const step = UPDATE_DOWNLOAD_IDLE_TIMEOUT_MS - 1000;
+  let elapsed = 0;
+  let percent = 0;
+  while (elapsed + step < UPDATE_DOWNLOAD_TIMEOUT_MS) {
+    t.mock.timers.tick(step);
+    elapsed += step;
+    percent += 1;
+    service.emit('download-progress', { percent });
+    await settle();
+    assert.equal(result.settled, false, `a download still reporting progress after ${elapsed} ms keeps going`);
+  }
+  assert.ok(elapsed > UPDATE_DOWNLOAD_IDLE_TIMEOUT_MS, 'the download outlived one idle bound');
+
+  t.mock.timers.tick(UPDATE_DOWNLOAD_TIMEOUT_MS - elapsed - 1);
+  await settle();
+  assert.equal(result.settled, false);
+  t.mock.timers.tick(1);
+  await settle();
+  assert.equal(result.value.status, 'download-timed-out');
+  assertUpdateListenersRemoved(service);
+});
+
+test('an update check that never answers ends after its bound', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const service = new FakeUpdateService();
+  service.checkForUpdates = () => {
+    service.calls.push('check');
+    return new Promise(() => {});
+  };
+  const result = track(runStandaloneUpdate({ updateService: service }));
+  await settle();
+
+  t.mock.timers.tick(UPDATE_CHECK_TIMEOUT_MS - 1);
+  await settle();
+  assert.equal(result.settled, false);
+  t.mock.timers.tick(1);
+  await settle();
+  assert.deepEqual(result.value, { status: 'check-timed-out', message: result.value.message });
+  assert.match(result.value.message, /Open download page/u);
+  assert.deepEqual(service.calls, ['capability', 'check']);
+});
+
+test('a stalled download over the splash returns to the fatal dialog, so the download page and Quit stay available', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dialog = scriptedDialog([0, 3]);
+  const splashEvents = [];
+  const splash = fakeSplash(splashEvents);
+  const service = availableUpdate(stalledDownload);
+  const reporter = createFatalStartupReporter({
+    dialog,
+    shell: fakeShell(),
+    app: readyApp(),
+    getUpdateService: () => service,
+    logDirectory: LOG_DIRECTORY,
+    interactive: true,
+    now: () => 0
+  });
+
+  const outcome = track(reporter.report(new Error('composition failed'), { splash }));
+  await settle();
+  assert.equal(outcome.settled, false);
+  assert.equal(dialog.calls.length, 1, 'the splash shows the download, so no notice opens');
+
+  t.mock.timers.tick(UPDATE_DOWNLOAD_IDLE_TIMEOUT_MS);
+  await settle();
+
+  assert.equal(outcome.value, 'quit');
+  assert.deepEqual(dialog.calls.map(call => call.options.type), ['error', 'info', 'error']);
+  assert.equal(dialog.calls[1].parent, splash);
+  assert.match(dialog.calls[1].options.message, /did not finish downloading/u);
+  assert.deepEqual(dialog.calls[2].options.buttons, [...FATAL_DIALOG_BUTTONS], 'the fatal dialog is offered again');
+  const pages = splashEvents.filter(([kind]) => kind === 'load').map(([, text]) => text);
+  assert.ok(pages.some(text => text.includes('Downloading Minecraft Core 26.12.1')), pages.join('\n'));
+  assert.ok(pages.at(-1).includes('Minecraft Core could not start'), 'the splash shows the failure again');
+  assertUpdateListenersRemoved(service);
+});
+
+test('without a visible window a notice shows the update is under way and closes itself when the wait ends', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const hiddenSplash = { ...fakeSplash(), isVisible: () => false };
+  for (const splash of [null, hiddenSplash]) {
+    const dialog = scriptedDialog([0, 3]);
+    const service = availableUpdate(stalledDownload);
+    const reporter = createFatalStartupReporter({
+      dialog,
+      shell: fakeShell(),
+      app: readyApp(),
+      getUpdateService: () => service,
+      logDirectory: LOG_DIRECTORY,
+      interactive: true
+    });
+
+    const outcome = track(reporter.report(new Error('main import failed'), { splash }));
+    await settle();
+
+    assert.equal(outcome.settled, false);
+    assert.equal(dialog.calls.length, 2);
+    const notice = dialog.calls[1];
+    assert.equal(notice.parent, null, 'the notice needs no window');
+    assert.equal(notice.options.title, 'Minecraft Core could not start');
+    assert.match(notice.options.message, /checking for updates/iu);
+    assert.match(notice.options.detail, /Quit/u);
+    assert.deepEqual(notice.options.buttons, ['Quit']);
+    assert.equal(notice.options.cancelId, 0);
+    assert.equal(notice.options.signal.aborted, false, 'the notice stays open while the update runs');
+
+    t.mock.timers.tick(UPDATE_DOWNLOAD_IDLE_TIMEOUT_MS);
+    await settle();
+
+    assert.equal(notice.options.signal.aborted, true, 'the notice closes itself once the wait ends');
+    assert.equal(outcome.value, 'quit');
+    assert.deepEqual(dialog.calls.map(call => call.options.type), ['error', 'info', 'info', 'error']);
+    assert.match(dialog.calls[2].options.message, /did not finish downloading/u);
+    assert.deepEqual(dialog.calls[3].options.buttons, [...FATAL_DIALOG_BUTTONS]);
+    assertUpdateListenersRemoved(service);
+  }
+});
+
+test('without a visible window, Quit on the update notice ends the report at once', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let answerNotice = null;
+  const dialog = scriptedDialog([0], { onNotice: answer => { answerNotice = answer; } });
+  const service = availableUpdate(stalledDownload);
+  const reporter = createFatalStartupReporter({
+    dialog,
+    shell: fakeShell(),
+    app: readyApp(),
+    getUpdateService: () => service,
+    logDirectory: LOG_DIRECTORY,
+    interactive: true
+  });
+
+  const outcome = track(reporter.report(new Error('main import failed')));
+  await settle();
+  assert.equal(typeof answerNotice, 'function', 'the notice is open');
+  assert.equal(outcome.settled, false);
+
+  answerNotice(0);
+  await settle();
+
+  assert.equal(outcome.value, 'quit');
+  assert.equal(dialog.calls.length, 2, 'no further dialog after Quit');
+});
+
+test('without a visible window a downloaded update still hands over to the installer and closes the notice', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dialog = scriptedDialog([0]);
+  const service = availableUpdate(emitDownloaded);
+  const reporter = createFatalStartupReporter({
+    dialog,
+    shell: fakeShell(),
+    app: readyApp(),
+    getUpdateService: () => service,
+    logDirectory: LOG_DIRECTORY,
+    interactive: true
+  });
+
+  assert.equal(await reporter.report(new Error('main import failed')), 'installing');
+
+  assert.equal(dialog.calls.length, 2);
+  assert.deepEqual(dialog.calls[1].options.buttons, ['Quit']);
+  assert.equal(dialog.calls[1].options.signal.aborted, true, 'the notice is closed for the installer');
+  assertUpdateListenersRemoved(service);
+});
+
+test('without a visible window no notice opens when no update check starts', async () => {
+  const dialog = scriptedDialog([0, 3]);
+  const service = new FakeUpdateService({ capability: { allowed: false, message: 'This copy of Minecraft Core is not the installed app.' } });
+  const reporter = createFatalStartupReporter({
+    dialog,
+    shell: fakeShell(),
+    app: readyApp(),
+    getUpdateService: () => service,
+    logDirectory: LOG_DIRECTORY,
+    interactive: true
+  });
+
+  assert.equal(await reporter.report(new Error('main import failed')), 'quit');
+
+  assert.deepEqual(dialog.calls.map(call => call.options.type), ['error', 'info', 'error']);
+  assert.equal(dialog.calls[1].options.message, 'This copy of Minecraft Core is not the installed app.');
+  assert.equal(dialog.calls.some(call => call.options.signal), false);
 });

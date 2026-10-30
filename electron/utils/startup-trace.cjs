@@ -32,6 +32,7 @@ const allowedMarkers = new Set([
   'main:before-ready:start', 'main:before-ready:complete', 'main:ipc:start',
   'main:ipc:listeners:complete', 'main:ipc:handler-module:complete', 'main:ipc:complete',
   'update-service:get:start', 'update-service:get:complete', 'recovery:start', 'recovery:complete',
+  'recovery:degraded:start', 'recovery:degraded:complete',
   'recovery:factory:start', 'recovery:factory:complete',
   'recovery:release-tracking-init:start', 'recovery:release-tracking-init:complete',
   'recovery:runtime-verify:start', 'recovery:runtime-verify:complete',

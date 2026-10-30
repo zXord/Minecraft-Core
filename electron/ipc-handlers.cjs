@@ -38,6 +38,8 @@ const {
   getAutoRestartState
 } = require('./services/auto-restart.cjs');
 
+const START_MINIMIZED_ARGUMENT = '--start-minimized';
+
 function runningServersForRelaunch() {
   try {
     const { getAllServerStates, getServerState } = require('./services/server-manager.cjs');
@@ -69,7 +71,9 @@ function createStartupHandlers({ startup = null, getApp, getShell } = {}) {
         return { success: false, error: 'Minecraft Core is still finishing a change. Wait for it to finish, then restart.' };
       }
       const app = getApp();
-      app.relaunch();
+      // The user asked for the restart, so the new instance shows its window
+      // even when this one came from a login start with --start-minimized.
+      app.relaunch({ args: process.argv.slice(1).filter(argument => argument !== START_MINIMIZED_ARGUMENT) });
       app.quit();
       return { success: true };
     },

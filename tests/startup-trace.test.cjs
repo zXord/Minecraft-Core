@@ -28,6 +28,7 @@ const markers = [
   'main:before-ready:start', 'main:before-ready:complete', 'main:ipc:start',
   'main:ipc:listeners:complete', 'main:ipc:handler-module:complete', 'main:ipc:complete',
   'update-service:get:start', 'update-service:get:complete', 'recovery:start', 'recovery:complete',
+  'recovery:degraded:start', 'recovery:degraded:complete',
   'recovery:factory:start', 'recovery:factory:complete',
   'recovery:release-tracking-init:start', 'recovery:release-tracking-init:complete',
   'recovery:runtime-verify:start', 'recovery:runtime-verify:complete',
@@ -91,7 +92,7 @@ test('trace captures one initial baseline and emits only the bounded four-field 
   assert.doesNotMatch(lines.join(''), /SECRET|PRIVATE/);
 });
 
-test('trace admits all 102 startup markers once and rejects unknown inputs without coercion', () => {
+test('trace admits all 104 startup markers once and rejects unknown inputs without coercion', () => {
   const { mark, lines } = fixture();
   let coercions = 0;
   const privateMarker = { toString() { coercions += 1; return 'SECRET_PATH'; } };
@@ -102,7 +103,7 @@ test('trace admits all 102 startup markers once and rejects unknown inputs witho
   }
   for (const marker of markers) assert.equal(mark(marker), true, marker);
   for (const marker of markers) assert.equal(mark(marker), false, marker);
-  assert.equal(lines.length, 102);
+  assert.equal(lines.length, 104);
   assert.equal(coercions, 0);
   assert.deepEqual(lines.map(line => JSON.parse(line.slice(prefix.length)).marker), markers);
   for (const line of lines) {
@@ -236,4 +237,43 @@ test('every startup marker the real main entry emits is admitted by the trace al
     assert.equal(mark(marker), true, marker);
   }
   assert.equal(lines.length, emitted.size);
+});
+
+test('every stage the main bootstrap times, degraded recovery included, has both markers admitted', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../electron/bootstrap/create-main-bootstrap.cjs'), 'utf8');
+  const stages = [...new Set([...source.matchAll(/runStartupStage\('([^']+)'/gu)].map(match => match[1]))];
+  assert.ok(stages.includes('recovery') && stages.includes('recovery:degraded'), stages.join(', '));
+  const { mark, lines } = fixture();
+  for (const stage of stages) {
+    for (const marker of [`${stage}:start`, `${stage}:complete`]) {
+      assert.equal(markers.includes(marker), true, `${marker} is in the reviewed marker list`);
+      assert.equal(mark(marker), true, marker);
+    }
+  }
+  assert.equal(lines.length, stages.length * 2);
+});
+
+test('a degraded start keeps its recovery:degraded timing markers in the trace', async () => {
+  const { createMainBootstrap } = require('../electron/bootstrap/create-main-bootstrap.cjs');
+  const { createRuntimeFlags } = require('../electron/bootstrap/runtime-flags.cjs');
+  const { mark, lines } = fixture();
+  const recoveryFailure = new Error('recovery boundary failed');
+  const bootstrap = createMainBootstrap({
+    electronApi: { app: { setName() {}, setAppUserModelId() {} } },
+    serviceGraph: {
+      startup: {
+        async initializeRecovery() { throw recoveryFailure; },
+        async enterDegradedMode(error) { assert.equal(error, recoveryFailure); return { mode: 'degraded' }; },
+        markTiming: mark
+      },
+      window: { async create() { return { id: 1 }; } }
+    },
+    runtimeFlags: createRuntimeFlags({ env: { NODE_ENV: 'production' }, argv: ['Minecraft Core.exe'], platform: 'win32' })
+  });
+
+  assert.deepEqual(await bootstrap.onReady(), { id: 1 });
+
+  const traced = lines.map(line => JSON.parse(line.slice(prefix.length)).marker);
+  assert.deepEqual(traced.slice(0, 4), ['recovery:start', 'recovery:complete', 'recovery:degraded:start', 'recovery:degraded:complete']);
+  assert.ok(traced.includes('main-window:create:complete'), 'the degraded start still opens its window');
 });

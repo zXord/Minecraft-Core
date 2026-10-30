@@ -13,15 +13,28 @@ const QUIT = FATAL_DIALOG_BUTTONS.indexOf('Quit');
 const PROGRESS_STEP_PERCENT = 5;
 const PROGRESS_INTERVAL_MS = 1000;
 const MAX_MESSAGE_LENGTH = 500;
+// electron-updater fails a connection that stops sending data on its own.
+// These bounds end the wait when the updater reports nothing at all, so the
+// fatal dialog always comes back: the check, a download without progress for
+// the idle bound, and any download still running at the overall bound.
+const UPDATE_CHECK_TIMEOUT_MS = 2 * 60 * 1000;
+const UPDATE_DOWNLOAD_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+const UPDATE_DOWNLOAD_TIMEOUT_MS = 60 * 60 * 1000;
+const CHECK_TIMED_OUT = Symbol('check-timed-out');
+const QUIT_CHOSEN = Object.freeze({ status: 'quit-chosen' });
 
 const NOT_INSTALLED_MESSAGE = 'This copy of Minecraft Core is not the installed app, so it cannot install updates. Use Open download page to download the installer instead.';
 const UPDATE_UNAVAILABLE_MESSAGE = 'Minecraft Core could not check for updates. Use Open download page to download the latest installer.';
 const CHECK_FAILED_MESSAGE = 'Minecraft Core could not check for updates. Check your internet connection, or use Open download page.';
+const CHECK_TIMED_OUT_MESSAGE = 'Minecraft Core could not check for updates in time. Check your internet connection, or use Open download page.';
 const CHECK_BUSY_MESSAGE = 'An update check is already running. Try again in a moment.';
 const NO_UPDATE_MESSAGE = 'No newer version is available yet. Open the log folder for details, or use Open download page to see the releases.';
 const DOWNLOAD_FAILED_MESSAGE = 'The update could not be downloaded. Try again, or use Open download page.';
+const DOWNLOAD_TIMED_OUT_MESSAGE = 'The update did not finish downloading. Check your internet connection and try again, or use Open download page.';
 const INSTALL_REFUSED_MESSAGE = 'The update was downloaded but could not be installed yet. Try again, or use Open download page.';
 const INSTALLING_MESSAGE = 'The update is installing. Minecraft Core restarts when the installer finishes.';
+const UPDATE_NOTICE_MESSAGE = 'Minecraft Core is checking for updates.';
+const UPDATE_NOTICE_DETAIL = 'If a newer version is available, it is downloaded and installed, and Minecraft Core restarts. This message closes by itself. Choose Quit to stop and close Minecraft Core.';
 
 function firstText(...values) {
   for (const value of values) {
@@ -74,17 +87,38 @@ function progressPercent(progress) {
   return Math.min(100, Math.max(0, Math.floor(value)));
 }
 
+// Resolves with the operation's outcome, or with `expired` once timeoutMs passes.
+function settleWithin(operation, timeoutMs, expired) {
+  let timer = null;
+  const deadline = new Promise(resolve => { timer = setTimeout(() => resolve(expired), timeoutMs); });
+  return Promise.race([Promise.resolve().then(operation), deadline]).finally(() => clearTimeout(timer));
+}
+
 function downloadAndInstall(updateService, version, notify) {
   return new Promise(resolve => {
     let settled = false;
     let downloaded = false;
+    let overallTimer = null;
+    let idleTimer = null;
+    const stopTimers = () => {
+      clearTimeout(overallTimer);
+      clearTimeout(idleTimer);
+    };
+    const timedOut = () => finish(updateResult('download-timed-out', DOWNLOAD_TIMED_OUT_MESSAGE, version));
+    const restartIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(timedOut, UPDATE_DOWNLOAD_IDLE_TIMEOUT_MS);
+    };
     const listeners = {
       'download-progress': progress => {
-        if (!settled && !downloaded) notify({ phase: 'downloading', version, percent: progressPercent(progress) });
+        if (settled || downloaded) return;
+        restartIdleTimer();
+        notify({ phase: 'downloading', version, percent: progressPercent(progress) });
       },
       'update-downloaded': () => {
         if (settled) return;
         downloaded = true;
+        stopTimers();
         // The update service starts the installer from its own update-downloaded
         // handler and reports a refused install as update-error in the same turn.
         setImmediate(() => {
@@ -103,11 +137,14 @@ function downloadAndInstall(updateService, version, notify) {
     function finish(result) {
       if (settled) return;
       settled = true;
+      stopTimers();
       for (const [event, listener] of Object.entries(listeners)) updateService.removeListener(event, listener);
       resolve(result);
     }
 
     for (const [event, listener] of Object.entries(listeners)) updateService.on(event, listener);
+    overallTimer = setTimeout(timedOut, UPDATE_DOWNLOAD_TIMEOUT_MS);
+    restartIdleTimer();
     notify({ phase: 'downloading', version, percent: 0 });
     Promise.resolve()
       .then(() => updateService.downloadUpdate({ installAfterDownload: true }))
@@ -127,7 +164,8 @@ function downloadAndInstall(updateService, version, notify) {
  * Checks for, downloads and installs an app update without the main window.
  * Only the installed copy may install: a service without the install-identity
  * API counts as not installed. Resolves {status: 'installing'} once the update
- * service has the downloaded installer and is starting it.
+ * service has the downloaded installer and is starting it. The check and the
+ * download wait are bounded, so every call resolves with an outcome.
  */
 async function runStandaloneUpdate({ updateService, onStatus = null } = {}) {
   const notify = status => {
@@ -144,10 +182,11 @@ async function runStandaloneUpdate({ updateService, onStatus = null } = {}) {
   notify({ phase: 'checking' });
   let check;
   try {
-    check = await updateService.checkForUpdates();
+    check = await settleWithin(() => updateService.checkForUpdates(), UPDATE_CHECK_TIMEOUT_MS, CHECK_TIMED_OUT);
   } catch (error) {
     return updateResult('check-failed', firstText(readProperty(error, 'message')) || CHECK_FAILED_MESSAGE);
   }
+  if (check === CHECK_TIMED_OUT) return updateResult('check-timed-out', CHECK_TIMED_OUT_MESSAGE);
   if (readProperty(check, 'checking') === true) return updateResult('check-failed', CHECK_BUSY_MESSAGE);
   if (readProperty(check, 'success') !== true) {
     return updateResult('check-failed', firstText(readProperty(check, 'error')) || CHECK_FAILED_MESSAGE);
@@ -159,6 +198,15 @@ async function runStandaloneUpdate({ updateService, onStatus = null } = {}) {
 function usableWindow(window) {
   try {
     return window && !window.isDestroyed?.() ? window : null;
+  } catch {
+    return null;
+  }
+}
+
+function visibleWindow(window) {
+  const usable = usableWindow(window);
+  try {
+    return usable && usable.isVisible?.() !== false ? usable : null;
   } catch {
     return null;
   }
@@ -220,8 +268,10 @@ function createSplashProgress(getSplash, description, now) {
  * Creates the reporter for a startup failure that leaves no usable app. In
  * interactive mode it loops on a dialog offering Check for updates, Open
  * download page, Open log folder and Quit, modal to the splash when one is
- * open; before Electron is ready it can only show a plain error box. In
- * non-interactive mode (test, smoke and E2E harness runs) it logs, sets a
+ * open; before Electron is ready it can only show a plain error box. An update
+ * shows its progress on the splash, or in a notice with Quit when no window is
+ * visible, and a bounded update that does not install returns to the dialog.
+ * In non-interactive mode (test, smoke and E2E harness runs) it logs, sets a
  * failing exit code and returns at once. report() resolves 'quit', or
  * 'installing' when an update installer has taken over.
  */
@@ -310,11 +360,47 @@ function createFatalStartupReporter({
     }
   }
 
-  async function checkForUpdates(progress) {
+  // Opened when an update starts without a visible window (a login start shows
+  // no splash). It closes itself when the outcome arrives; its Quit ends the report.
+  function openUpdateNotice(onQuit) {
+    const controller = new AbortController();
+    showMessage(null, {
+      type: 'info',
+      title: FATAL_DIALOG_TITLE,
+      message: UPDATE_NOTICE_MESSAGE,
+      detail: UPDATE_NOTICE_DETAIL,
+      buttons: ['Quit'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      signal: controller.signal
+    }).then(() => {
+      if (!controller.signal.aborted) onQuit();
+    }, () => {
+      // Without the notice the bounded update still ends in the fatal dialog.
+    });
+    return () => controller.abort();
+  }
+
+  async function checkForUpdates(progress, splash) {
+    let closeNotice = null;
+    let chooseQuit = null;
+    const quitChosen = new Promise(resolve => { chooseQuit = () => resolve(QUIT_CHOSEN); });
+    const onStatus = status => {
+      progress.show(status);
+      if (!closeNotice && !visibleWindow(splash)) closeNotice = openUpdateNotice(chooseQuit);
+    };
+    const update = (async () => {
+      try {
+        return await runStandaloneUpdate({ updateService: getUpdateService(), onStatus });
+      } catch {
+        return updateResult('update-unavailable', UPDATE_UNAVAILABLE_MESSAGE);
+      }
+    })();
     try {
-      return await runStandaloneUpdate({ updateService: getUpdateService(), onStatus: status => progress.show(status) });
-    } catch {
-      return updateResult('update-unavailable', UPDATE_UNAVAILABLE_MESSAGE);
+      return await Promise.race([update, quitChosen]);
+    } finally {
+      closeNotice?.();
     }
   }
 
@@ -364,7 +450,8 @@ function createFatalStartupReporter({
     for (;;) {
       const response = await askNextStep(currentSplash(), description);
       if (response === CHECK_FOR_UPDATES) {
-        const outcome = await checkForUpdates(progress);
+        const outcome = await checkForUpdates(progress, splash);
+        if (outcome === QUIT_CHOSEN) return 'quit';
         if (outcome.status === 'installing') return 'installing';
         progress.showFailure();
         await showInfo(currentSplash(), outcome.message);
@@ -385,6 +472,9 @@ module.exports = {
   DATA_SAFETY_LINE,
   FATAL_DIALOG_BUTTONS,
   RELEASES_DOWNLOAD_URL,
+  UPDATE_CHECK_TIMEOUT_MS,
+  UPDATE_DOWNLOAD_IDLE_TIMEOUT_MS,
+  UPDATE_DOWNLOAD_TIMEOUT_MS,
   createFatalStartupReporter,
   describeStartupFailure,
   runStandaloneUpdate
