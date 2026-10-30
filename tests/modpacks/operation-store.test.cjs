@@ -943,3 +943,65 @@ test('reload fails closed for a tampered durable job record', async (t) => {
   const reloadedStore = new OperationStore(dependencies);
   await assert.rejects(reloadedStore.initialize(), error => error.code === 'RECOVERY_REQUIRED');
 });
+
+test('startup skips a crashed writer temp of a job record and still loads existing records', async t => {
+  const launchOwner = ownerFixture();
+  const { dependencies, store } = fixture(t, { allowNewServerLaunchBindings: true, launchOwner });
+  await store.initialize();
+  await store.create(job());
+  const leftovers = [`.job-0001.json.minecraft-core-tmp-${crypto.randomUUID()}`, `.job-0002.json.minecraft-core-tmp-${crypto.randomUUID()}`];
+  for (const name of leftovers) fs.writeFileSync(path.join(store.operationsPath, name), '{"partial":');
+
+  const reloaded = new OperationStore(dependencies);
+  const jobs = await reloaded.initialize();
+  assert.deepEqual(jobs.map(item => item.jobId), ['job-0001']);
+  assert.equal((await reloaded.get('job-0001')).phase, 'queued');
+  assert.deepEqual(await reloaded.listNewServerLaunchBindings(launchOwner.epoch), []);
+  assert.deepEqual(fs.readdirSync(store.operationsPath).sort(), [...leftovers, 'job-0001.json'].sort());
+
+  for (const [name, kind] of [['junk.txt', 'file'], [`.junk.txt.minecraft-core-tmp-${crypto.randomUUID()}`, 'file'],
+    [`.job-0003.json.minecraft-core-tmp-${crypto.randomUUID()}`, 'directory']]) {
+    const entry = path.join(store.operationsPath, name);
+    if (kind === 'file') fs.writeFileSync(entry, 'unexpected');
+    else fs.mkdirSync(entry);
+    await assert.rejects(new OperationStore(dependencies).initialize(), error => error.code === 'RECOVERY_REQUIRED', name);
+    await assert.rejects(reloaded.listNewServerLaunchBindings(launchOwner.epoch), error => error.code === 'RECOVERY_REQUIRED', name);
+    assert.equal(fs.existsSync(entry), true, name);
+    fs.rmSync(entry, { recursive: true });
+  }
+});
+
+test('a directory flush that fails at startup is deferred to the first job write', async t => {
+  const { dependencies } = fixture(t);
+  const flushes = [];
+  let failing = true;
+  const durableFs = {
+    ...dependencies.durableFs,
+    flushDirectory(directory) {
+      flushes.push(directory);
+      if (failing) throw Object.assign(new Error('injected missing worker'), { code: 'COMMIT_FAILED' });
+      return dependencies.durableFs.flushDirectory(directory);
+    }
+  };
+  const root = path.join(dependencies.userDataPath, 'modpack-lifecycle');
+  const store = new OperationStore({ ...dependencies, durableFs });
+
+  await store.initialize();
+  assert.deepEqual(flushes, [dependencies.userDataPath]);
+  await assert.rejects(store.create(job()), error => error.code === 'COMMIT_FAILED' && error.commitPhase === 'pre-publication');
+  assert.deepEqual(fs.readdirSync(store.operationsPath), []);
+  assert.deepEqual(flushes, [dependencies.userDataPath, dependencies.userDataPath]);
+
+  failing = false;
+  assert.equal((await store.create(job())).phase, 'queued');
+  assert.deepEqual(flushes.slice(2), [dependencies.userDataPath, root]);
+
+  flushes.length = 0;
+  failing = true;
+  const reopened = new OperationStore({ ...dependencies, durableFs });
+  await reopened.initialize();
+  assert.deepEqual(flushes, [], 'an existing profile needs no directory flush at startup');
+  const moved = await reopened.transition('job-0001', { expectedPhase: 'queued', nextPhase: 'preflight', patch: {} });
+  assert.equal(moved.phase, 'preflight');
+  assert.deepEqual(flushes, []);
+});

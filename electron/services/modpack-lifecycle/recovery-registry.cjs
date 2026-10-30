@@ -3,7 +3,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { ModpackError } = require('../modpacks/errors.cjs');
-const { strictJsonClone } = require('../../utils/durable-fs.cjs');
+const {
+  createDeferredDirectoryFlushes,
+  isDurableTempLeftover,
+  strictJsonClone
+} = require('../../utils/durable-fs.cjs');
 const {
   JOB_ID_PATTERN,
   createRecoveryTargetEnvelope,
@@ -26,6 +30,7 @@ const RECORD_SCHEMA_VERSION = 2;
 const MAX_RECORD_BYTES = 1024 * 1024;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const SERVER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const REGISTRY_RECORD_NAME = /^([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\.target)?\.json$/;
 const OPERATION_KINDS = new Set([
   'install', 'upgrade', 'downgrade', 'switch', 'repair', 'rollback', 'import', 'detach', 'uninstall', 'verify'
 ]);
@@ -62,6 +67,13 @@ function invalid(cause) {
 
 function commitFailure(cause) {
   if (cause instanceof ModpackError) return cause;
+  return new ModpackError('COMMIT_FAILED', 'The recovery registry could not be updated', { cause });
+}
+
+// Unlike commitFailure, never passes the cause through: a failed directory
+// flush carries its own post-publication phase, but the deferred flush runs
+// before anything beneath it is written, so it needs a new pre-publication error.
+function deferredFlushFailure(cause) {
   return new ModpackError('COMMIT_FAILED', 'The recovery registry could not be updated', { cause });
 }
 
@@ -358,6 +370,7 @@ class RecoveryRegistry {
       history: null,
       retirements: null
     };
+    this.pendingDirectoryFlushes = createDeferredDirectoryFlushes(directory => this.durableFs.flushDirectory(directory));
     this.initialized = false;
     this.historyPublication = Promise.resolve();
     this.retirementPublication = Promise.resolve();
@@ -382,11 +395,14 @@ class RecoveryRegistry {
       const entries = this.fs.readdirSync(directory, { withFileTypes: true });
       this.#revalidateRegistryDirectories();
       for (const entry of entries) {
+        // A crashed writer's staged copy is never authority: only a completed
+        // native rename publishes it, so it neither identifies nor blocks a job.
+        if (isDurableTempLeftover(entry, REGISTRY_RECORD_NAME)) continue;
         if (!entry.isFile() || entry.isSymbolicLink()) {
           globalBlock = true;
           continue;
         }
-        const match = /^([A-Za-z0-9][A-Za-z0-9_-]{0,127})(\.target)?\.json$/.exec(entry.name);
+        const match = REGISTRY_RECORD_NAME.exec(entry.name);
         if (!match) {
           globalBlock = true;
           continue;
@@ -531,6 +547,7 @@ class RecoveryRegistry {
       throw targetExists();
     }
     const envelope = createRecoveryTargetEnvelope(normalized);
+    this.#flushPendingDirectories();
     try {
       this.#revalidateRegistryDirectories();
       await this.durableFs.writeJsonAtomicAsync(envelopePath, envelope, { expectedTargetSha256: null });
@@ -629,6 +646,7 @@ class RecoveryRegistry {
     const expectedSha256 = request.expectedSha256;
     const value = normalizeRetirementReceipt(request.value);
     if (value.jobId !== jobId) throw invalid();
+    this.#flushPendingDirectories();
     const previous = this.retirementPublication;
     let release;
     const gate = new Promise(resolve => { release = resolve; });
@@ -755,6 +773,7 @@ class RecoveryRegistry {
     if (target.kind === 'existing' && stableServerId === null) throw invalid();
     const binding = { target: { kind: target.kind, stableServerId, path: normalizeRecoveryTargetPath(target.path) },
       operationKind: request.expectedOperationKind };
+    this.#flushPendingDirectories();
     const release = await this.#acquireHistoryPublication();
     try {
       const before = this.#classifyTerminalPublication(jobId, binding);
@@ -838,6 +857,7 @@ class RecoveryRegistry {
       previousRestorePoint: loaded.value.restorePoint,
       nextRestorePoint: candidate.restorePoint
     });
+    this.#flushPendingDirectories();
     try {
       this.#revalidateRegistryDirectories();
       await this.durableFs.writeJsonAtomicAsync(this.#recordPath(jobId), candidate, { expectedTargetSha256: loaded.sha256 });
@@ -893,6 +913,7 @@ class RecoveryRegistry {
         ...(request.failureCode === null ? {} : { runtimeWriterFailure: previousFailure || {
           code: request.failureCode, ...(diagnostic ? { diagnostic } : {})
         } }) } });
+    this.#flushPendingDirectories();
     try {
       this.#revalidateRegistryDirectories();
       await this.durableFs.writeJsonAtomicAsync(this.#recordPath(jobId), candidate, { expectedTargetSha256: loaded.sha256 });
@@ -918,6 +939,7 @@ class RecoveryRegistry {
       sequence: loaded.value.sequence + 1,
       updatedAt: this.#now()
     });
+    this.#flushPendingDirectories();
     try {
       this.#revalidateRegistryDirectories();
       await this.durableFs.writeJsonAtomicAsync(this.#recordPath(jobId), candidate, { expectedTargetSha256: loaded.sha256 });
@@ -934,6 +956,7 @@ class RecoveryRegistry {
     assertIdentifier(jobId, JOB_ID_PATTERN);
     assertStrictObject(request, ['terminalPhase', 'outcome']);
     if (!TERMINAL_PHASES.has(request.terminalPhase)) throw invalid();
+    this.#flushPendingDirectories();
     const releaseHistoryPublication = await this.#acquireHistoryPublication();
     try {
     let outcome = normalizeOutcome(request.outcome);
@@ -1052,11 +1075,13 @@ class RecoveryRegistry {
     ]) {
       this.#revalidatePinnedDirectory('userData', this.userDataPath);
       if (!sameLocalPath(parent, this.userDataPath)) this.#revalidatePinnedDirectory('root', this.rootPath);
+      let created = false;
       try {
         this.fs.lstatSync(directory, { bigint: true });
       } catch (error) {
         if (!error || error.code !== 'ENOENT') throw commitFailure(error);
         this.fs.mkdirSync(directory, { recursive: false, mode: 0o700 });
+        created = true;
       }
       const stat = this.fs.lstatSync(directory, { bigint: true });
       if (!stat.isDirectory() || stat.isSymbolicLink() || !sameLocalPath(this.fs.realpathSync.native(directory), directory)) {
@@ -1067,7 +1092,9 @@ class RecoveryRegistry {
         throw recoveryRequired();
       }
       if (!this.directoryPins[pinName]) this.directoryPins[pinName] = identity;
-      this.durableFs.flushDirectory(parent);
+      // Only a directory created in this run needs its parent flushed. A flush
+      // that cannot run now is settled before the first record is written.
+      if (created) this.pendingDirectoryFlushes.created(parent);
     }
     this.#revalidateRegistryDirectories();
     this.#initializeRetirementStorage();
@@ -1078,20 +1105,33 @@ class RecoveryRegistry {
     // Retirement storage is independently pinned, but never gates safe source recovery.
     // Once pinned, a missing/substituted directory is not recreated or repinned.
     try {
-      if (this.directoryPins.retirements) this.#revalidatePinnedDirectory('retirements', this.retirementsPath);
-      else {
+      if (this.directoryPins.retirements) {
+        this.#revalidatePinnedDirectory('retirements', this.retirementsPath);
+        this.#flushPendingDirectories();
+      } else {
+        let created = false;
         try { this.fs.lstatSync(this.retirementsPath, { bigint: true }); }
         catch (error) {
           if (error?.code !== 'ENOENT') throw error;
           this.fs.mkdirSync(this.retirementsPath, { recursive: false, mode: 0o700 });
+          created = true;
         }
         const stat = this.fs.lstatSync(this.retirementsPath, { bigint: true });
         if (!stat.isDirectory() || stat.isSymbolicLink() || !sameLocalPath(this.fs.realpathSync.native(this.retirementsPath), this.retirementsPath)) throw recoveryRequired();
         this.directoryPins.retirements = registryDirectoryIdentity(stat);
+        // An uncertain creation flush keeps retirement notice-only, even after a
+        // record write settles the flush, until the next initialize() (every
+        // recovery scan runs one) revalidates the pinned directory.
+        if (created && !this.pendingDirectoryFlushes.created(this.rootPath)) return;
       }
-      this.durableFs.flushDirectory(this.rootPath);
       this.retirementStorageReady = true;
     } catch { /* Retirement reads/writes fail closed; source metadata remains available. */ }
+  }
+
+  // Directory flushes deferred at initialization settle before any record is
+  // written. When one still fails, nothing has been written.
+  #flushPendingDirectories() {
+    this.pendingDirectoryFlushes.flushPending(deferredFlushFailure);
   }
 
   #revalidateRetirementDirectory() {

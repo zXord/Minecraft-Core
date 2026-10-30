@@ -9,6 +9,8 @@ const { PassThrough } = require('node:stream');
 const test = require('node:test');
 
 const { MAX_FRAME_BYTES, encodeFrame } = require('../electron/services/modpacks/archive/archive-worker-client.cjs');
+const { ModpackError } = require('../electron/services/modpacks/errors.cjs');
+const { createDurableFs } = require('../electron/utils/durable-fs.cjs');
 const { WindowsDurableFsClient } = require('../electron/utils/windows-durable-fs-client.cjs');
 
 function rootFixture(t, label) {
@@ -932,4 +934,254 @@ test('async durable flush preserves only an authenticated closed native failure 
   await assert.rejects(pending, error =>
     error.code === 'COMMIT_FAILED' && error.durableFailureKind === 'sharing-violation' &&
       error.durableFailureStage === 'completion-flush');
+});
+
+function unavailableWorker() {
+  return new ModpackError('EXTRACTOR_UNAVAILABLE', 'The archive extractor is unavailable');
+}
+
+function stagedTemps(root, target) {
+  return fs.readdirSync(root).filter(name => name.startsWith(`.${path.basename(target)}.minecraft-core-tmp-`));
+}
+
+test('async durable publication treats a never-started worker as pre-publication and removes its temp', async t => {
+  const root = rootFixture(t, 'minecraft-core-durable-async-worker-missing-');
+  let verifications = 0;
+  let spawnCalls = 0;
+  const client = fixtureWorkerClient(root, {
+    async verifyWorkerAsync() {
+      verifications += 1;
+      throw unavailableWorker();
+    },
+    spawn() {
+      spawnCalls += 1;
+      throw new Error('an unverified worker must never be launched');
+    }
+  });
+  const durableFs = createDurableFs({ fsApi: fs, asyncFsApi: fs.promises, durableClient: client, allowedRoots: [root] });
+  const created = path.join(root, 'created.json');
+  const replaced = path.join(root, 'replaced.json');
+  fs.writeFileSync(replaced, '{"stable":true}\n');
+
+  for (const target of [created, replaced]) {
+    await assert.rejects(durableFs.writeJsonAtomicAsync(target, { stable: false }), error =>
+      error.code === 'COMMIT_FAILED' && error.commitPhase === 'pre-publication' &&
+      error.durableFailureKind === 'worker-failure' && error.durableFailureStage === 'preflight-revalidation' &&
+      error.message.includes('ArchiveWorker.exe') && error.cause?.code === 'EXTRACTOR_UNAVAILABLE');
+    assert.deepEqual(stagedTemps(root, target), []);
+  }
+
+  assert.equal(fs.existsSync(created), false);
+  assert.equal(fs.readFileSync(replaced, 'utf8'), '{"stable":true}\n');
+  assert.equal(verifications, 2);
+  assert.equal(spawnCalls, 0);
+});
+
+test('async worker launches refused before a process exists are pre-publication; launched failures stay uncertain', async t => {
+  const root = rootFixture(t, 'minecraft-core-durable-async-worker-launch-');
+  function streamChild(pid) {
+    const child = new EventEmitter();
+    child.pid = pid;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => true;
+    return child;
+  }
+  const cases = [
+    ['throwing-launch', () => { throw Object.assign(new Error('spawn UNKNOWN'), { code: 'UNKNOWN' }); }, 'pre-publication'],
+    ['no-process', () => streamChild(undefined), 'pre-publication'],
+    ['failed-worker', () => {
+      const child = streamChild(5151);
+      child.stdin.on('finish', () => setImmediate(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit('close', 1, null);
+      }));
+      child.stdin.resume();
+      return child;
+    }, 'post-publication-uncertain']
+  ];
+
+  for (const [label, spawn, phase] of cases) {
+    const client = fixtureWorkerClient(root, { spawn, terminationGraceMs: 10 });
+    const durableFs = createDurableFs({ fsApi: fs, asyncFsApi: fs.promises, durableClient: client, allowedRoots: [root] });
+    const target = path.join(root, `${label}.json`);
+    await assert.rejects(durableFs.writeJsonAtomicAsync(target, { label }), error =>
+      error.code === 'COMMIT_FAILED' && error.commitPhase === phase &&
+      error.durableFailureStage === (phase === 'pre-publication' ? 'preflight-revalidation' : undefined), label);
+    assert.equal(fs.existsSync(target), false, label);
+    assert.equal(stagedTemps(root, target).length, phase === 'pre-publication' ? 0 : 1, label);
+  }
+});
+
+// A launched worker. 'failed' and 'timed-out' perform the requested rename and
+// then exit 1 or stay silent until the client kills them at the deadline;
+// 'reports-preflight' answers with a pre-publication stage of its own.
+function launchedWorkerChild(outcome, operations) {
+  const child = new EventEmitter();
+  child.pid = 4242 + operations.length;
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => {
+    setImmediate(() => child.emit('close', null, 'SIGKILL'));
+    return true;
+  };
+  const chunks = [];
+  child.stdin.on('data', chunk => chunks.push(chunk));
+  child.stdin.on('finish', () => {
+    const request = JSON.parse(Buffer.concat(chunks).subarray(4).toString('utf8'));
+    operations.push(request.operation);
+    if (outcome === 'reports-preflight') {
+      setImmediate(() => {
+        child.stdout.end(encodeFrame({ ok: false, failureKind: 'io-failure', failureStage: 'preflight-revalidation' }));
+        child.stderr.end();
+        child.emit('close', 0, null);
+      });
+      return;
+    }
+    fs.renameSync(request.sourcePath, request.destinationPath);
+    if (outcome === 'failed') {
+      setImmediate(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit('close', 1, null);
+      });
+    }
+  });
+  return child;
+}
+
+// The first native call publishes the staged temp and only then fails. The call
+// that would confirm it (a native reconcile or a parent flush) never starts a
+// worker, or reports a pre-publication stage of its own: neither may relabel
+// the published write.
+test('async published writes stay uncertain when the reconcile or parent flush cannot start a worker', async t => {
+  const root = rootFixture(t, 'minecraft-core-durable-async-reconcile-');
+
+  function nativeReconcileCase(label, existing, { firstOutcome, reconcileOutcome = null }) {
+    const operations = [];
+    let verifications = 0;
+    const client = fixtureWorkerClient(root, {
+      timeoutMs: 50,
+      terminationGraceMs: 50,
+      async verifyWorkerAsync() {
+        verifications += 1;
+        if (reconcileOutcome === null && verifications > 1) throw unavailableWorker();
+      },
+      spawn: () => launchedWorkerChild(operations.length === 0 ? firstOutcome : reconcileOutcome, operations)
+    });
+    return { label, existing, client, operations, verifications: () => verifications,
+      expectedOperations: [existing ? 'replace-file-write-through' : 'move-write-through',
+        ...(reconcileOutcome === null ? [] : ['reconcile-move-write-through'])],
+      expectedVerifications: 2, causeKind: reconcileOutcome === null ? 'worker-failure' : 'io-failure' };
+  }
+
+  function parentFlushCase(label, existing) {
+    const operations = [];
+    let verifications = 0;
+    const nativeClient = fixtureWorkerClient(root, {
+      async verifyWorkerAsync() {
+        verifications += 1;
+        throw unavailableWorker();
+      },
+      spawn() { throw new Error('an unverified worker must never be launched'); }
+    });
+    const publishThenFail = operation => async (source, destination) => {
+      operations.push(operation);
+      fs.renameSync(source, destination);
+      throw new Error('injected failure after the rename');
+    };
+    const unexpected = () => { throw new Error('synchronous durable calls are not expected'); };
+    // No native reconcile capability: durable-fs confirms the rename by
+    // flushing the parent through a client whose worker cannot be verified.
+    const client = {
+      moveWriteThrough: unexpected,
+      replaceFileWriteThrough: unexpected,
+      flushDirectory: unexpected,
+      moveWriteThroughAsync: publishThenFail('move-write-through'),
+      replaceFileWriteThroughAsync: publishThenFail('replace-file-write-through'),
+      flushDirectoryAsync: (directory, expectations) => nativeClient.flushDirectoryAsync(directory, expectations)
+    };
+    return { label, existing, client, operations, verifications: () => verifications,
+      expectedOperations: [existing ? 'replace-file-write-through' : 'move-write-through'],
+      expectedVerifications: 1, causeKind: 'worker-failure' };
+  }
+
+  const cases = [];
+  for (const outcome of ['failed', 'timed-out']) {
+    for (const existing of [false, true]) {
+      cases.push(nativeReconcileCase(`${outcome}-missing-reconcile-worker`, existing, { firstOutcome: outcome }));
+    }
+  }
+  cases.push(nativeReconcileCase('reconcile-reports-preflight', false,
+    { firstOutcome: 'failed', reconcileOutcome: 'reports-preflight' }));
+  for (const existing of [false, true]) cases.push(parentFlushCase('missing-flush-worker', existing));
+
+  for (const { label, existing, client, operations, verifications, expectedOperations, expectedVerifications, causeKind } of cases) {
+    const name = `${label}-${existing ? 'replaced' : 'created'}`;
+    const target = path.join(root, `${name}.json`);
+    if (existing) fs.writeFileSync(target, '{"previous":true}\n');
+    const durableFs = createDurableFs({ fsApi: fs, asyncFsApi: fs.promises, durableClient: client, allowedRoots: [root] });
+
+    await assert.rejects(durableFs.writeJsonAtomicAsync(target, { name }), error =>
+      error.code === 'COMMIT_FAILED' && error.commitPhase === 'post-publication-uncertain' &&
+      error.cause?.durableFailureKind === causeKind && error.cause?.durableFailureStage === 'preflight-revalidation', name);
+    assert.deepEqual(operations, expectedOperations, name);
+    assert.equal(verifications(), expectedVerifications, name);
+    assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf8')), { name }, name);
+    assert.deepEqual(stagedTemps(root, target), [], name);
+  }
+});
+
+test('a worker launch the system refuses settles at once, since no process can close', async t => {
+  const root = rootFixture(t, 'minecraft-core-durable-async-refused-launch-');
+  const missingWorker = path.join(root, 'missing', 'ArchiveWorker.exe');
+  let launches = 0;
+  const client = fixtureWorkerClient(root, {
+    terminationGraceMs: 60_000,
+    spawn(_file, args, options) {
+      launches += 1;
+      return childProcess.spawn(missingWorker, args, options);
+    }
+  });
+  const durableFs = createDurableFs({ fsApi: fs, asyncFsApi: fs.promises, durableClient: client, allowedRoots: [root] });
+  const target = path.join(root, 'refused.json');
+
+  let timer;
+  const startedAt = Date.now();
+  const outcome = await Promise.race([
+    durableFs.writeJsonAtomicAsync(target, { refused: true }).then(() => 'resolved', error => error),
+    new Promise(resolve => { timer = setTimeout(resolve, 3_000, 'still-waiting'); })
+  ]);
+  clearTimeout(timer);
+
+  assert.notEqual(outcome, 'still-waiting', 'a refused launch must not wait out the termination grace period');
+  assert.ok(Date.now() - startedAt < 3_000);
+  assert.equal(outcome.code, 'COMMIT_FAILED');
+  assert.equal(outcome.commitPhase, 'pre-publication');
+  assert.equal(outcome.durableFailureKind, 'worker-failure');
+  assert.equal(outcome.durableFailureStage, 'preflight-revalidation');
+  assert.match(outcome.message, /ArchiveWorker\.exe/u);
+  assert.equal(launches, 1);
+  assert.equal(fs.existsSync(target), false);
+  assert.deepEqual(stagedTemps(root, target), []);
+  // Node reports the refused launch with a later 'error' event; it must stay handled.
+  await new Promise(resolve => setTimeout(resolve, 50));
+});
+
+test('exact delete keeps its request-stage classification when the worker never starts', async t => {
+  const root = rootFixture(t, `exact-delete-${crypto.randomUUID()}-`);
+  const leaf = path.join(root, 'leaf');
+  fs.writeFileSync(leaf, 'original');
+  for (const overrides of [
+    { async verifyWorkerAsync() { throw unavailableWorker(); } },
+    { spawn() { throw new Error('spawn refused'); } }
+  ]) {
+    await assert.rejects(fixtureWorkerClient(root, overrides).deleteFileExactAsync(leaf, exactDeleteOptions(root, leaf)), {
+      code: 'COMMIT_FAILED', durableFailureKind: 'worker-failure', durableFailureStage: 'request', durableEffectState: 'none'
+    });
+  }
+  assert.equal(fs.readFileSync(leaf, 'utf8'), 'original');
 });

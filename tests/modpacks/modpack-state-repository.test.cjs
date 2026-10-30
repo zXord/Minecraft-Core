@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -654,6 +655,38 @@ test('history index mismatches fail closed without hiding immutable records', (t
   fs.renameSync(path.join(historyPath, indexName), path.join(historyPath, mismatchedName));
   assert.throws(() => repository.listHistory(serverPath), error => error.code === 'INVALID_REQUEST');
   assert.equal(fs.existsSync(path.join(historyPath, 'indexed-operation.json')), true);
+});
+
+test('history skips a crashed writer temp of a history record but fails closed on other entries', (t) => {
+  const { repository, serverPath } = fixture(t);
+  const entry = sequence => ({
+    schemaVersion: 1,
+    operationId: `operation-${sequence}`,
+    sequence,
+    kind: 'upgrade',
+    outcome: 'completed',
+    timestamp: '2026-08-01T12:00:00.000Z',
+    sourceRevision: sequence,
+    targetRevision: sequence + 1
+  });
+  repository.appendHistory(serverPath, entry(1));
+  const historyPath = path.join(serverPath, '.minecraft-core-state', 'history');
+  const leftover = path.join(historyPath, `.operation-2.json.minecraft-core-tmp-${crypto.randomUUID()}`);
+  fs.writeFileSync(leftover, '{"partial":');
+
+  assert.deepEqual(repository.listHistory(serverPath).items.map(item => item.operationId), ['operation-1']);
+  repository.appendHistory(serverPath, entry(2));
+  assert.deepEqual(repository.listHistory(serverPath).items.map(item => item.sequence), [2, 1]);
+  assert.equal(fs.existsSync(leftover), true);
+
+  for (const [name, kind] of [['junk.txt', 'file'], [`.junk.txt.minecraft-core-tmp-${crypto.randomUUID()}`, 'file'],
+    [`.operation-3.json.minecraft-core-tmp-${crypto.randomUUID()}`, 'directory']]) {
+    const unexpected = path.join(historyPath, name);
+    if (kind === 'file') fs.writeFileSync(unexpected, 'unexpected');
+    else fs.mkdirSync(unexpected);
+    assert.throws(() => repository.listHistory(serverPath), error => error.code === 'INVALID_REQUEST', name);
+    fs.rmSync(unexpected, { recursive: true });
+  }
 });
 
 test('immutable history append remains successful when its optional index marker cannot be published', (t) => {

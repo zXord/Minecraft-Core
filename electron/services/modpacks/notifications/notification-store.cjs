@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { strictJsonClone } = require('../../../utils/durable-fs.cjs');
+const { createDeferredDirectoryFlushes, strictJsonClone } = require('../../../utils/durable-fs.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
 const { normalizeRetirementNotice, retirementNoticeCopy } = require('../../modpack-lifecycle/failed-restorepoint-retirement-warning.cjs');
 
@@ -187,6 +187,7 @@ class NotificationStore {
     this.eventSink = eventSink;
     this.rootPath = path.join(this.userDataPath, 'modpack-lifecycle');
     this.filePath = path.join(this.rootPath, 'notifications.json');
+    this.pendingDirectoryFlushes = createDeferredDirectoryFlushes(directory => this.durableFs.flushDirectory(directory));
     this.initialized = false;
   }
 
@@ -284,6 +285,7 @@ class NotificationStore {
       checksum: ''
     };
     candidate.checksum = checksum(candidate);
+    this.pendingDirectoryFlushes.flushPending(commitFailure);
     try {
       this.#revalidateRoot();
       this.durableFs.writeJsonAtomic(this.filePath, candidate, { expectedTargetSha256: this.sha256 });
@@ -311,8 +313,11 @@ class NotificationStore {
   #ensureRoot() {
     const user = this.fs.lstatSync(this.userDataPath, { bigint: true });
     if (!user.isDirectory() || user.isSymbolicLink() || !samePath(this.fs.realpathSync.native(this.userDataPath), this.userDataPath)) throw invalid();
-    try { this.fs.mkdirSync(this.rootPath, { recursive: false, mode: 0o700 }); this.durableFs.flushDirectory(this.userDataPath); }
+    let created = false;
+    try { this.fs.mkdirSync(this.rootPath, { recursive: false, mode: 0o700 }); created = true; }
     catch (error) { if (error?.code !== 'EEXIST') throw commitFailure(error); }
+    // A flush that cannot run now is settled before the first write.
+    if (created) this.pendingDirectoryFlushes.created(this.userDataPath);
     this.rootIdentity = this.#directoryIdentity(this.rootPath);
     this.#revalidateRoot();
   }

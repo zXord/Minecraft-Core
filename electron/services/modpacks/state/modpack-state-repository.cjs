@@ -2,8 +2,9 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { strictJsonClone } = require('../../../utils/durable-fs.cjs');
+const { isDurableTempLeftover, strictJsonClone } = require('../../../utils/durable-fs.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
+const { proveEntriesAbsent } = require('../instance-ownership.cjs');
 const { ARCHIVE_LIMITS } = require('../limits.cjs');
 const { normalizeRuntimeTuple } = require('../contracts.cjs');
 const { matchAssetPattern } = require('../providers/github-asset-pattern.cjs');
@@ -13,6 +14,8 @@ const { verifyManagedEntry } = require('./managed-entry-verifier.cjs');
 
 const STATE_DIRECTORY = '.minecraft-core-state';
 const CURRENT_STATE = 'modpack.json';
+const CURRENT_STATE_ENTRY = `${STATE_DIRECTORY}/${CURRENT_STATE}`;
+const HISTORY_ENTRY = `${STATE_DIRECTORY}/history`;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const VERSION = /^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$/;
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
@@ -78,6 +81,11 @@ function storageIdentifier(value, field) {
   const normalized = identifier(value, field);
   if (!isSafeWindowsBasename(`${normalized}.json`)) invalid(field);
   return normalized;
+}
+
+function isHistoryRecordName(name) {
+  return typeof name === 'string' && name.endsWith('.json') && IDENTIFIER.test(name.slice(0, -5)) &&
+    isSafeWindowsBasename(name);
 }
 
 function decimalId(value, field, { allowZero = false } = {}) {
@@ -1005,6 +1013,8 @@ class ModpackStateRepository {
     const indexes = new Map();
     const indexesByDigest = new Map();
     for (const item of this.fs.readdirSync(paths.history, { withFileTypes: true })) {
+      // A crashed writer's staged copy of a history record never published anything.
+      if (isDurableTempLeftover(item, isHistoryRecordName)) continue;
       if (!item.isFile() || item.isSymbolicLink()) invalid('history');
       if (item.name.endsWith('.json')) {
         const operationId = storageIdentifier(item.name.slice(0, -5), 'history.operationId');
@@ -1282,8 +1292,44 @@ class ModpackStateRepository {
   }
 }
 
+// Read-only view for observers (ownership checks, status displays). It answers
+// exactly what the strict repository answers when the state entry is proven
+// absent (an existing folder, by alias-following stat, whose entry gives lstat
+// ENOENT): null, or an empty history page. That proof needs no parent-scoped
+// durable authority, so drive roots, folders directly under them and aliased
+// folders stay readable. Anything present or unprovable is delegated to the
+// strict repository unchanged. Lifecycle operations keep using the repository.
+function createModpackStateObserver({ repository, fsApi = fs } = {}) {
+  if (!repository || typeof repository.read !== 'function' || typeof repository.listHistory !== 'function') invalid('repository');
+  if (!fsApi || typeof fsApi.statSync !== 'function' || typeof fsApi.lstatSync !== 'function') invalid('fsApi');
+  // Only the folder's shape is relaxed. Malformed input is refused exactly as
+  // the repository refuses it, before any probe.
+  function assertServerPathInput(value) {
+    if (typeof value !== 'string' || !path.isAbsolute(value) || value.includes('\0') ||
+        value.split(/[\\/]/u).some(part => part === '.' || part === '..')) invalid('serverPath');
+  }
+  function read(serverPathValue) {
+    assertServerPathInput(serverPathValue);
+    if (proveEntriesAbsent(serverPathValue, [CURRENT_STATE_ENTRY], { fsApi })) return null;
+    return repository.read(serverPathValue);
+  }
+  function listHistory(serverPathValue, { cursor = null, limit = 50 } = {}) {
+    assertServerPathInput(serverPathValue);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) invalid('limit');
+    if (proveEntriesAbsent(serverPathValue, [HISTORY_ENTRY], { fsApi })) {
+      if (cursor !== null) invalid('cursor');
+      return deepFreeze({ items: [], nextCursor: null });
+    }
+    return repository.listHistory(serverPathValue, { cursor, limit });
+  }
+  return Object.freeze({ read, listHistory });
+}
+
 module.exports = {
+  CURRENT_STATE,
   ModpackStateRepository,
+  STATE_DIRECTORY,
+  createModpackStateObserver,
   normalizeAcceptedMapping,
   normalizeStateInput
 };

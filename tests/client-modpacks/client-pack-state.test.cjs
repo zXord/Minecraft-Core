@@ -128,3 +128,127 @@ test('state store atomically round trips both manifest schemas and refuses corru
     await assert.rejects(store.read(root), { code: 'RECOVERY_REQUIRED' });
   }
 });
+
+const WINDOWS_PATHS = { skip: process.platform !== 'win32' && 'Windows drive-letter paths' };
+const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir';
+const SUBFOLDER_MESSAGE = 'Matching client packs need the client folder inside another normal folder. Move this client into a subfolder, then retry.';
+
+function enoent(candidate) {
+  return Object.assign(new Error(`ENOENT: ${candidate}`), { code: 'ENOENT' });
+}
+
+function strictRouterFixture(t, clientPaths) {
+  const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');
+  const { createDurableFs } = require('../../electron/utils/durable-fs.cjs');
+  const { clientDurableRouter } = require('../../electron/bootstrap/create-client-pack-composition.cjs');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'client-state-shape-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const appRoot = path.join(base, 'client-packs');
+  fs.mkdirSync(appRoot);
+  const factoryCalls = [];
+  const instances = [];
+  const router = clientDurableRouter({
+    root: appRoot,
+    getInstances: () => instances,
+    durableFsFactory(roots) {
+      factoryCalls.push(roots);
+      return createDurableFs({ allowedRoots: roots, durableClient: { moveWriteThrough: fs.renameSync, replaceFileWriteThrough: fs.renameSync,
+        flushDirectory() {}, moveWriteThroughAsync: fs.promises.rename, replaceFileWriteThroughAsync: fs.promises.rename, async flushDirectoryAsync() {} } });
+    }
+  });
+  const register = clientPath => instances.push({ id: `client-${instances.length + 1}`, type: 'client', path: clientPath });
+  for (const clientPath of clientPaths) register(clientPath);
+  return { appRoot, base, factoryCalls, register, router };
+}
+
+test('a client directly under a drive root without a manifest reads as unmanaged without durable authority', WINDOWS_PATHS, async t => {
+  const { ClientPackStateStore } = require('../../electron/services/client-modpacks/client-pack-state.cjs');
+  const { factoryCalls, router } = strictRouterFixture(t, ['X:\\MinecraftClient']);
+  const routerCalls = [];
+  const durableFs = Object.fromEntries(Object.entries(router).map(([name, method]) => [name, (...args) => {
+    routerCalls.push(name);
+    return method(...args);
+  }]));
+  const fsPromises = {
+    async stat(candidate) {
+      if (candidate === 'X:\\MinecraftClient') return { isDirectory: () => true };
+      throw enoent(candidate);
+    },
+    async lstat(candidate) { throw enoent(candidate); },
+    async realpath(candidate) { return candidate; }
+  };
+
+  assert.equal(await new ClientPackStateStore({ durableFs, fsPromises }).read('X:\\MinecraftClient'), null);
+  assert.deepEqual(routerCalls, []);
+  assert.deepEqual(factoryCalls, []);
+  await assert.rejects(async () => router.readFileBoundedAsync('X:\\MinecraftClient\\.minecraft-core-client-pack.json', { allowMissing: true }),
+    { code: 'CLIENT_PACK_UNAVAILABLE' }, 'the strict router itself still refuses the drive-root parent');
+});
+
+test('a client reached through a junction reads as unmanaged; a manifest behind it or a corrupt one still needs recovery', async t => {
+  const fs = require('node:fs'); const path = require('node:path');
+  const { ClientPackStateStore, MANIFEST_NAME } = require('../../electron/services/client-modpacks/client-pack-state.cjs');
+  const { base, register, router } = strictRouterFixture(t, []);
+  const realClient = path.join(base, 'real', 'Games', 'Client');
+  fs.mkdirSync(realClient, { recursive: true });
+  const parentLink = path.join(base, 'linked-games');
+  fs.symlinkSync(path.dirname(realClient), parentLink, LINK_TYPE);
+  const aliasedClient = path.join(parentLink, 'Client');
+  register(aliasedClient);
+  const normalClient = path.join(base, 'Normal', 'Client');
+  fs.mkdirSync(normalClient, { recursive: true });
+  register(normalClient);
+  const store = new ClientPackStateStore({ durableFs: router });
+
+  assert.equal(await store.read(aliasedClient), null);
+  assert.equal(await store.read(normalClient), null);
+  fs.writeFileSync(path.join(realClient, MANIFEST_NAME), '{}');
+  await assert.rejects(store.read(aliasedClient), { code: 'RECOVERY_REQUIRED' });
+  fs.writeFileSync(path.join(normalClient, MANIFEST_NAME), '{bad');
+  await assert.rejects(store.read(normalClient), { code: 'RECOVERY_REQUIRED' });
+});
+
+test('publishing a matching pack asks for a subfolder only when the folder shape is the cause', async t => {
+  const fs = require('node:fs'); const path = require('node:path');
+  const { ClientPackStateStore } = require('../../electron/services/client-modpacks/client-pack-state.cjs');
+  const { base, factoryCalls, register, router } = strictRouterFixture(t, []);
+  const realClient = path.join(base, 'real', 'Games', 'Client');
+  fs.mkdirSync(realClient, { recursive: true });
+  const parentLink = path.join(base, 'linked-games');
+  const leafLink = path.join(base, 'linked-client');
+  fs.symlinkSync(path.dirname(realClient), parentLink, LINK_TYPE);
+  fs.symlinkSync(realClient, leafLink, LINK_TYPE);
+  const normalClient = path.join(base, 'Normal', 'Client');
+  fs.mkdirSync(normalClient, { recursive: true });
+  for (const clientPath of [path.join(parentLink, 'Client'), leafLink, normalClient]) register(clientPath);
+  const store = new ClientPackStateStore({ durableFs: router });
+  const lexicalShapes = process.platform === 'win32'
+    ? ['X:\\MinecraftClient', 'X:\\', '\\\\nas\\share\\MinecraftClient']
+    : ['/MinecraftClient', '/', '//nas/share/MinecraftClient'];
+
+  for (const clientPath of [...lexicalShapes, path.join(parentLink, 'Client'), leafLink]) {
+    await assert.rejects(store.assertPublishable(clientPath), error =>
+      error.code === 'CLIENT_PACK_UNAVAILABLE' && error.safeMessage === SUBFOLDER_MESSAGE, clientPath);
+  }
+  assert.deepEqual(factoryCalls, [], 'a refused shape never reaches the durable layer');
+
+  assert.equal(await store.assertPublishable(normalClient), undefined);
+  assert.equal(factoryCalls.length, 1);
+
+  const unavailable = new ClientPackStateStore({ durableFs: { async readFileBoundedAsync() {
+    throw Object.assign(new Error('injected durable failure'), { code: 'COMMIT_FAILED' });
+  } } });
+  for (const clientPath of [normalClient, path.join(base, 'Missing', 'Client')]) {
+    await assert.rejects(unavailable.assertPublishable(clientPath), error =>
+      error.code === 'CLIENT_PACK_UNAVAILABLE' && error.safeMessage === 'Matching client pack services are unavailable', clientPath);
+  }
+});
+
+test('the state store requires a durable layer and a readable filesystem', () => {
+  const { ClientPackStateStore } = require('../../electron/services/client-modpacks/client-pack-state.cjs');
+  const durableFs = { async readFileBoundedAsync() { return null; } };
+  for (const options of [undefined, {}, { durableFs, fsPromises: {} }, { durableFs, fsPromises: { stat() {}, lstat() {} } }]) {
+    assert.throws(() => new ClientPackStateStore(options), { code: 'RECOVERY_REQUIRED' });
+  }
+  assert.ok(new ClientPackStateStore({ durableFs }));
+});

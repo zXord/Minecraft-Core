@@ -7,10 +7,15 @@ const test = require('node:test');
 
 const {
   configureDurableFs,
+  createDeferredDirectoryFlushes,
   createDurableFs,
+  durableTempTargetName,
+  isDurableTempLeftover,
   renameDurable: renameWithConfiguredDurableFs
 } = require('../electron/utils/durable-fs.cjs');
+const { encodeFrame } = require('../electron/services/modpacks/archive/archive-worker-client.cjs');
 const { ModpackError } = require('../electron/services/modpacks/errors.cjs');
+const { WindowsDurableFsClient } = require('../electron/utils/windows-durable-fs-client.cjs');
 
 function fixture(t, { capabilities, failAt = null, shortWrites = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-fs-'));
@@ -1767,4 +1772,325 @@ test('writeJsonAtomicAsync cleans its temp after a native pre-publication failur
   );
   assert.equal(fs.readFileSync(target, 'utf8'), '{"sequence":1}\n');
   assert.deepEqual(tempEntries(root), []);
+});
+
+function missingWorkerError() {
+  return new ModpackError('EXTRACTOR_UNAVAILABLE', 'The archive extractor is unavailable');
+}
+
+// A real native client whose worker executable cannot be used. Only the worker
+// verifier and the process launcher are injected; path ownership, identities
+// and request framing are production code.
+function unavailableWorkerClient(root, overrides = {}) {
+  const calls = { verify: 0, spawnSync: 0 };
+  const client = new WindowsDurableFsClient({
+    workerPath: path.join(root, 'resources', 'ArchiveWorker.exe'),
+    workerManifestPath: path.join(root, 'resources', 'archive-worker-x64.json'),
+    allowedRoots: [root],
+    appOwnedRoot: path.join(root, 'broker'),
+    verifyWorker() {
+      calls.verify += 1;
+      throw missingWorkerError();
+    },
+    spawnSync() {
+      calls.spawnSync += 1;
+      throw new Error('an unverified worker must never be launched');
+    },
+    ...overrides
+  });
+  return { calls, client };
+}
+
+function tempEntriesFor(root, target) {
+  return fs.readdirSync(root).filter(name => name.startsWith(`.${path.basename(target)}.minecraft-core-tmp-`));
+}
+
+test('a durable worker that never starts is pre-publication and leaves no temp', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-worker-missing-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { calls, client } = unavailableWorkerClient(root);
+  const durableFs = createDurableFs({ fsApi: fs, durableClient: client, allowedRoots: [root] });
+  const created = path.join(root, 'created.json');
+  const replaced = path.join(root, 'replaced.json');
+  fs.writeFileSync(replaced, '{"stable":true}\n');
+
+  for (const target of [created, replaced]) {
+    assert.throws(() => durableFs.writeJsonAtomic(target, { stable: false }), error =>
+      error.code === 'COMMIT_FAILED' && error.commitPhase === 'pre-publication' &&
+      error.durableFailureKind === 'worker-failure' && error.durableFailureStage === 'preflight-revalidation' &&
+      error.message.includes('ArchiveWorker.exe') && error.cause?.code === 'EXTRACTOR_UNAVAILABLE');
+  }
+
+  assert.equal(fs.existsSync(created), false);
+  assert.equal(fs.readFileSync(replaced, 'utf8'), '{"stable":true}\n');
+  assert.deepEqual(tempEntries(root), []);
+  assert.deepEqual(calls, { verify: 2, spawnSync: 0 });
+});
+
+test('a worker launch refused before any process exists is pre-publication; a launched failure stays uncertain', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-worker-launch-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const launchError = code => Object.assign(new Error(`spawnSync ${code}`), { code });
+  const cases = [
+    ['refused-launch', () => ({ pid: 0, error: launchError('ENOENT'), status: null, signal: null, stdout: null, stderr: null }),
+      'pre-publication'],
+    ['throwing-launch', () => { throw launchError('EACCES'); }, 'pre-publication'],
+    ['timed-out-worker', () => ({ pid: 4242, error: launchError('ETIMEDOUT'), status: null, signal: 'SIGTERM',
+      stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }), 'post-publication-uncertain'],
+    ['failed-worker', () => ({ pid: 4243, status: 1, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.from('failed') }),
+      'post-publication-uncertain']
+  ];
+
+  for (const [label, spawnSync, phase] of cases) {
+    const { client } = unavailableWorkerClient(root, { verifyWorker() {}, spawnSync });
+    const durableFs = createDurableFs({ fsApi: fs, durableClient: client, allowedRoots: [root] });
+    const target = path.join(root, `${label}.json`);
+    assert.throws(() => durableFs.writeJsonAtomic(target, { label }), error =>
+      error.code === 'COMMIT_FAILED' && error.commitPhase === phase &&
+      error.durableFailureStage === (phase === 'pre-publication' ? 'preflight-revalidation' : undefined), label);
+    assert.equal(fs.existsSync(target), false, label);
+    assert.equal(tempEntriesFor(root, target).length, phase === 'pre-publication' ? 0 : 1, label);
+  }
+});
+
+// The first native call renames the staged temp onto the target and only then
+// fails, so the write is published. The call that would confirm it (a native
+// reconcile or a parent flush) never starts a worker, or reports a
+// pre-publication stage of its own: neither may relabel the published write.
+test('a published write stays uncertain when its reconcile or parent flush cannot start a worker', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-reconcile-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const launchedFailures = {
+    'timed-out': () => ({ pid: 4242, error: Object.assign(new Error('spawnSync ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+      status: null, signal: 'SIGTERM', stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }),
+    failed: () => ({ pid: 4243, status: 1, signal: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) })
+  };
+  const reportsPreflight = () => ({ pid: 4244, status: 0, signal: null, stderr: Buffer.alloc(0),
+    stdout: encodeFrame({ ok: false, failureKind: 'io-failure', failureStage: 'preflight-revalidation' }) });
+
+  function nativeReconcileCase(label, existing, { firstOutcome, reconcileOutcome = null }) {
+    const operations = [];
+    let verifications = 0;
+    const { client } = unavailableWorkerClient(root, {
+      verifyWorker() {
+        verifications += 1;
+        if (reconcileOutcome === null && verifications > 1) throw missingWorkerError();
+      },
+      spawnSync(_file, _args, options) {
+        const request = JSON.parse(options.input.subarray(4).toString('utf8'));
+        operations.push(request.operation);
+        if (operations.length > 1) return reconcileOutcome();
+        fs.renameSync(request.sourcePath, request.destinationPath);
+        return firstOutcome();
+      }
+    });
+    return { label, existing, client, operations, verifications: () => verifications,
+      expectedOperations: [existing ? 'replace-file-write-through' : 'move-write-through',
+        ...(reconcileOutcome === null ? [] : ['reconcile-move-write-through'])],
+      expectedVerifications: 2, causeKind: reconcileOutcome === null ? 'worker-failure' : 'io-failure' };
+  }
+
+  function parentFlushCase(label, existing) {
+    const operations = [];
+    const { calls, client: nativeClient } = unavailableWorkerClient(root);
+    const publishThenFail = operation => (source, destination) => {
+      operations.push(operation);
+      fs.renameSync(source, destination);
+      throw new Error('injected failure after the rename');
+    };
+    // No native reconcile capability: durable-fs confirms the rename by
+    // flushing the parent through a client whose worker cannot be verified.
+    const client = {
+      moveWriteThrough: publishThenFail('move-write-through'),
+      replaceFileWriteThrough: publishThenFail('replace-file-write-through'),
+      flushDirectory: (directory, expectations) => nativeClient.flushDirectory(directory, expectations)
+    };
+    return { label, existing, client, operations, verifications: () => calls.verify,
+      expectedOperations: [existing ? 'replace-file-write-through' : 'move-write-through'],
+      expectedVerifications: 1, causeKind: 'worker-failure' };
+  }
+
+  const cases = [];
+  for (const [outcome, firstOutcome] of Object.entries(launchedFailures)) {
+    for (const existing of [false, true]) {
+      cases.push(nativeReconcileCase(`${outcome}-missing-reconcile-worker`, existing, { firstOutcome }));
+    }
+  }
+  cases.push(nativeReconcileCase('reconcile-reports-preflight', false,
+    { firstOutcome: launchedFailures.failed, reconcileOutcome: reportsPreflight }));
+  for (const existing of [false, true]) cases.push(parentFlushCase('missing-flush-worker', existing));
+
+  for (const { label, existing, client, operations, verifications, expectedOperations, expectedVerifications, causeKind } of cases) {
+    const name = `${label}-${existing ? 'replaced' : 'created'}`;
+    const target = path.join(root, `${name}.json`);
+    if (existing) fs.writeFileSync(target, '{"previous":true}\n');
+    const durableFs = createDurableFs({ fsApi: fs, durableClient: client, allowedRoots: [root] });
+
+    assert.throws(() => durableFs.writeJsonAtomic(target, { name }), error =>
+      error.code === 'COMMIT_FAILED' && error.commitPhase === 'post-publication-uncertain' &&
+      error.cause?.durableFailureKind === causeKind && error.cause?.durableFailureStage === 'preflight-revalidation', name);
+    assert.deepEqual(operations, expectedOperations, name);
+    assert.equal(verifications(), expectedVerifications, name);
+    assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf8')), { name }, name);
+    assert.deepEqual(tempEntriesFor(root, target), [], name);
+  }
+});
+
+test('a failed publication whose target can no longer be proven stays uncertain, sync and async', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-unprovable-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  // The temp is renamed onto the target, which is then swapped for a directory
+  // before the call fails, so the reconcile cannot prove the outcome.
+  const publishThenSubstitute = (source, destination) => {
+    fs.renameSync(source, destination);
+    fs.rmSync(destination);
+    fs.mkdirSync(destination);
+    throw new Error('injected failure after a substituted publication');
+  };
+  const durableFs = createDurableFs({
+    fsApi: fs,
+    asyncFsApi: fs.promises,
+    durableClient: {
+      moveWriteThrough() { throw new Error('new-file move is not expected'); },
+      replaceFileWriteThrough: publishThenSubstitute,
+      flushDirectory() {},
+      async moveWriteThroughAsync() { throw new Error('new-file move is not expected'); },
+      async replaceFileWriteThroughAsync(source, destination) { publishThenSubstitute(source, destination); },
+      async flushDirectoryAsync() {}
+    },
+    allowedRoots: [root]
+  });
+  const uncertain = error => error.code === 'COMMIT_FAILED' && error.commitPhase === 'post-publication-uncertain';
+
+  const syncTarget = path.join(root, 'sync.json');
+  fs.writeFileSync(syncTarget, '{"old":true}\n');
+  assert.throws(() => durableFs.writeJsonAtomic(syncTarget, { old: false }), uncertain);
+  const asyncTarget = path.join(root, 'async.json');
+  fs.writeFileSync(asyncTarget, '{"old":true}\n');
+  await assert.rejects(durableFs.writeJsonAtomicAsync(asyncTarget, { old: false }), uncertain);
+
+  assert.equal(fs.lstatSync(syncTarget).isDirectory(), true);
+  assert.equal(fs.lstatSync(asyncTarget).isDirectory(), true);
+  assert.deepEqual(tempEntries(root), []);
+});
+
+test('an oversized native request is refused before any worker is verified or launched', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-frame-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let parent = root;
+  for (let index = 0; index < 12; index += 1) {
+    parent = path.join(parent, `${index}-${'界'.repeat(240)}`);
+    fs.mkdirSync(parent);
+  }
+  const directories = Array.from({ length: 200 }, (_, index) => path.join(parent, `directory-${index}`));
+  for (const directory of directories) fs.mkdirSync(directory);
+  const { calls, client } = unavailableWorkerClient(root);
+
+  assert.throws(() => client.flushDirectories(directories), error =>
+    error.code === 'COMMIT_FAILED' && error.durableFailureKind === 'worker-failure' &&
+    error.durableFailureStage === 'preflight-revalidation');
+  assert.deepEqual(calls, { verify: 0, spawnSync: 0 });
+});
+
+test('durable temp names share one template with the startup leftover matcher', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-durable-temp-template-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const token = 'b7c0d2e4-0f1a-4c3b-9d8e-7f6a5b4c3d2e';
+  const staged = [];
+  const fsApi = {
+    ...fs,
+    openSync(filePath, flags, mode) {
+      if (flags === 'wx') staged.push(path.basename(filePath));
+      return fs.openSync(filePath, flags, mode);
+    }
+  };
+  const asyncFsApi = {
+    ...fs.promises,
+    open(filePath, flags, mode) {
+      if (flags === 'wx') staged.push(path.basename(filePath));
+      return fs.promises.open(filePath, flags, mode);
+    }
+  };
+  const durableFs = createDurableFs({
+    fsApi,
+    asyncFsApi,
+    allowedRoots: [root],
+    tempNameFactory: () => token,
+    durableClient: {
+      moveWriteThrough: fs.renameSync,
+      replaceFileWriteThrough: fs.renameSync,
+      flushDirectory() {},
+      moveWriteThroughAsync: fs.promises.rename,
+      replaceFileWriteThroughAsync: fs.promises.rename,
+      async flushDirectoryAsync() {}
+    }
+  });
+
+  durableFs.writeJsonAtomic(path.join(root, 'job-0001.json'), { sync: true });
+  await durableFs.writeJsonAtomicAsync(path.join(root, 'job-0002.target.json'), { async: true });
+
+  assert.deepEqual(staged, [
+    `.job-0001.json.minecraft-core-tmp-${token}`,
+    `.job-0002.target.json.minecraft-core-tmp-${token}`
+  ]);
+  assert.deepEqual(staged.map(durableTempTargetName), ['job-0001.json', 'job-0002.target.json']);
+  assert.equal(durableTempTargetName('.a.minecraft-core-tmp-b.minecraft-core-tmp-c'), 'a.minecraft-core-tmp-b');
+  for (const name of ['job-0001.json', '.job-0001.json', '.job-0001.json.minecraft-core-tmp-',
+    '.job-0001.json.minecraft-core-tmp-bad.token', '..minecraft-core-tmp-abc',
+    `.job.json.minecraft-core-tmp-${'a'.repeat(129)}`, '', null, undefined, 7]) {
+    assert.equal(durableTempTargetName(name), null, String(name));
+  }
+
+  const scanned = path.join(root, 'scanned');
+  fs.mkdirSync(scanned);
+  const recordName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.json$/u;
+  fs.writeFileSync(path.join(scanned, `.job-0003.json.minecraft-core-tmp-${token}`), '{"partial":');
+  fs.writeFileSync(path.join(scanned, `.junk.txt.minecraft-core-tmp-${token}`), 'junk');
+  fs.writeFileSync(path.join(scanned, 'job-0003.json'), '{}');
+  fs.mkdirSync(path.join(scanned, `.job-0004.json.minecraft-core-tmp-${token}`));
+  let linked = true;
+  try {
+    fs.symlinkSync(path.join(scanned, 'job-0003.json'), path.join(scanned, `.job-0005.json.minecraft-core-tmp-${token}`), 'file');
+  } catch (error) {
+    if (error?.code !== 'EPERM') throw error;
+    linked = false;
+  }
+  const entries = new Map(fs.readdirSync(scanned, { withFileTypes: true }).map(entry => [entry.name, entry]));
+  const leftover = entries.get(`.job-0003.json.minecraft-core-tmp-${token}`);
+  assert.equal(isDurableTempLeftover(leftover, recordName), true);
+  assert.equal(isDurableTempLeftover(leftover, name => name === 'job-0003.json'), true);
+  assert.equal(isDurableTempLeftover(leftover, name => name === 'job-0004.json'), false);
+  assert.equal(isDurableTempLeftover(entries.get(`.junk.txt.minecraft-core-tmp-${token}`), recordName), false);
+  assert.equal(isDurableTempLeftover(entries.get('job-0003.json'), recordName), false);
+  assert.equal(isDurableTempLeftover(entries.get(`.job-0004.json.minecraft-core-tmp-${token}`), recordName), false);
+  if (linked) assert.equal(isDurableTempLeftover(entries.get(`.job-0005.json.minecraft-core-tmp-${token}`), recordName), false);
+  assert.equal(isDurableTempLeftover(null, recordName), false);
+  assert.equal(isDurableTempLeftover(leftover, null), false);
+});
+
+test('deferred directory flushes run in creation order before the next write and report pre-publication', () => {
+  const calls = [];
+  let failing = true;
+  const flushes = createDeferredDirectoryFlushes(directory => {
+    calls.push(directory);
+    if (failing) throw new ModpackError('COMMIT_FAILED', 'Durable filesystem operation failed');
+  });
+  const failure = cause => new ModpackError('COMMIT_FAILED', 'The test store could not be updated', { cause });
+
+  assert.equal(flushes.created('first-parent'), false);
+  assert.equal(flushes.created('second-parent'), false);
+  assert.equal(flushes.created('first-parent'), false);
+  assert.deepEqual(calls, ['first-parent'], 'a parent created behind a deferred flush is queued without another native call');
+  assert.throws(() => flushes.flushPending(failure), error =>
+    error.code === 'COMMIT_FAILED' && error.commitPhase === 'pre-publication' &&
+    error.safeMessage === 'The test store could not be updated' && error.cause?.code === 'COMMIT_FAILED');
+  assert.deepEqual(calls, ['first-parent', 'first-parent']);
+
+  failing = false;
+  flushes.flushPending(failure);
+  flushes.flushPending(failure);
+  assert.deepEqual(calls, ['first-parent', 'first-parent', 'first-parent', 'second-parent']);
+  assert.equal(flushes.created('third-parent'), true);
+  assert.deepEqual(calls.slice(4), ['third-parent']);
+  assert.throws(() => createDeferredDirectoryFlushes(null), error => error.code === 'COMMIT_FAILED');
 });

@@ -5,7 +5,11 @@ const { isDeepStrictEqual } = require('node:util');
 
 const { compactOperationIdFromRandomSource } = require('./operation-id.cjs');
 
-const { strictJsonClone } = require('../../utils/durable-fs.cjs');
+const {
+  createDeferredDirectoryFlushes,
+  isDurableTempLeftover,
+  strictJsonClone
+} = require('../../utils/durable-fs.cjs');
 const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { normalizeFailureDiagnostic } = require('./publication-failure-diagnostic.cjs');
 const { normalizeRecoveryTargetPath } = require('./recovery-target-envelope.cjs');
@@ -16,6 +20,7 @@ const JOB_SCHEMA_VERSION = 1;
 const MAX_JOB_BYTES = 2 * 1024 * 1024;
 const MAX_EVENTS = 128;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const JOB_RECORD_NAME = /^([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\.json$/;
 const OPERATION_KIND = /^[a-z][a-z0-9-]{0,63}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const SWAP_STEP = /^[a-z][a-z0-9-]{0,63}$/;
@@ -440,6 +445,7 @@ class OperationStore {
     this.rootPath = path.join(this.userDataPath, 'modpack-lifecycle');
     this.operationsPath = path.join(this.rootPath, 'operations');
     this.pins = { userData: directoryIdentity(userDataStat), root: null, operations: null };
+    this.pendingDirectoryFlushes = createDeferredDirectoryFlushes(directory => this.durableFs.flushDirectory(directory));
     this.activePublications = new Map();
     this.publicationGeneration = 0;
     this.allowNewServerLaunchBindings = allowNewServerLaunchBindings;
@@ -452,8 +458,10 @@ class OperationStore {
     this.#revalidateDirectories();
     const records = new Map();
     for (const entry of this.fs.readdirSync(this.operationsPath, { withFileTypes: true })) {
+      // A crashed writer's staged copy of a job record never published anything.
+      if (isDurableTempLeftover(entry, JOB_RECORD_NAME)) continue;
       if (!entry.isFile() || entry.isSymbolicLink()) throw recoveryRequired();
-      const match = /^([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\.json$/.exec(entry.name);
+      const match = JOB_RECORD_NAME.exec(entry.name);
       if (!match) throw recoveryRequired();
       const loaded = this.#read(match[1], { allowMissing: false });
       if (loaded.record.jobId !== match[1]) throw recoveryRequired();
@@ -505,6 +513,7 @@ class OperationStore {
     record.checksum = checksumFor(record);
     this.#revalidateDirectories();
     if (record.schemaVersion === 2) this.#assertLaunchOwner(ownerEpoch);
+    this.pendingDirectoryFlushes.flushPending(commitFailure);
     // All rejection preconditions precede this local attempt witness. It is not
     // proof of durable publication; only an exact subsequent reread can be that.
     const finishPublication = this.#beginPublication(jobId);
@@ -611,8 +620,9 @@ class OperationStore {
     const instances = new Set();
     try {
       for (const entry of this.fs.readdirSync(this.operationsPath, { withFileTypes: true })) {
+        if (isDurableTempLeftover(entry, JOB_RECORD_NAME)) continue;
         if (!entry.isFile() || entry.isSymbolicLink()) throw recoveryRequired();
-        const match = /^([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\.json$/.exec(entry.name);
+        const match = JOB_RECORD_NAME.exec(entry.name);
         if (!match) throw recoveryRequired();
         const loaded = this.#read(match[1], { allowMissing: false });
         const binding = loaded.record.launchBinding;
@@ -841,6 +851,7 @@ class OperationStore {
         if (assertOwner) assertOwner();
         this.#revalidateDirectories();
         if (assertOwner) assertOwner();
+        this.pendingDirectoryFlushes.flushPending(commitFailure);
         await this.durableFs.writeJsonAtomicAsync(this.#recordPath(jobId), normalized, { expectedTargetSha256: expectedSha256 });
         this.#revalidateDirectories();
         if (assertOwner) assertOwner();
@@ -932,10 +943,12 @@ class OperationStore {
     if (!this.#entryExists(candidate)) {
       try {
         this.fs.mkdirSync(candidate, { recursive: false, mode: 0o700 });
-        this.durableFs.flushDirectory(parent);
       } catch (error) {
         throw commitFailure(error);
       }
+      // A flush that cannot run now (for example without ArchiveWorker.exe) is
+      // settled before the first job record is written.
+      this.pendingDirectoryFlushes.created(parent);
     }
     let stat;
     try {

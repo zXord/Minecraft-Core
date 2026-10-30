@@ -346,6 +346,7 @@ function fixture(t, {
   failWriteNumber = null,
   failRenameNumber = null,
   failFlushNumber = null,
+  failFlush = () => false,
   uncertainWriteNumber = null,
   uncertainRenameNumber = null,
   replaceBeforeRenameNumber = null,
@@ -378,6 +379,13 @@ function fixture(t, {
     allowedRoots: [userDataPath],
     tempNameFactory: () => `recovery-${++token}`
   });
+  // Reports a failed flush exactly as durable-fs does in production: a
+  // COMMIT_FAILED error already tagged post-publication.
+  const failingFlushFs = createDurableFs({
+    fsApi: fs,
+    durableClient: { ...nativeClient, flushDirectory() { throw new Error('injected directory flush failure'); } },
+    allowedRoots: [userDataPath]
+  });
   let writes = 0;
   let renames = 0;
   let flushes = 0;
@@ -387,6 +395,7 @@ function fixture(t, {
       calls.push({ kind: 'flush-directory', directoryPath });
       flushes += 1;
       if (flushes === failFlushNumber) throw Object.assign(new Error('injected directory flush failure'), { code: 'COMMIT_FAILED' });
+      if (failFlush(directoryPath)) return failingFlushFs.flushDirectory(directoryPath);
       return base.flushDirectory(directoryPath);
     },
     writeJsonAtomic(filePath, value, options) {
@@ -501,12 +510,28 @@ test('initialize durably creates only the registry directories', async (t) => {
   assert.equal(fs.lstatSync(path.join(registryRoot, 'retirements')).isDirectory(), true);
 });
 
-test('initialize retries directory flush failure without accepting replacement directories', async (t) => {
-  const { userDataPath, durableFs, registry } = fixture(t, { failFlushNumber: 2 });
-  await assert.rejects(registry.initialize(), error => error.code === 'COMMIT_FAILED');
-  await registry.initialize();
+test('initialize defers a directory flush failure to the first write without accepting replacement directories', async (t) => {
+  let flushFailing = true;
+  const { userDataPath, calls, durableFs, registry } = fixture(t, { failFlush: () => flushFailing });
+  const registryRoot = path.join(userDataPath, 'modpack-lifecycle');
+  const active = path.join(registryRoot, 'active');
+  const flushes = () => calls.filter(call => call.kind === 'flush-directory').map(call => call.directoryPath);
 
-  const active = path.join(userDataPath, 'modpack-lifecycle', 'active');
+  const deferred = await registry.initialize();
+  assert.equal(deferred.globalBlock, false);
+  assert.deepEqual(flushes(), [userDataPath]);
+  // The flush's own post-publication tag must not leak: nothing has been written.
+  await assert.rejects(registry.create(record()), error => error.code === 'COMMIT_FAILED' &&
+    error.commitPhase === 'pre-publication' && error.cause?.commitPhase === 'post-publication');
+  assert.deepEqual(fs.readdirSync(active), []);
+  assert.equal(calls.some(call => call.kind === 'write'), false);
+  assert.deepEqual(flushes(), [userDataPath, userDataPath]);
+
+  flushFailing = false;
+  assert.equal((await registry.create(record())).jobId, 'job-0001');
+  assert.deepEqual(flushes().slice(2), [userDataPath, registryRoot]);
+  assert.deepEqual(fs.readdirSync(active).sort(), ['job-0001.json', 'job-0001.target.json']);
+
   const displaced = `${active}.displaced`;
   const replacement = `${active}.replacement`;
   fs.mkdirSync(replacement);
@@ -514,6 +539,8 @@ test('initialize retries directory flush failure without accepting replacement d
   fs.renameSync(replacement, active);
   await assert.rejects(registry.listActive(), error => ['RECOVERY_REQUIRED', 'COMMIT_FAILED'].includes(error.code));
 
+  flushFailing = true;
+  const flushesBefore = flushes().length;
   const fresh = new RecoveryRegistry({
     userDataPath,
     fsApi: fs,
@@ -523,6 +550,54 @@ test('initialize retries directory flush failure without accepting replacement d
   });
   const scan = await fresh.initialize();
   assert.deepEqual(scan.records, []);
+  assert.equal(scan.globalBlock, false);
+  assert.equal(flushes().length, flushesBefore, 'existing registry directories need no flush at startup');
+});
+
+test('a crashed writer temp of a registry record neither blocks every start nor hides real evidence', async (t) => {
+  const { userDataPath, durableFs, registry } = fixture(t);
+  await registry.initialize();
+  const active = path.join(userDataPath, 'modpack-lifecycle', 'active');
+  const history = path.join(userDataPath, 'modpack-lifecycle', 'history');
+  const leftovers = [
+    path.join(active, `.job-0001.target.json.minecraft-core-tmp-${crypto.randomUUID()}`),
+    path.join(active, `.job-0001.json.minecraft-core-tmp-${crypto.randomUUID()}`),
+    path.join(active, `.job-0002.json.minecraft-core-tmp-${crypto.randomUUID()}`),
+    path.join(history, `.job-0003.json.minecraft-core-tmp-${crypto.randomUUID()}`)
+  ];
+  for (const leftover of leftovers) fs.writeFileSync(leftover, '{"partial":');
+  const interrupted = record({
+    jobId: 'job-0002',
+    target: { kind: 'existing', stableServerId: 'server-0002', path: 'C:\\Minecraft\\Servers\\Interrupted' },
+    candidatePath: null,
+    rollbackPath: null,
+    failedPath: null,
+    journalPath: null
+  });
+  fs.writeFileSync(path.join(active, 'job-0002.target.json'), `${JSON.stringify(createRecoveryTargetEnvelope(interrupted), null, 2)}\n`);
+  const restart = () => new RecoveryRegistry({
+    userDataPath,
+    fsApi: fs,
+    durableFs,
+    clock: () => new Date('2026-08-01T00:01:00.000Z'),
+    randomUUID: crypto.randomUUID
+  });
+
+  const scan = await restart().initialize();
+  assert.equal(scan.globalBlock, false);
+  assert.deepEqual(scan.records, []);
+  assert.deepEqual(scan.blocks.map(block => [block.jobId, block.stableServerId]), [['job-0002', 'server-0002']]);
+  for (const leftover of leftovers) assert.equal(fs.existsSync(leftover), true);
+
+  for (const [directory, name, kind] of [[active, 'junk.txt', 'file'],
+    [active, `.junk.txt.minecraft-core-tmp-${crypto.randomUUID()}`, 'file'],
+    [history, `.job-0004.target.json.minecraft-core-tmp-${crypto.randomUUID()}`, 'directory']]) {
+    const entry = path.join(directory, name);
+    if (kind === 'file') fs.writeFileSync(entry, 'unexpected');
+    else fs.mkdirSync(entry);
+    assert.equal((await restart().initialize()).globalBlock, true, name);
+    fs.rmSync(entry, { recursive: true });
+  }
 });
 
 test('create publishes the target envelope before the full active record', async (t) => {

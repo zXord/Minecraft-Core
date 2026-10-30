@@ -1026,3 +1026,50 @@ test('concurrent forced checks of one source share one provider request and one 
   gate.resolve();
   assert.deepEqual(await second, await first);
 });
+
+test('a root-creation flush failure is deferred to the first write of the tracking and notification stores', async (t) => {
+  const { NotificationStore } = require('../../electron/services/modpacks/notifications/notification-store.cjs');
+  const { ReleaseTrackingStore } = require('../../electron/services/modpacks/notifications/release-tracking-store.cjs');
+  const clock = () => new Date('2026-08-01T00:00:00.000Z');
+  const stores = [
+    ['release tracking', common => new ReleaseTrackingStore(common), store => store.upsert(githubTracking())],
+    ['notifications', common => new NotificationStore({ ...common, randomUUID: () => '00000000-0000-4000-8000-000000000001' }),
+      store => store.create({
+        type: 'update-available', serverId: 'server-1', source: { provider: 'github', sourceId: 'source-1' }, release: null,
+        title: 'Update available', message: 'A newer modpack version is available', action: null, dedupeKey: 'update-1'
+      })]
+  ];
+
+  for (const [label, construct, write] of stores) {
+    const persistence = persistenceFixture(t);
+    const flushes = [];
+    let failing = true;
+    const durableFs = {
+      ...persistence.durableFs,
+      flushDirectory(directory) {
+        flushes.push(directory);
+        if (failing) throw Object.assign(new Error('injected missing worker'), { code: 'COMMIT_FAILED' });
+        return persistence.durableFs.flushDirectory(directory);
+      }
+    };
+    const common = { userDataPath: persistence.userDataPath, durableFs, fsApi: fs, clock };
+    const rootPath = path.join(persistence.userDataPath, 'modpack-lifecycle');
+
+    const store = construct(common);
+    await store.initialize();
+    assert.deepEqual(flushes, [persistence.userDataPath], label);
+    await assert.rejects(write(store), error => error.code === 'COMMIT_FAILED' && error.commitPhase === 'pre-publication', label);
+    assert.deepEqual(fs.readdirSync(rootPath), [], label);
+
+    failing = false;
+    await write(store);
+    assert.deepEqual(flushes, [persistence.userDataPath, persistence.userDataPath, persistence.userDataPath], label);
+    assert.equal(fs.readdirSync(rootPath).length, 1, label);
+
+    flushes.length = 0;
+    failing = true;
+    const reopened = construct(common);
+    await reopened.initialize();
+    assert.deepEqual(flushes, [], `${label}: an existing root needs no flush at startup`);
+  }
+});

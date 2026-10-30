@@ -20,6 +20,7 @@ const MAX_JSON_STRING_BYTES = 4 * 1024 * 1024;
 // allowed roots and their identities are present in the same request.
 const MAX_FLUSH_DIRECTORIES = 512;
 const TEMP_TOKEN_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const DURABLE_TEMP_INFIX = '.minecraft-core-tmp-';
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const PRE_PUBLICATION_NATIVE_STAGES = new Set([
   'root-open',
@@ -69,6 +70,73 @@ function publicationFailurePhase(error, { published, phase }) {
 
 function targetExists() {
   return new ModpackError('TARGET_EXISTS', 'The target already exists');
+}
+
+// The one template for a staged write: both atomic write paths name their temp
+// with it, and startup scanners use durableTempTargetName to recognise the
+// leftover of a writer that died before publishing.
+function durableTempName(targetName, token) {
+  return `.${targetName}${DURABLE_TEMP_INFIX}${token}`;
+}
+
+function durableTempTargetName(name) {
+  if (typeof name !== 'string' || !name.startsWith('.')) return null;
+  const infix = name.lastIndexOf(DURABLE_TEMP_INFIX);
+  if (infix < 2 || !TEMP_TOKEN_PATTERN.test(name.slice(infix + DURABLE_TEMP_INFIX.length))) return null;
+  return name.slice(1, infix);
+}
+
+// True for a regular, non-link file staged for one of the directory's own
+// record names (recordPattern: an anchored, non-global RegExp or a predicate).
+// A staged copy is never authority, because only a completed native rename
+// publishes it, so a scanner may skip it. Callers never delete it: another app
+// instance could still be writing.
+function isDurableTempLeftover(dirent, recordPattern) {
+  let regularFile = false;
+  try {
+    regularFile = Boolean(dirent) && dirent.isFile() === true && dirent.isSymbolicLink() === false;
+  } catch {
+    return false;
+  }
+  const targetName = regularFile ? durableTempTargetName(dirent.name) : null;
+  if (targetName === null) return false;
+  if (recordPattern instanceof RegExp) return recordPattern.test(targetName);
+  return typeof recordPattern === 'function' && recordPattern(targetName) === true;
+}
+
+// Parent flushes owed for directories created in this run. Opening an existing
+// profile creates nothing, so it needs no native helper at all. A flush that
+// cannot complete now (for example while ArchiveWorker.exe is missing) is kept
+// and retried before the next record is written beneath it; once one is owed,
+// later parents queue behind it without another native attempt.
+function createDeferredDirectoryFlushes(flushDirectory) {
+  if (typeof flushDirectory !== 'function') throw commitFailure();
+  const pending = [];
+  return Object.freeze({
+    // Returns true when the parent was flushed now, false when it is deferred.
+    created(parent) {
+      if (pending.length === 0) {
+        try {
+          flushDirectory(parent);
+          return true;
+        } catch { /* deferred to the next write */ }
+      }
+      if (!pending.includes(parent)) pending.push(parent);
+      return false;
+    },
+    // Settles every owed flush, oldest first. failure(cause) must build a new
+    // error; it is tagged pre-publication because nothing has been written.
+    flushPending(failure) {
+      while (pending.length > 0) {
+        try {
+          flushDirectory(pending[0]);
+        } catch (cause) {
+          throw withPhase(failure(cause), 'pre-publication');
+        }
+        pending.shift();
+      }
+    }
+  });
 }
 
 function staleTarget() {
@@ -570,7 +638,7 @@ function createDurableFs({
     if (inputLength === null || inputLength > atomicLimit) throw commitFailure();
     const bytes = typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data);
     const expectedDataSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
-    const tempPath = path.join(guarded.parent, `.${path.basename(guarded.target)}.minecraft-core-tmp-${token}`);
+    const tempPath = path.join(guarded.parent, durableTempName(path.basename(guarded.target), token));
     let descriptor = null;
     let published = false;
     let flushedTempIdentity = null;
@@ -619,20 +687,31 @@ function createDurableFs({
           });
         }
       } catch (publicationError) {
-        const publishedTarget = reconcileUncertainAtomicPublication(staged, guarded, sourceIdentity);
-        if (publishedTarget === null) throw publicationError;
-        if (reconcilesMovesNatively) {
-          client.reconcileMoveWriteThrough(tempPath, guarded.target, {
-            sourceIdentity,
-            sourceParentIdentity: staged.parentIdentity,
-            destinationParentIdentity: guarded.parentIdentity
-          });
-          revalidateParent(staged);
-          revalidateParent(guarded);
-          assertExactAtomicPublication(staged, publishedTarget, sourceIdentity);
-        } else {
-          flushReconciledAtomicParent(staged, guarded, publishedTarget, sourceIdentity);
+        // As in renameDurable, a failure to prove or settle the outcome of the
+        // attempted call stays uncertain, whatever stage the follow-up call
+        // reports: it may not even have started a worker. Only a temp proven
+        // still in place lets the publication call's own stage decide.
+        let publishedTarget = null;
+        try {
+          publishedTarget = reconcileUncertainAtomicPublication(staged, guarded, sourceIdentity);
+          if (publishedTarget !== null) {
+            if (reconcilesMovesNatively) {
+              client.reconcileMoveWriteThrough(tempPath, guarded.target, {
+                sourceIdentity,
+                sourceParentIdentity: staged.parentIdentity,
+                destinationParentIdentity: guarded.parentIdentity
+              });
+              revalidateParent(staged);
+              revalidateParent(guarded);
+              assertExactAtomicPublication(staged, publishedTarget, sourceIdentity);
+            } else {
+              flushReconciledAtomicParent(staged, guarded, publishedTarget, sourceIdentity);
+            }
+          }
+        } catch (reconcileError) {
+          throw forceFailurePhase(reconcileError, 'post-publication-uncertain');
         }
+        if (publishedTarget === null) throw publicationError;
       }
       published = true;
       phase = 'post-publication';
@@ -732,7 +811,7 @@ function createDurableFs({
     if (inputLength === null || inputLength > atomicLimit) throw commitFailure();
     const bytes = typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data);
     const expectedDataSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
-    const tempPath = path.join(guarded.parent, `.${path.basename(guarded.target)}.minecraft-core-tmp-${token}`);
+    const tempPath = path.join(guarded.parent, durableTempName(path.basename(guarded.target), token));
     let descriptor = null;
     let published = false;
     let flushedTempIdentity = null;
@@ -785,20 +864,29 @@ function createDurableFs({
           });
         }
       } catch (publicationError) {
-        const publishedTarget = reconcileUncertainAtomicPublication(staged, guarded, sourceIdentity);
-        if (publishedTarget === null) throw publicationError;
-        if (reconcilesMovesNatively && typeof client.reconcileMoveWriteThroughAsync === 'function') {
-          await client.reconcileMoveWriteThroughAsync(tempPath, guarded.target, {
-            sourceIdentity,
-            sourceParentIdentity: staged.parentIdentity,
-            destinationParentIdentity: guarded.parentIdentity
-          });
-          revalidateParent(staged);
-          revalidateParent(guarded);
-          assertExactAtomicPublication(staged, publishedTarget, sourceIdentity);
-        } else {
-          await flushReconciledAtomicParentAsync(staged, guarded, publishedTarget, sourceIdentity);
+        // As in writeFileAtomic: once the call was attempted, only a temp
+        // proven still in place lets its own stage decide the phase.
+        let publishedTarget = null;
+        try {
+          publishedTarget = reconcileUncertainAtomicPublication(staged, guarded, sourceIdentity);
+          if (publishedTarget !== null) {
+            if (reconcilesMovesNatively && typeof client.reconcileMoveWriteThroughAsync === 'function') {
+              await client.reconcileMoveWriteThroughAsync(tempPath, guarded.target, {
+                sourceIdentity,
+                sourceParentIdentity: staged.parentIdentity,
+                destinationParentIdentity: guarded.parentIdentity
+              });
+              revalidateParent(staged);
+              revalidateParent(guarded);
+              assertExactAtomicPublication(staged, publishedTarget, sourceIdentity);
+            } else {
+              await flushReconciledAtomicParentAsync(staged, guarded, publishedTarget, sourceIdentity);
+            }
+          }
+        } catch (reconcileError) {
+          throw forceFailurePhase(reconcileError, 'post-publication-uncertain');
         }
+        if (publishedTarget === null) throw publicationError;
       }
       published = true;
       phase = 'post-publication';
@@ -1288,13 +1376,16 @@ module.exports = {
   MAX_HASH_BYTES,
   MAX_JSON_BYTES,
   configureDurableFs,
+  createDeferredDirectoryFlushes,
   createDurableFs,
   deleteFileExactAsync,
+  durableTempTargetName,
   flushDirectories,
   flushDirectoriesAsync,
   flushDirectory,
   flushDirectoryAsync,
   getConfiguredDurableFs,
+  isDurableTempLeftover,
   readFileBounded,
   readFileBoundedAsync,
   strictJsonClone,

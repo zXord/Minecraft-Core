@@ -58,8 +58,7 @@ function failed(cause) {
   return new ModpackError('COMMIT_FAILED', 'Durable filesystem operation failed', { cause });
 }
 
-function durableFailure(failureKind, failureStage, effectState) {
-  const error = failed();
+function durableFailure(failureKind, failureStage, effectState, error = failed()) {
   Object.defineProperty(error, 'durableFailureKind', {
     value: failureKind,
     enumerable: true,
@@ -74,6 +73,22 @@ function durableFailure(failureKind, failureStage, effectState) {
   });
   if (effectState !== undefined) Object.defineProperty(error, 'durableEffectState', { value: effectState, enumerable: true });
   return error;
+}
+
+// Failures before any worker process exists. No request reached a worker, so
+// nothing can have been published: durable-fs classifies this stage as
+// pre-publication and removes its staged temp.
+function requestNotSent(cause) {
+  return durableFailure('worker-failure', 'preflight-revalidation', undefined, failed(cause));
+}
+
+function workerUnavailable(cause) {
+  return durableFailure('worker-failure', 'preflight-revalidation', undefined, new ModpackError('COMMIT_FAILED',
+    'ArchiveWorker.exe is missing, damaged or blocked, so the durable filesystem operation did not start', { cause }));
+}
+
+function workerProcessStarted(pid) {
+  return Number.isSafeInteger(pid) && pid > 0;
 }
 
 function containsReparsePoint(candidate) {
@@ -670,11 +685,13 @@ class WindowsDurableFsClient {
 
   #invoke(request) {
     let framedRequest;
-    try { framedRequest = encodeFrame(request); } catch (error) { throw failed(error); }
+    try { framedRequest = encodeFrame(request); } catch (error) { throw requestNotSent(error); }
+    let environment;
+    let result;
     try {
       this.verifyWorker({ workerPath: this.workerPath, workerManifestPath: this.workerManifestPath });
-      const environment = createExtractionBlockedEnvironment(this.workerPath);
-      const result = this.spawnSync(this.workerPath, ['--durable-fs'], {
+      environment = createExtractionBlockedEnvironment(this.workerPath);
+      result = this.spawnSync(this.workerPath, ['--durable-fs'], {
         input: framedRequest,
         shell: false,
         windowsHide: true,
@@ -684,6 +701,11 @@ class WindowsDurableFsClient {
         maxBuffer: MAX_RESPONSE_BYTES,
         stdio: ['pipe', 'pipe', 'pipe']
       });
+    } catch (error) {
+      throw workerUnavailable(error);
+    }
+    if (result?.error && !workerProcessStarted(result.pid)) throw workerUnavailable(result.error);
+    try {
       if (result.error || result.signal || result.status !== 0 || !Buffer.isBuffer(result.stderr) || result.stderr.length !== 0) throw failed(result.error);
       decodeResponse(result.stdout);
     } catch (error) {
@@ -698,11 +720,13 @@ class WindowsDurableFsClient {
     const mustConfirmClose = this.requireConfirmedClose || requireConfirmedClose;
     let framedRequest;
     try { framedRequest = encodeFrame(request); }
-    catch (error) { throw exactDelete ? durableFailure('integrity-failure', 'request', 'none') : failed(error); }
+    catch (error) { throw exactDelete ? durableFailure('integrity-failure', 'request', 'none') : requestNotSent(error); }
+    let environment;
     try {
       await this.verifyWorkerAsync({ workerPath: this.workerPath, workerManifestPath: this.workerManifestPath });
+      environment = createExtractionBlockedEnvironment(this.workerPath);
     } catch (error) {
-      throw exactDelete ? durableFailure('worker-failure', 'request', 'none') : failed(error);
+      throw exactDelete ? durableFailure('worker-failure', 'request', 'none') : workerUnavailable(error);
     }
 
     return new Promise((resolve, reject) => {
@@ -759,7 +783,6 @@ class WindowsDurableFsClient {
         }
       };
 
-      const environment = createExtractionBlockedEnvironment(this.workerPath);
       try {
         child = this.spawn(this.workerPath, ['--durable-fs'], {
           shell: false,
@@ -769,19 +792,30 @@ class WindowsDurableFsClient {
           stdio: ['pipe', 'pipe', 'pipe']
         });
       } catch (error) {
-        settle(failed(error));
+        settle(workerUnavailable(error));
         return;
       }
 
+      let started = false;
       let valid = false;
       try {
-        valid = Boolean(child) && Number.isSafeInteger(child.pid) && child.pid > 0 &&
+        started = Boolean(child) && workerProcessStarted(child.pid);
+        valid = started &&
           typeof child.once === 'function' && typeof child.kill === 'function' &&
           child.stdin && typeof child.stdin.end === 'function' && typeof child.stdin.once === 'function' &&
           child.stdout && typeof child.stdout.on === 'function' &&
           child.stderr && typeof child.stderr.on === 'function';
       } catch { valid = false; }
-      if (!valid) { terminate(failed()); return; }
+      if (!valid && started) { terminate(failed()); return; }
+      if (!valid) {
+        // Node reports a refused launch (ENOENT, EACCES) as a child without a
+        // pid plus a later 'error' event; observe it so it cannot go unhandled.
+        // No process exists whose close could be awaited, so settle at once.
+        try { child?.on?.('error', () => {}); } catch { /* the launch is already refused */ }
+        forceKill(child);
+        settle(workerUnavailable());
+        return;
+      }
 
       try {
         child.stdout.on('data', chunk => {
