@@ -6,6 +6,7 @@
   export let inspection;
   export let reviewedPlan = null;
   export let reviewContext = null;
+  export let launchOutcome = null;
   export let startReviewedOperation = null;
   export let busy = false;
   export let error = null;
@@ -62,7 +63,7 @@
   let activeReviewedPlanId = null;
   let childAlive = true;
   let startOwner = null;
-  let launchUnknown = false;
+  let unresolvedLaunch = false;
   onDestroy(() => { childAlive = false; startOwner = null; });
 
   $: rootCandidates = inspection?.rootCandidates || [];
@@ -105,7 +106,10 @@
   $: filesOnlyEligible = ['files-only', 'ambiguous-or-unknown', 'unsupported-runtime-layout'].includes(inspection?.classification?.kind);
   $: blockers = reviewedPlan?.planView?.blockers || [];
   $: hasCurrentInspection = Boolean(inspection?.inspectionId);
-  $: reviewRequiresRefresh = planStale || isPlanStaleError(error);
+  $: launchNotStarted = Boolean(reviewContext && launchOutcome?.reviewContext === reviewContext &&
+    reviewContext.plan === reviewedPlan && launchOutcome?.status === 'not-started');
+  $: launchUnknown = unresolvedLaunch && !launchNotStarted;
+  $: reviewRequiresRefresh = launchNotStarted || planStale || isPlanStaleError(error);
   $: downgradeRiskAccepted = operationKind !== 'downgrade' || acknowledgeDowngradeWorldRisk;
   $: needsNewServerResources = operationKind === 'install-new';
   $: validMaxRam = Number.isSafeInteger(Number(maxRam)) && Number(maxRam) >= 1 && Number(maxRam) <= 64;
@@ -113,7 +117,7 @@
   $: validNetworkAccess = ['pack-default', 'loopback'].includes(networkAccess);
   $: canPreflight = hasCurrentInspection && !reviewRequiresRefresh && !knownClassificationBlocker && !unresolvedAmbiguity && conflictsResolved && (!missingDigest || acknowledgeMissingProviderDigest) && downgradeRiskAccepted && (!needsNewServerResources || (validMaxRam && validServerPort && validNetworkAccess));
   $: canFilesOnly = operationKind !== 'repair' && hasCurrentInspection && !reviewRequiresRefresh && filesOnlyEligible && (!rootChoiceRequired || Boolean(selectedRoot)) && (!missingDigest || acknowledgeMissingProviderDigest);
-  $: canStart = !planStale && !isPlanStaleError(error) && Boolean(reviewedPlan?.planId && reviewedPlan?.planFingerprint && blockers.length === 0 && acceptEula && (!missingDigest || acknowledgeMissingProviderDigest));
+  $: canStart = !planStale && !reviewRequiresRefresh && Boolean(reviewedPlan?.planId && reviewedPlan?.planFingerprint && blockers.length === 0 && acceptEula && (!missingDigest || acknowledgeMissingProviderDigest));
   $: plan = reviewedPlan?.planView || {};
   $: changes = plan.changes || {};
   $: preflightPhase = Object.hasOwn(preflightPhaseLabels, preflightProgress?.phase)
@@ -202,7 +206,7 @@
     startAfterInstall = true;
     startOwner = null;
     starting = false;
-    launchUnknown = false;
+    unresolvedLaunch = false;
   }
 
   function conflictDecision(conflictId, selections = conflictChoices) {
@@ -300,13 +304,13 @@
       const choices = { acceptEula, startAfterInstall, restorePointId: null };
       const result = await startReviewedOperation({ reviewContext: owner.context, planId, planFingerprint, choices });
       if (!childAlive || startOwner !== owner || reviewContext !== owner.context || reviewedPlan !== owner.plan) return;
-      launchUnknown = result?.status === 'unknown';
+      unresolvedLaunch = result?.status === 'unknown';
       if (result?.status === 'not-invoked' && result.error) {
         if (isPlanStaleError(result.error)) planStale = true;
         else dispatch('error', { error: result.error });
       }
     } catch (caught) {
-      if (childAlive && startOwner === owner && reviewContext === owner.context) launchUnknown = true;
+      if (childAlive && startOwner === owner && reviewContext === owner.context) unresolvedLaunch = true;
     } finally {
       if (childAlive && startOwner === owner && reviewContext === owner.context) starting = false;
     }
@@ -431,7 +435,7 @@
       {#if blockers.length}<div class="mp-state error"><strong>Plan has unresolved blockers</strong><ul>{#each blockers as blocker, index (index)}<li>{blocker.message || blocker.code || blocker}</li>{/each}</ul></div>{/if}
       <label class="acknowledgement"><input type="checkbox" bind:checked={acceptEula} /><span><strong>I accept the Minecraft EULA</strong><br /><small>Pack-supplied EULA files are ignored; this explicit choice controls application-owned acceptance.</small></span></label>
       <label class="acknowledgement"><input type="checkbox" bind:checked={startAfterInstall} /><span>Start after install and validate final health</span></label>
-      <div class="mp-actions"><button data-launch-start type="button" class="mp-button primary" disabled={!canStart || busy || starting || launchUnknown} on:click={startReviewedPlan}>{starting ? 'Starting…' : launchUnknown ? 'Checking Start outcome…' : 'Install this exact reviewed plan'}</button></div>
+      <div class="mp-actions"><button data-launch-start type="button" class="mp-button primary" disabled={!canStart || busy || starting || launchUnknown} on:click={startReviewedPlan}>{launchNotStarted ? 'Fresh review required' : starting ? 'Starting…' : launchUnknown ? 'Checking Start outcome…' : 'Install this exact reviewed plan'}</button></div>
     </section>
   {/if}
 </div>

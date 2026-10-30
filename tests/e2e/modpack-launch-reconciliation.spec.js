@@ -581,6 +581,81 @@ for (const [status, expected] of [['not-observed', /absence is not permission/],
   await page.evaluate(status => { const s = window.launchTest; s.mode = 'structured'; s.reconciliation = { status, planId: s.planId, planFingerprint: s.fingerprint, ...(status === 'unavailable' ? { reason: 'legacy-correlation-unavailable' } : status === 'recovery-required' ? { reason: 'invalid-durable-evidence' } : {}) }; }, status);
   await page.getByRole('button', { name: 'Install this exact reviewed plan' }).click();
   await expect(page.getByText(expected)).toBeVisible();
+  if (status !== 'not-started') {
+    await expect(page.getByRole('button', { name: /Checking Start outcome/ })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Run a fresh preflight review' })).toHaveCount(0);
+  }
+  expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(0);
+});
+
+test('N1 immediate not-started replaces checking with a fresh-review action and never retries the old plan', async ({ page }) => {
+  await review(page);
+  await page.evaluate(() => { const s = window.launchTest; s.mode = 'structured'; s.reconciliation = { status: 'not-started', planId: s.planId, planFingerprint: s.fingerprint }; });
+  await page.getByRole('button', { name: 'Install this exact reviewed plan' }).click();
+  await expect(page.getByText(/This exact launch did not start/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /Checking Start outcome/ })).toHaveCount(0);
+  await expect(page.locator('[data-launch-start]')).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Run a fresh preflight review' })).toBeEnabled();
+  expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(0);
+
+  await page.getByRole('button', { name: 'Run a fresh preflight review' }).click();
+  await expect(page.getByRole('button', { name: /Local archive/ })).toBeVisible();
+  expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(0);
+  await page.evaluate(() => { const s = window.launchTest; s.planId = 'plan-launch-v1-22222222-2222-4222-8222-222222222222'; s.fingerprint = 'b'.repeat(64); });
+  await page.getByRole('button', { name: /Local archive/ }).click();
+  await page.getByRole('button', { name: 'Choose destination and review plan' }).click();
+  await expect(page.getByRole('button', { name: 'Run a fresh preflight review' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Install this exact reviewed plan' })).toBeDisabled();
+  await page.getByRole('checkbox', { name: /I accept the Minecraft EULA/ }).check();
+  await expect(page.getByRole('button', { name: 'Install this exact reviewed plan' })).toBeEnabled();
+  expect(await page.evaluate(() => window.launchTest.requests.filter(value => value.channel === 'modpacks:preflight').length)).toBe(2);
+  expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(0);
+});
+
+test('N1 later pending-to-not-started closes checking and stops reconciliation without starting or releasing', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-10-11T00:00:00Z') });
+  await page.clock.pauseAt(new Date('2026-10-11T00:00:01Z'));
+  await review(page);
+  await page.evaluate(() => { const s = window.launchTest; s.mode = 'structured'; s.reconciliation = { status: 'pending', planId: s.planId, planFingerprint: s.fingerprint }; });
+  await page.getByRole('button', { name: 'Install this exact reviewed plan' }).click();
+  await expect(page.getByRole('button', { name: /Checking Start outcome/ })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Run a fresh preflight review' })).toHaveCount(0);
+  await page.evaluate(() => { const s = window.launchTest; s.reconciliation = { status: 'not-started', planId: s.planId, planFingerprint: s.fingerprint }; });
+  await page.clock.runFor(1200);
+  await expect(page.getByText(/This exact launch did not start/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /Checking Start outcome/ })).toHaveCount(0);
+  await expect(page.locator('[data-launch-start]')).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Run a fresh preflight review' })).toBeEnabled();
+  await page.clock.runFor(12000);
+  expect(await page.evaluate(() => window.launchTest.requests.filter(value => value.channel === 'modpacks:reconcile-new-server-launch').length)).toBe(2);
+  expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(0);
+});
+
+test('N1 late not-started from an abandoned review cannot stale its same-mounted-parent replacement', async ({ page }) => {
+  await review(page);
+  await page.evaluate(() => { const s = window.launchTest; s.mode = 'structured'; s.reconciliation = { status: 'not-started', planId: s.planId, planFingerprint: s.fingerprint }; });
+  await page.getByRole('button', { name: 'Install this exact reviewed plan' }).click();
+  await expect(page.getByRole('button', { name: 'Run a fresh preflight review' })).toBeEnabled();
+  await page.evaluate(() => { window.launchTest.defer = 'modpacks:reconcile-new-server-launch'; });
+  await page.getByRole('button', { name: 'Check exact launch status' }).click();
+  await expect.poll(() => page.evaluate(() => window.launchTest.pending.length)).toBe(1);
+  await expect(page.getByRole('button', { name: 'Check exact launch status' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Run a fresh preflight review' }).click();
+  await expect(page.getByRole('button', { name: /Local archive/ })).toBeVisible();
+  await page.evaluate(() => {
+    const s = window.launchTest;
+    s.defer = '';
+    s.planId = 'plan-launch-v1-22222222-2222-4222-8222-222222222222';
+    s.fingerprint = 'b'.repeat(64);
+  });
+  await page.getByRole('button', { name: /Local archive/ }).click();
+  await page.getByRole('button', { name: 'Choose destination and review plan' }).click();
+  await page.getByRole('checkbox', { name: /I accept the Minecraft EULA/ }).check();
+  await page.evaluate(() => { const pending = window.launchTest.pending[0]; pending.resolve({ ...pending.request, status: 'not-started' }); });
+  await expect(page.getByRole('button', { name: 'Install this exact reviewed plan' })).toBeEnabled();
+  await expect(page.getByText(/This exact launch did not start/)).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Run a fresh preflight review' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Check exact launch status' })).toHaveCount(0);
   expect(await starts(page)).toBe(1); expect(await releases(page)).toBe(0);
 });
 

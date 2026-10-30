@@ -65,6 +65,7 @@
   let reservationRecord = null;
   let planningOwner = null;
   let reviewContext = null;
+  let reviewLaunchOutcome = null;
   let selectedLaunch = null;
   let selectionContext = null;
   let launchNotice = '';
@@ -87,6 +88,7 @@
     ownerEpoch += 1;
     planningOwner = null;
     reviewContext = null;
+    reviewLaunchOutcome = null;
     selectionContext = null;
     selectedLaunch = null;
     for (const attempt of launchAttempts) { clearTimeout(attempt.timer); clearTimeout(attempt.completionTimer); attempt.timer = null; attempt.completionTimer = null; }
@@ -338,6 +340,7 @@
 
   async function refreshStaleReview() {
     invalidateIntent();
+    launchNotice = '';
     const epoch = ownerEpoch;
     const record = reservationRecord;
     const requestedSelection = selectedRequest ? {
@@ -427,7 +430,12 @@
         }
         if (result.status === 'not-started') {
           for (const prior of launchAttempts) if (prior.planId === attempt.planId && prior.planFingerprint === attempt.planFingerprint) prior.status = 'not-started';
-          if (currentAttempt(attempt)) launchNotice = 'This exact launch did not start. You may go back and run a fresh review. No server files will be deleted.';
+          if (currentAttempt(attempt)) {
+            launchNotice = 'This exact launch did not start. You may go back and run a fresh review. No server files will be deleted.';
+            if (attempt.reviewContext && attempt.reviewContext === reviewContext) {
+              reviewLaunchOutcome = { reviewContext: attempt.reviewContext, status: 'not-started' };
+            }
+          }
           return;
         }
         attempt.status = 'unknown';
@@ -449,8 +457,10 @@
     attempt.retry = false;
     attempt.reading = Promise.resolve().then(work).finally(() => {
       attempt.reading = null;
+      if (currentAttempt(attempt)) selectedLaunch = attempt;
       if (attempt.retry) scheduleReconciliation(attempt);
     });
+    if (currentAttempt(attempt)) selectedLaunch = attempt;
     return attempt.reading;
   }
 
@@ -486,7 +496,7 @@
         if (attempt.status !== 'job-owned') { attempt.status = 'unknown'; record.state = 'unknown'; }
         if (currentAttempt(attempt)) launchNotice = 'Start outcome is unknown; it may already have started. Checking the exact launch; the destination remains protected.';
         await reconcileLaunch(attempt);
-        resolveAttempt({ status: attempt.status === 'job-owned' && stage === 'progress' ? 'started' : 'unknown' });
+        resolveAttempt({ status: attempt.status === 'not-started' ? 'not-started' : attempt.status === 'job-owned' && stage === 'progress' ? 'started' : 'unknown' });
       }
     })();
     return attempt.promise;
@@ -694,7 +704,7 @@
   {:else if stage === 'review'}
     <p class="mp-muted destination-note">When you start preflight, Minecraft Core opens the native folder picker, then runs preflight checks before changing any server files.</p>
     {#if destinationNotice}<div class="mp-state destination-notice" role="status" aria-live="polite">{destinationNotice}</div>{/if}
-    <ArchiveGuidedReview {inspection} {reviewedPlan} {reviewContext} {startReviewedOperation} busy={busy || protectedLaunch()} {error} {preflightProgress} {selectingDestination} {defaultMaxRam} {defaultServerPort} operationKind="install-new" on:preflight={buildPreflight} on:filesonly={(event) => buildPreflight(event, 'import-files-only-new')} on:stale={refreshStaleReview} on:error={(event) => (error = event.detail.error)} on:back={goToSource} />
+    <ArchiveGuidedReview {inspection} {reviewedPlan} {reviewContext} launchOutcome={reviewLaunchOutcome} {startReviewedOperation} busy={busy || protectedLaunch()} {error} {preflightProgress} {selectingDestination} {defaultMaxRam} {defaultServerPort} operationKind="install-new" on:preflight={buildPreflight} on:filesonly={(event) => buildPreflight(event, 'import-files-only-new')} on:stale={refreshStaleReview} on:error={(event) => (error = event.detail.error)} on:back={goToSource} />
     {#if reservedDestinationName}<p class="mp-muted destination-note"><strong>Chosen destination:</strong> {reservedDestinationName}. This safe display name is all this review exposes.</p>{/if}
   {:else if stage === 'progress'}
     {#key selectionContext}<ModpackJobProgress {job} {selectionContext} on:terminal={completeSetup} on:action={handleOutcomeAction} on:return={() => { job = null; navigateStage('source'); }} />{/key}
