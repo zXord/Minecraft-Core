@@ -4,6 +4,7 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { EventEmitter } = require('node:events');
 const { ManagementSessionBroker } = require('../electron/services/management-session-broker.cjs');
+const { MANAGEMENT_INFO_MAX_BYTES } = require('../electron/services/management-session-transport.cjs');
 const { createManagementSessionHandlers } = require('../electron/ipc/management-session-handlers.cjs');
 const helper = () => import(pathToFileURL(path.resolve('src/utils/managementAuth.js')).href);
 async function fixture(t, { seeded = false } = {}) {
@@ -64,17 +65,22 @@ test('selection retirement after headers discards parsed JSON', async t => {
   const pending = f.readManagementJson(f.instance, '/api/server/info', { isCurrent: () => current }); await ready; current = false; finish();
   await assert.rejects(pending, error => error.stale === true); assert.equal(f.registrations(), 0);
 });
-for (const bytes of [262144, 262145]) test(`chunked info byte limit ${bytes}`, async t => {
-  const f = await fixture(t, { seeded: true }); let cancelled = false;
-  const body = Buffer.from('"' + 'é'.repeat(131071) + (bytes === 262145 ? 'x' : '') + '"'); assert.equal(body.length, bytes);
-  global.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(body.subarray(0, 100)); controller.enqueue(body.subarray(100)); if (bytes === 262144) controller.close(); }, cancel() { cancelled = true; } }));
-  if (bytes === 262144) assert.equal((await f.readManagementJson(f.instance, '/api/server/info')).data.length, 131071);
+test('renderer and main share the 8 MiB server info ceiling', async () => {
+  assert.equal(MANAGEMENT_INFO_MAX_BYTES, 8 * 1024 * 1024);
+  assert.equal((await helper()).MANAGEMENT_INFO_MAX_BYTES, MANAGEMENT_INFO_MAX_BYTES);
+});
+for (const bytes of [MANAGEMENT_INFO_MAX_BYTES, MANAGEMENT_INFO_MAX_BYTES + 1]) test(`chunked info byte limit ${bytes}`, async t => {
+  const f = await fixture(t, { seeded: true }); let cancelled = false; const accepted = bytes === MANAGEMENT_INFO_MAX_BYTES;
+  const characters = (MANAGEMENT_INFO_MAX_BYTES - 2) / 2;
+  const body = Buffer.from('"' + 'é'.repeat(characters) + (accepted ? '' : 'x') + '"'); assert.equal(body.length, bytes);
+  global.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(body.subarray(0, 100)); controller.enqueue(body.subarray(100)); if (accepted) controller.close(); }, cancel() { cancelled = true; } }));
+  if (accepted) assert.equal((await f.readManagementJson(f.instance, '/api/server/info')).data.length, characters);
   else { await assert.rejects(f.readManagementJson(f.instance, '/api/server/info')); assert.equal(cancelled, true); }
   assert.equal(f.registrations(), 0);
 });
 test('malformed JSON and advertised oversized info fail without recovery', async t => {
   const f = await fixture(t, { seeded: true });
-  for (const response of [new Response('{broken'), new Response('{}', { headers: { 'Content-Length': '262145' } })]) {
+  for (const response of [new Response('{broken'), new Response('{}', { headers: { 'Content-Length': String(MANAGEMENT_INFO_MAX_BYTES + 1) } })]) {
     global.fetch = async () => response; await assert.rejects(f.readManagementJson(f.instance, '/api/server/info'));
   }
   assert.equal(f.registrations(), 0);

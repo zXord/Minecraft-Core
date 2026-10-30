@@ -1,8 +1,14 @@
 const path = require('node:path');
 const { randomUUID: uuid } = require('node:crypto');
 const { ModpackError } = require('./modpacks/errors.cjs');
-const { requestManagementJson } = require('./management-session-transport.cjs');
-const fail = (code = 'CLIENT_PACK_UNAVAILABLE') => new ModpackError(code, 'The management session is unavailable');
+const { requestManagementJson, MANAGEMENT_INFO_MAX_BYTES, HOST_UNREACHABLE_REASON } = require('./management-session-transport.cjs');
+const fail = (code = 'CLIENT_PACK_UNAVAILABLE', reason) => {
+  const error = new ModpackError(code, 'The management session is unavailable');
+  // Internal and non-enumerable: public payloads are rebuilt from the code alone.
+  if (reason) Object.defineProperty(error, 'reason', { value: reason });
+  return error;
+};
+const hostUnreachable = () => fail('CLIENT_PACK_UNAVAILABLE', HOST_UNREACHABLE_REASON);
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const text = value => typeof value === 'string' && value.trim() && !/[\u0000-\u001f\u007f]/u.test(value);
 const sizedObject = (body, maxBytes) => {
@@ -53,6 +59,10 @@ class ManagementSessionBroker {
     if (budget.signal.aborted) throw budget.signal.reason;
     if (this.disposed) throw fail('CANCELLED');
     if (this.clock() >= budget.deadline) throw fail();
+  }
+  // Only a deadline aborts with CLIENT_PACK_UNAVAILABLE; cancellation and staleness never count as expiry.
+  _expired(budget) {
+    return budget.signal.aborted && budget.signal.reason?.code === 'CLIENT_PACK_UNAVAILABLE';
   }
   async _wait(operation, budget) {
     this._check(budget);
@@ -114,7 +124,7 @@ class ManagementSessionBroker {
     return Object.freeze({ token: entry.token, baseOrigin: entry.authority.origin, binding: entry.binding,
       bindingGeneration: entry.binding.generation, revision: entry.revision });
   }
-  async _request(entry, method, body, token, budget) {
+  async _request(entry, method, body, token, budget, exchange = { stage: null }) {
     const attempt = this._budget(entry.clientId, { signal: budget.signal, deadline: budget.deadline }, this.timeoutMs);
     try {
       const url = new URL(method === 'GET' ? '/api/server/info' : '/api/client/register', entry.authority.origin);
@@ -127,25 +137,29 @@ class ManagementSessionBroker {
       await this._assert(entry, attempt);
       const result = await this._wait(() => this.requestJson(url, { method, body, agent, signal: attempt.signal,
         timeoutMs: Math.max(1, Math.min(this.timeoutMs, Math.ceil(attempt.deadline - this.clock()))),
-        maxBytes: method === 'GET' ? 262144 : 16384,
-        headers: method === 'GET' ? { 'X-Session-Token': token } : { 'Content-Type': 'application/json' } }), attempt);
+        maxBytes: method === 'GET' ? MANAGEMENT_INFO_MAX_BYTES : 16384,
+        headers: method === 'GET' ? { 'X-Session-Token': token } : { 'Content-Type': 'application/json' },
+        onProgress: stage => { exchange.stage = stage; } }), attempt);
       await this._assert(entry, attempt);
       if (!result || !Number.isInteger(result.statusCode)) throw fail();
       return result;
     } catch (error) {
-      if (budget.signal.aborted) throw budget.signal.reason;
+      // No HTTP status at all: a refusal, reset or DNS failure, or a deadline that expired while still connecting.
+      const unreachable = exchange.stage !== 'responded' && ((error instanceof ModpackError && error.reason === HOST_UNREACHABLE_REASON) ||
+        (exchange.stage === 'connecting' && (this._expired(attempt) || this._expired(budget))));
+      if (budget.signal.aborted) throw unreachable && this._expired(budget) ? hostUnreachable() : budget.signal.reason;
       if (error instanceof ModpackError && ['PLAN_STALE', 'CANCELLED'].includes(error.code)) throw error;
-      throw fail();
+      throw unreachable ? hostUnreachable() : fail();
     } finally { attempt.close(); }
   }
   _registration(entry) {
     if (entry.pending) return entry.pending.promise;
     const budget = this._budget(entry.clientId);
-    const pending = { budget, promise: null }; entry.pending = pending;
+    const pending = { budget, exchange: { stage: null }, promise: null }; entry.pending = pending;
     pending.promise = (async () => {
       const body = JSON.stringify({ clientId: entry.authority.remoteId, name: entry.authority.name, secret: entry.authority.invite });
       if (Buffer.byteLength(body) > 16384) throw fail();
-      const result = await this._request(entry, 'POST', body, undefined, budget);
+      const result = await this._request(entry, 'POST', body, undefined, budget, pending.exchange);
       if (result.statusCode !== 200 || !sizedObject(result.body, 16384) || result.body.success !== true ||
           typeof result.body.token !== 'string' || !/^[a-f0-9]{64}$/.test(result.body.token)) throw fail();
       await this._assert(entry, budget);
@@ -166,12 +180,16 @@ class ManagementSessionBroker {
     const entry = await this._binding(clientId, budget, options.expectedBinding);
     let registrationAttempted = false;
     const register = () => { registrationAttempted = true; return this._registration(entry); };
+    // A caller deadline that expires while the shared registration is still connecting reports what its exchange would.
+    const join = work => this._wait(work, budget).catch(error => {
+      throw entry.pending?.exchange.stage === 'connecting' && this._expired(budget) ? hostUnreachable() : error;
+    });
     if (reason !== 'reuse') {
       if (options.observedBindingGeneration !== entry.binding.generation) throw fail('PLAN_STALE');
       if (options.observedRevision > entry.revision) throw fail('INVALID_REQUEST');
-      if (options.observedRevision === entry.revision) await this._wait(() =>
-        options.observedRevision === entry.revision ? register() : undefined, budget);
-    } else if (!entry.token) await this._wait(() => entry.token ? undefined : register(), budget);
+      if (options.observedRevision === entry.revision) await join(() =>
+        options.observedRevision === entry.revision ? register() : undefined);
+    } else if (!entry.token) await join(() => entry.token ? undefined : register());
     await this._assert(entry, budget); return Object.freeze({ snapshot: this._snapshot(entry), registrationAttempted });
   }
   async _acquire(clientId, options, budget) {
@@ -215,7 +233,7 @@ class ManagementSessionBroker {
           observedBindingGeneration: session.bindingGeneration, observedRevision: session.revision }, budget);
         result = await this._request(entry, 'GET', undefined, session.token, budget);
       }
-      if (result.statusCode !== 200 || !sizedObject(result.body, 262144)) throw fail();
+      if (result.statusCode !== 200 || !sizedObject(result.body, MANAGEMENT_INFO_MAX_BYTES)) throw fail();
       await this._assert(entry, budget); return { response: result.body, binding: session.binding };
     } finally { budget.close(); }
   }

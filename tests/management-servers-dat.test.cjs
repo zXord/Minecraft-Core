@@ -8,6 +8,7 @@ const Module=require('node:module');
 const https=require('node:https');
 const {PassThrough}=require('node:stream');
 const {EventEmitter}=require('node:events');
+const {MANAGEMENT_INFO_MAX_BYTES}=require('../electron/services/management-session-transport.cjs');
 
 async function fixture(work,options={}){
   const root=await fsp.mkdtemp(path.join(os.tmpdir(),'mc-session-servers-'));
@@ -77,9 +78,9 @@ for(const mode of ['stall','delayedAssertion','delayedAgent'])test(`registered s
   assert.equal(result.success,false);assert.equal(fs.existsSync(f.clientPath),false);
   if(mode==='stall')assert.equal(f.destroyed(),true);else assert.equal(f.calls.length,0);
 },{[mode]:true}));
-for(const bytes of [262144,262145])test(`registered servers.dat actual chunked transport ${bytes} byte boundary`,()=>fixture(async f=>{
-  const result=await f.ensure(f.clientPath,'saved.test',8443,'Saved',null,false,'memory-current','https','a'.repeat(64),{agent:{prepared:true},assertCurrent:f.assertCurrent,deadline:Date.now()+1000});
-  assert.equal(result.success,bytes===262144);assert.equal(fs.existsSync(f.clientPath),bytes===262144);
+for(const bytes of [MANAGEMENT_INFO_MAX_BYTES,MANAGEMENT_INFO_MAX_BYTES+1])test(`registered servers.dat actual chunked transport ${bytes} byte boundary`,()=>fixture(async f=>{
+  const result=await f.ensure(f.clientPath,'saved.test',8443,'Saved',null,false,'memory-current','https','a'.repeat(64),{agent:{prepared:true},assertCurrent:f.assertCurrent,deadline:Date.now()+5000});
+  assert.equal(result.success,bytes===MANAGEMENT_INFO_MAX_BYTES);assert.equal(fs.existsSync(f.clientPath),bytes===MANAGEMENT_INFO_MAX_BYTES);
 },{bytes}));
 test('registered servers.dat post-body assertion shares the original attempt deadline',()=>fixture(async f=>{
   const deadline=Date.now()+20;

@@ -1,7 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const http = require('node:http');
+const https = require('node:https');
+const net = require('node:net');
 const path = require('node:path');
 const { ManagementSessionBroker } = require('../electron/services/management-session-broker.cjs');
+const { MANAGEMENT_INFO_MAX_BYTES } = require('../electron/services/management-session-transport.cjs');
 
 const SEED = 'a'.repeat(64), ROTATED = 'b'.repeat(64);
 const info = { minecraftPort: 25565, clientModpack: null };
@@ -91,7 +95,7 @@ test('safe info read recovers first 401 exactly once with GET POST GET', async t
   } });
   const result = await f.broker.readServerInfo('local'); assert.deepEqual(result.response, info);
   assert.deepEqual(calls.map(c => c.method), ['GET', 'POST', 'GET']);
-  assert.equal(calls[0].maxBytes, 262144); assert.equal(calls[1].maxBytes, 16384);
+  assert.equal(calls[0].maxBytes, MANAGEMENT_INFO_MAX_BYTES); assert.equal(calls[1].maxBytes, 16384);
   assert.equal(calls[2].headers['X-Session-Token'], ROTATED); assert.equal(f.writes(), 0);
 });
 test('main and renderer join one registration; cancelling one waiter preserves peer', async t => {
@@ -198,7 +202,8 @@ test('HTTPS dispatch uses normalized saved pin; pin edits stale the binding', as
 test('logical deadline includes slow pinned agent preparation', async t => {
   const f = fixture(t, { getPinnedHttpsAgent: () => new Promise(() => {}) });
   f.config.serverProtocol = 'https'; f.config.managementCertFingerprint = 'a'.repeat(64);
-  await assert.rejects(f.broker.readServerInfo('local', { deadline: Date.now() + 30 }), { code: 'CLIENT_PACK_UNAVAILABLE' }); assert.equal(f.calls.length, 0);
+  await assert.rejects(f.broker.readServerInfo('local', { deadline: Date.now() + 30 }), e => e.code === 'CLIENT_PACK_UNAVAILABLE' && e.reason === undefined);
+  assert.equal(f.calls.length, 0);
 });
 test('short shared waiter deadline detaches without cancelling registration peer', async t => {
   const entered = deferred(), release = deferred(); let sharedSignal;
@@ -273,9 +278,17 @@ for (const statusCode of [401, 403, 429, 500]) test(`registration refusal ${stat
   await assert.rejects(f.broker.readServerInfo('local'), { code: 'CLIENT_PACK_UNAVAILABLE' });
   assert.deepEqual(methods, ['GET', 'POST']); assert.equal(f.writes(), 0);
 });
-for (const body of ['private-invite', [], null, { padding: 'x'.repeat(262144) }]) test('invalid or excessive info object cannot trigger registration', async t => {
+for (const body of ['private-invite', [], null, { padding: 'x'.repeat(MANAGEMENT_INFO_MAX_BYTES) }]) test('invalid or excessive info object cannot trigger registration', async t => {
   let requests = 0; const f = fixture(t, { requestJson: async () => { requests++; return { statusCode: 200, body }; } });
-  await assert.rejects(f.broker.readServerInfo('local'), { code: 'CLIENT_PACK_UNAVAILABLE' }); assert.equal(requests, 1);
+  await assert.rejects(f.broker.readServerInfo('local'), e => e.code === 'CLIENT_PACK_UNAVAILABLE' && e.reason === undefined); assert.equal(requests, 1);
+});
+for (const extra of [0, 1]) test(`info object boundary at MANAGEMENT_INFO_MAX_BYTES${extra ? ' + 1' : ''}`, async t => {
+  const body = { padding: 'x'.repeat(MANAGEMENT_INFO_MAX_BYTES - '{"padding":""}'.length + extra) };
+  assert.equal(Buffer.byteLength(JSON.stringify(body)), MANAGEMENT_INFO_MAX_BYTES + extra);
+  let requests = 0; const f = fixture(t, { requestJson: async () => { requests++; return { statusCode: 200, body }; } });
+  if (extra) await assert.rejects(f.broker.readServerInfo('local'), { code: 'CLIENT_PACK_UNAVAILABLE' });
+  else assert.equal((await f.broker.readServerInfo('local')).response, body);
+  assert.equal(requests, 1);
 });
 test('network and pin failures never authorize registration or disclose dependency errors', async t => {
   let requests = 0; const f = fixture(t, { requestJson: async () => { requests++; throw new Error(SEED + 'private-invite'); },
@@ -373,4 +386,67 @@ test('simultaneous first acquisitions adopt the same accepted authority and regi
   const first = f.broker.acquire('local'); const second = f.broker.acquire('local'); await entered.promise; release.resolve();
   const [a, b] = await Promise.all([first, second]); assert.equal(a.binding, b.binding); assert.equal(a.token, ROTATED);
   assert.equal(b.token, ROTATED); assert.equal(a.revision, b.revision); assert.equal(posts, 1);
+});
+
+// Reachability: only an exchange that never received an HTTP status may carry the internal reason.
+const unreachable = e => e.code === 'CLIENT_PACK_UNAVAILABLE' && e.reason === 'host-unreachable' && !Object.keys(e).includes('reason') &&
+  !JSON.stringify(e).includes('host-unreachable') && !JSON.stringify(e.toPublicResult()).includes('host-unreachable');
+const reached = (code = 'CLIENT_PACK_UNAVAILABLE') => e => e.code === code && e.reason === undefined;
+const lookupFailure = code => (_hostname, _options, callback) => callback(Object.assign(new Error('synthetic lookup failure'), { code }));
+const pinnedAgent = lookup => async () => new https.Agent({ lookup });
+async function closedPort() {
+  const server = net.createServer(); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address(); await new Promise(resolve => server.close(resolve)); return port;
+}
+function pinnedHttps(f) { f.config.serverProtocol = 'https'; f.config.managementCertFingerprint = 'a'.repeat(64); return f; }
+test('refused connections report the internal host-unreachable reason for info reads and registrations', async t => {
+  const port = await closedPort();
+  for (const seeded of [true, false]) {
+    const f = fixture(t, { requestJson: undefined }); f.config.serverIp = '127.0.0.1'; f.config.serverPort = String(port);
+    if (!seeded) delete f.config.sessionToken;
+    await assert.rejects(f.broker.readServerInfo('local'), unreachable);
+  }
+});
+for (const code of ['ENOTFOUND', 'EAI_AGAIN']) test(`DNS failure ${code} reports the internal host-unreachable reason`, async t => {
+  const f = pinnedHttps(fixture(t, { requestJson: undefined, getPinnedHttpsAgent: pinnedAgent(lookupFailure(code)) }));
+  await assert.rejects(f.broker.readServerInfo('local'), unreachable);
+});
+for (const bound of ['attempt', 'caller']) test(`a connect timeout at the ${bound} deadline reports the internal host-unreachable reason`, async t => {
+  const f = pinnedHttps(fixture(t, { requestJson: undefined, getPinnedHttpsAgent: pinnedAgent(() => {}), ...(bound === 'attempt' ? { timeoutMs: 40 } : {}) }));
+  await assert.rejects(f.broker.readServerInfo('local', bound === 'caller' ? { deadline: Date.now() + 40 } : {}), unreachable);
+});
+test('a caller deadline while a joined registration is still connecting reports the internal host-unreachable reason', async t => {
+  const f = pinnedHttps(fixture(t, { requestJson: undefined, getPinnedHttpsAgent: pinnedAgent(() => {}), timeoutMs: 400 }));
+  delete f.config.sessionToken;
+  await assert.rejects(f.broker.readServerInfo('local', { deadline: Date.now() + 40 }), unreachable);
+});
+test('replies with any status and connected but silent hosts never report host-unreachable', async t => {
+  const reply = { status: 200, body: '{"clientModpack":null,"clientModpackError":{"code":"CLIENT_PACK_UNAVAILABLE"}}', delay: 0, silent: false };
+  const server = http.createServer((_req, res) => {
+    if (!reply.silent) setTimeout(() => { res.statusCode = reply.status; res.end(reply.body); }, reply.delay);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => { server.closeAllConnections(); server.close(); });
+  const f = fixture(t, { requestJson: undefined, timeoutMs: 400 }); f.config.serverIp = '127.0.0.1'; f.config.serverPort = String(server.address().port);
+  // A 200 whose body reports an error is still a reply; classifying it belongs to the pack reader.
+  assert.deepEqual((await f.broker.readServerInfo('local')).response, { clientModpack: null, clientModpackError: { code: 'CLIENT_PACK_UNAVAILABLE' } });
+  reply.body = 'private-invite'; await assert.rejects(f.broker.readServerInfo('local'), reached());
+  Object.assign(reply, { status: 500, body: '{}' }); await assert.rejects(f.broker.readServerInfo('local'), reached());
+  Object.assign(reply, { status: 200, body: '{"clientModpack":null}', delay: 100 });
+  assert.deepEqual((await f.broker.readServerInfo('local')).response, { clientModpack: null });
+  reply.silent = true;
+  await assert.rejects(f.broker.readServerInfo('local'), reached());
+  await assert.rejects(f.broker.readServerInfo('local', { deadline: Date.now() + 300 }), reached());
+});
+for (const action of ['abort', 'invalidate']) test(`${action} while connecting never reports host-unreachable`, async t => {
+  let connecting; const started = new Promise(resolve => { connecting = resolve; });
+  const f = pinnedHttps(fixture(t, { requestJson: undefined, getPinnedHttpsAgent: pinnedAgent(() => connecting()) }));
+  const controller = new AbortController(); const pending = f.broker.readServerInfo('local', { signal: controller.signal });
+  await started; if (action === 'abort') controller.abort(); else f.broker.invalidate('local');
+  await assert.rejects(pending, reached(action === 'abort' ? 'CANCELLED' : 'PLAN_STALE'));
+});
+test('a deadline is classified only from the progress the transport reported', async t => {
+  for (const [stages, expected] of [[[], reached()], [['connecting'], unreachable], [['connecting', 'connected'], reached()]]) {
+    const f = fixture(t, { timeoutMs: 30, requestJson: async (_url, options) => { for (const stage of stages) options.onProgress(stage); return new Promise(() => {}); } });
+    await assert.rejects(f.broker.readServerInfo('local'), expected);
+  }
 });

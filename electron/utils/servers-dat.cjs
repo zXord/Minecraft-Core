@@ -4,7 +4,7 @@ const { fetch } = require('./fetch.cjs');
 const nbt = require('prismarine-nbt');
 const zlib = require('zlib');
 const { getManagementHttpsAgent, getPinnedHttpsAgent } = require('./tls-utils.cjs');
-const { requestManagementJson } = require('../services/management-session-transport.cjs');
+const { requestManagementJson, MANAGEMENT_INFO_MAX_BYTES } = require('../services/management-session-transport.cjs');
 
 async function withinDeadline(work, deadline, signal) {
   let timer, abort;
@@ -84,7 +84,7 @@ async function ensureServersDat(
       if (preparedManagement) {
         const result = await withinDeadline(() => requestManagementJson(`${protocol}://${serverIp}:${managementPort}/api/server/info`, {
           method: 'GET', agent, headers: { 'X-Session-Token': sessionToken }, signal: controller.signal,
-          timeoutMs: Math.max(1, Math.min(10000, Math.ceil(attemptDeadline - Date.now()))), maxBytes: 262144
+          timeoutMs: Math.max(1, Math.min(10000, Math.ceil(attemptDeadline - Date.now()))), maxBytes: MANAGEMENT_INFO_MAX_BYTES
         }), attemptDeadline, controller.signal);
         if (result.statusCode !== 200) throw new Error('Registered management read is unavailable');
         info = result.body;

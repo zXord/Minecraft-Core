@@ -18,6 +18,9 @@
 
 const TOKEN_HEADER = 'X-Session-Token';
 
+/** Server info lists every client mod twice; mirrors electron/services/management-session-transport.cjs. */
+export const MANAGEMENT_INFO_MAX_BYTES = 8 * 1024 * 1024;
+
 function normalizeProtocol(value) {
   if (!value || typeof value !== 'string') return 'https';
   const normalized = value.trim().toLowerCase();
@@ -194,7 +197,7 @@ export async function readManagementJson(instance, path, options = {}) {
   return requestWithSessionRecovery(instance, async (headers, session, { signal }) => {
     const response = await fetch(`${session.baseOrigin}${path}`, { method: 'GET', headers, redirect: 'error', signal });
     if (!response.ok) { await response.body?.cancel(); checkAttemptSignal(signal); return { ok: false, status: response.status, data: null }; }
-    const maxBytes = path.split('?')[0] === '/api/server/info' ? 262144 : Infinity;
+    const maxBytes = path.split('?')[0] === '/api/server/info' ? MANAGEMENT_INFO_MAX_BYTES : Infinity;
     const reader = response.body?.getReader();
     if (!reader) throw unavailable();
     const cancel = () => { void reader.cancel().catch(() => {}); };
