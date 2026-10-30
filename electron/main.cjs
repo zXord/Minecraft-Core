@@ -54,12 +54,14 @@ const {
   applyWindowsTaskbarDetails,
   createStartupWindow,
   createWindowReadyTracker,
-  startApplicationAfterReady
+  resolveInitialWindowVisibility,
+  startApplicationAfterReady,
+  waitForStartupWindowDocument
 } = require('./utils/startup-window.cjs');
 markStartupTrace('main:import:startup-window:complete');
-const { claimEarlyStartupWindow } = require('./startup-entry.cjs');
+const { claimEarlyStartupWindow, isNonInteractiveStartup } = require('./startup-entry.cjs');
 markStartupTrace('main:import:startup-entry:complete');
-const { getUpdateService } = require('./services/update-service.cjs');
+const { getUpdateService, setInstallActivityProbe } = require('./services/update-service.cjs');
 markStartupTrace('main:import:update-service:complete');
 const { installServerMutationCoordinator } = require('./services/server-mutation-context.cjs');
 markStartupTrace('main:import:server-mutation-context:complete');
@@ -141,6 +143,46 @@ function logStartupError(message, error) {
     }
   } catch {
     // ignore logger failures while reporting startup failures
+  }
+}
+
+// Logs through the app logger, or the console when the logger could not start,
+// so no startup problem goes unrecorded.
+function logWithFallback(level, message, options = {}) {
+  try {
+    if (logger && typeof logger[level] === 'function') {
+      logger[level](message, options);
+      return;
+    }
+  } catch {
+    // Fall back to the console below.
+  }
+  try {
+    (level === 'error' ? console.error : console.warn)(`[Minecraft Core] ${message}`);
+  } catch {
+    // Nothing else can report it.
+  }
+}
+
+const processLogger = Object.freeze({
+  error: (message, options) => logWithFallback('error', message, options),
+  warn: (message, options) => logWithFallback('warn', message, options)
+});
+
+// Only the installed copy shows Windows toasts: Electron's toast activator
+// re-points the Start Menu shortcut and the toast COM registration at whichever
+// exe shows one first. QA and development copies keep in-app notifications.
+function configureNativeToasts() {
+  try {
+    const { configureNativeToastPolicy } = require('./utils/native-toast-policy.cjs');
+    const { getInstallIdentity } = require('./utils/install-identity.cjs');
+    return configureNativeToastPolicy(getInstallIdentity());
+  } catch (error) {
+    logWithFallback('warn', 'Windows notifications stay off: this copy of Minecraft Core could not be identified', {
+      category: 'core',
+      data: { errorMessage: describeStartupError(error).errorMessage }
+    });
+    return false;
   }
 }
 
@@ -773,7 +815,7 @@ function createTray() {
             data: { hasWindow: !!win }
           });
         }
-        if (win) {
+        if (win && !fatalStartupFailure) {
           win.show();
           win.focus();
         }
@@ -830,7 +872,7 @@ function createTray() {
         }
       });
     }
-    if (win) {
+    if (win && !fatalStartupFailure) {
       if (win.isVisible()) {
         win.hide();
       } else {
@@ -1052,32 +1094,48 @@ function createWindow() {
   // Show window after load unless starting minimized
   win.once('ready-to-show', () => {
     markStartupTiming('main-window:ready-to-show', { windowId: win.id });
-    const shouldShow = !shouldStartMinimized || !appSettings.startMinimized || !tray;
-    
+    // A main window whose startup failed for good stays hidden behind the report.
+    if (fatalStartupFailure) {
+      if (logger) {
+        logger.info('Main window kept hidden after a startup failure', { category: 'core' });
+      }
+      return;
+    }
+    // A degraded start shows its warning banner, without stealing focus at login.
+    const visibility = resolveInitialWindowVisibility({
+      startMinimizedArg: shouldStartMinimized,
+      startMinimizedSetting: appSettings.startMinimized,
+      hasTray: Boolean(tray),
+      degraded: readStartupHealth()?.status === 'degraded'
+    });
+
     if (logger) {
       logger.debug('Window ready to show', {
         category: 'core',
         data: {
-          shouldShow,
+          visibility,
           shouldStartMinimized,
           startMinimizedSetting: appSettings.startMinimized,
           hasTray: !!tray
         }
       });
     }
-    
-    if (shouldShow) {
-      win.show();
+
+    if (visibility === 'hidden') {
       if (logger) {
-        logger.info('Main window shown to user', {
+        logger.info('Main window kept hidden (start minimized)', {
           category: 'core',
-          data: { trigger: 'ready-to-show' }
+          data: { startMinimized: true }
         });
       }
-    } else if (logger) {
-      logger.info('Main window kept hidden (start minimized)', {
+      return;
+    }
+    if (visibility === 'show-inactive') win.showInactive();
+    else win.show();
+    if (logger) {
+      logger.info('Main window shown to user', {
         category: 'core',
-        data: { startMinimized: true }
+        data: { trigger: 'ready-to-show', visibility }
       });
     }
   });
@@ -1105,6 +1163,7 @@ function createWindow() {
     markStartupTrace('main:ipc:listeners:complete');
     const { setupIpcHandlers } = require('./ipc-handlers.cjs');
     markStartupTrace('main:ipc:handler-module:complete');
+    configureBrowserPanelPolicy();
     setupIpcHandlers(win, serviceGraph);
     markStartupTrace('main:ipc:complete');
     handlersInitialized = true;
@@ -1295,6 +1354,104 @@ let orderlyQuitBarrier = null;
 let appWatchdogSupervisor = null;
 let browserPanelInstance = null;
 let updateServiceInstance = null;
+let browserPanelPolicyConfigured = false;
+// Set once startup has failed for good: the half-started main window is never
+// shown again behind the fatal report.
+let fatalStartupFailure = false;
+
+function readStartupHealth() {
+  try {
+    return serviceGraph?.startup?.getHealth?.() || null;
+  } catch {
+    return null;
+  }
+}
+
+// Browser panel writers use the app's shared server mutation policy (with its
+// modpack-state and matching-client checks), exactly like desktop IPC. It is
+// configured before anything creates the panel.
+function configureBrowserPanelPolicy() {
+  if (browserPanelPolicyConfigured) return;
+  const { configureBrowserPanelMutationPolicy } = require('./services/browser-panel-server.cjs');
+  configureBrowserPanelMutationPolicy(serviceGraph.serverMutationPolicy);
+  browserPanelPolicyConfigured = true;
+}
+
+function createSplashWindow() {
+  return createStartupWindow({
+    BrowserWindow,
+    iconPath: resolveApplicationIconPath() || undefined,
+    isPackaged: Boolean(app.isPackaged),
+    executablePath: process.execPath,
+    applicationPath: resolveApplicationPath()
+  });
+}
+
+function usableWindow(window) {
+  try {
+    return window && !window.isDestroyed?.() ? window : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveLogDirectory() {
+  try {
+    const userData = app.getPath('userData');
+    return typeof userData === 'string' && userData ? path.join(userData, 'logs') : null;
+  } catch {
+    return null;
+  }
+}
+
+// No usable app came up. A test, smoke or E2E harness start only logs the
+// failure and fails its exit code. Anyone else gets the fatal report (Check
+// for updates, download page, log folder, Quit) over a visible window: the
+// splash, or a new one after a login start that showed none, so an update
+// download is never an invisible process and closing that window quits. The
+// half-started main window, whose IPC is live, is destroyed first.
+async function reportFatalStartupFailure(error, { splash = null, mainWindow = null } = {}) {
+  fatalStartupFailure = true;
+  const interactive = !isNonInteractiveStartup();
+  let reportWindow = usableWindow(splash);
+  if (interactive && !reportWindow) {
+    try {
+      reportWindow = createSplashWindow();
+      await waitForStartupWindowDocument(reportWindow);
+    } catch {
+      // A window whose page did not load is still shown: the report renders into it.
+      try {
+        reportWindow?.show?.();
+      } catch {
+        // The dialog still shows on its own.
+      }
+    }
+  }
+  for (const failedWindow of new Set([usableWindow(mainWindow), usableWindow(win)].filter(Boolean))) {
+    try {
+      // Without any other window a hidden main window keeps the dialog's process alive.
+      if (reportWindow || !interactive) failedWindow.destroy();
+      else failedWindow.hide();
+    } catch {
+      // The report still runs.
+    }
+  }
+  const { createFatalStartupReporter } = require('./utils/startup-failure-reporter.cjs');
+  const reporter = createFatalStartupReporter({
+    dialog,
+    shell,
+    app,
+    getUpdateService,
+    logDirectory: resolveLogDirectory(),
+    interactive,
+    userDataPath: serviceGraph?.paths?.userData || null,
+    workerPath: serviceGraph?.paths?.archiveWorker || null,
+    logger: {
+      error: (message, details) => logWithFallback('error', message, { category: 'core', data: { ...details, forceLog: true } })
+    }
+  });
+  return reporter.report(error, { splash: reportWindow, mainWindow: null });
+}
 
 function waitForMainWindowReady(mainWindow) {
   try {
@@ -1330,10 +1487,23 @@ function waitForWindowNavigationReady(mainWindow) {
   });
 }
 
+// The splash is cosmetic: failing to close it never fails a started app.
 function closeEarlyStartupWindow(startupWindow) {
   markStartupTiming('startup-window:close');
-  if (!startupWindow || startupWindow.isDestroyed?.()) return;
-  startupWindow.close?.();
+  try {
+    if (!startupWindow || startupWindow.isDestroyed?.()) return;
+    startupWindow.close?.();
+  } catch (error) {
+    try {
+      startupWindow.destroy?.();
+    } catch {
+      // Logged below.
+    }
+    logWithFallback('warn', 'The startup window could not be closed', {
+      category: 'core',
+      data: { errorMessage: describeStartupError(error).errorMessage }
+    });
+  }
 }
 
 function handleWindowAllClosed() {
@@ -1373,7 +1543,8 @@ function startAppWatchdogMonitoring() {
   const { createAppWatchdogSupervisor } = require('./watchdog/app-watchdog-supervisor.cjs');
   if (!appWatchdogSupervisor) {
     appWatchdogSupervisor = createAppWatchdogSupervisor({
-      eventBus
+      eventBus,
+      warn: message => logWithFallback('warn', message, { category: 'core', data: { service: 'app-watchdog' } })
     });
   }
   return appWatchdogSupervisor.start();
@@ -1389,6 +1560,7 @@ async function startConfiguredPublicManagementListeners() {
   const browserPanel = settings.browserPanel || {};
   if (!browserPanel.enabled || !browserPanel.autoStart) return { success: true, skipped: true };
   try {
+    configureBrowserPanelPolicy();
     const { getBrowserPanel } = require('./services/browser-panel-server.cjs');
     browserPanelInstance = getBrowserPanel();
     const port = browserPanel.port || 8081;
@@ -1480,6 +1652,7 @@ const userDataPath = resolveServiceGraphUserData({ runtimeFlags, app, runtimeRoo
 const modpackFactory = loadTestModpackFactory({ isPackaged: Boolean(app.isPackaged) });
 const recoveryFactory = loadTestRecoveryFactory({ isPackaged: Boolean(app.isPackaged) });
 const testIpcOverrides = loadTestIpcOverrides({ isPackaged: Boolean(app.isPackaged) });
+const nativeToastsAllowed = configureNativeToasts();
 
 markStartupTrace('main:graph:start');
 serviceGraph = createModpackServiceGraph({
@@ -1487,8 +1660,9 @@ serviceGraph = createModpackServiceGraph({
   store: appStore,
   userDataPath,
   dialog,
-  Notification,
+  Notification: nativeToastsAllowed ? Notification : null,
   shell,
+  logger: processLogger,
   runtimeRoots: {
     resourcesPath: app.isPackaged && typeof process.resourcesPath === 'string' ? process.resourcesPath : runtimeRoot,
     runtimeRoot,
@@ -1526,6 +1700,8 @@ serviceGraph = createModpackServiceGraph({
 });
 markStartupTrace('main:graph:complete');
 installServerMutationCoordinator(serviceGraph.coordinator);
+// No app update installs while modpack or exclusive server work is in flight.
+setInstallActivityProbe(() => serviceGraph.startup.listActiveWork());
 
 mainBootstrap = createMainBootstrap({
   electronApi: { app, BrowserWindow, Menu, Tray, ipcMain, shell, session },
@@ -1544,28 +1720,39 @@ markStartupTrace('main:before-ready:complete');
 app.whenReady().then(() => {
   markStartupTiming('app:when-ready');
   packagedSmokeGuard?.installSessionBlock(session);
-  if (runtimeFlags.testMode) return mainBootstrap.onReady();
+  if (runtimeFlags.testMode) {
+    return mainBootstrap.onReady().catch(async error => {
+      try {
+        await reportFatalStartupFailure(error, { mainWindow: win });
+      } catch {
+        // The startup failure stays primary.
+      }
+      throw error;
+    });
+  }
   const earlyStartupWindow = claimEarlyStartupWindow();
   return startApplicationAfterReady({
     createStartupWindow() {
-      const startupWindow = earlyStartupWindow && !earlyStartupWindow.isDestroyed?.()
-        ? earlyStartupWindow
-        : createStartupWindow({
-          BrowserWindow,
-          iconPath: resolveApplicationIconPath() || undefined,
-          isPackaged: Boolean(app.isPackaged),
-          executablePath: process.execPath,
-          applicationPath: resolveApplicationPath()
-        });
-      markStartupTiming('startup-window:create:complete', { windowId: startupWindow.id, early: startupWindow === earlyStartupWindow });
+      if (earlyStartupWindow && !earlyStartupWindow.isDestroyed?.()) {
+        markStartupTiming('startup-window:create:complete', { windowId: earlyStartupWindow.id, early: true });
+        return earlyStartupWindow;
+      }
+      // A login start (--start-minimized) shows no splash.
+      if (shouldStartMinimized) return null;
+      const startupWindow = createSplashWindow();
+      markStartupTiming('startup-window:create:complete', { windowId: startupWindow.id, early: false });
       return startupWindow;
     },
     runMainStartup: () => mainBootstrap.onReady(),
     waitForMainWindowReady,
-    closeStartupWindow: closeEarlyStartupWindow
+    closeStartupWindow: closeEarlyStartupWindow,
+    onStartupFailure: reportFatalStartupFailure,
+    getMainWindow: () => win
   });
 }).catch((error) => {
   logStartupError('Application startup failed before main window could load', error);
+  // A failed startup never leaves a half-started process running.
+  app.quit();
 });
 
 // Export the window instance so other modules can access it

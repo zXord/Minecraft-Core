@@ -694,29 +694,69 @@ const mainImportCheckpoints = [
   ['../config/dev-config.cjs', 'main:import:dev-config:complete']
 ];
 
-async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false, brokenSink = false, ipcError = null, listenerError = null, ipcModuleError = null, loggerNull = false } = {}) {
+async function mainEntryFixture(inspect = async () => {}, {
+  traceEnabled = false, brokenSink = false, ipcError = null, listenerError = null, ipcModuleError = null, loggerNull = false,
+  ready = false, onReady = null, testMode = false, argv = null, env = {}, storeValues = {}, health = null, splashCloseError = null,
+  installIdentity = { installed: false, isPackaged: false, reason: 'unpackaged' }
+} = {}) {
   const mainPath = path.resolve(__dirname, '../electron/main.cjs');
   const originalLoad = Module._load;
+  const originalArgv = process.argv;
+  const originalEnv = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
   const calls = [];
   const boundaries = [];
   const traceLines = [];
   const importEvents = [];
+  const logs = [];
+  const probes = [];
+  const toastConfigurations = [];
+  const panelPolicies = [];
+  const supervisorOptions = [];
+  const reporterOptions = [];
+  const reports = [];
+  const splashes = [];
   let capturedGraphDependencies;
   let publishedWindow;
   let finishNavigation;
   const navigation = new Promise(resolve => { finishNavigation = resolve; });
   class FakeBrowserWindow extends EventEmitter {
-    constructor() {
+    constructor(options = {}) {
       super();
-      this.id = 101;
       this.webContents = new EventEmitter();
-      publishedWindow = this;
-      boundaries.push('browser-window:work');
+      this.destroyed = false;
+      if (options.webPreferences?.preload) {
+        this.id = 101;
+        publishedWindow = this;
+        boundaries.push('browser-window:work');
+      } else {
+        this.id = 200 + splashes.length;
+        splashes.push(this);
+        boundaries.push('splash:create');
+      }
     }
-    isDestroyed() { return false; }
-    show() { boundaries.push('window:show'); }
+    get label() { return this.id === 101 ? 'window' : 'splash'; }
+    isDestroyed() { return this.destroyed; }
+    loadURL() { return Promise.resolve(); }
+    show() { boundaries.push(`${this.label}:show`); }
+    showInactive() { boundaries.push(`${this.label}:show-inactive`); }
+    hide() { boundaries.push(`${this.label}:hide`); }
+    close() {
+      if (this.label === 'splash' && splashCloseError) throw splashCloseError;
+      boundaries.push(`${this.label}:close`);
+    }
+    destroy() {
+      this.destroyed = true;
+      boundaries.push(`${this.label}:destroy`);
+    }
     static fromWebContents() { return null; }
     static getAllWindows() { return []; }
+  }
+  class FakeNotification {}
+  function FakeTray() {
+    this.setToolTip = () => {};
+    this.setContextMenu = () => {};
+    this.on = () => {};
+    this.destroy = () => {};
   }
   const appHandlers = new Map();
   const pendingReady = new Promise(() => {});
@@ -726,32 +766,46 @@ async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false
     isPackaged: false,
     getVersion: () => 'test',
     getPath: () => path.join(os.tmpdir(), 'minecraft-core-main-entry'),
+    isReady: () => true,
     on(name, handler) { appHandlers.set(name, handler); },
     quit() { calls.push('app:quit'); },
     setName: () => {},
     setAppUserModelId: () => {},
     setPath: () => {},
-    whenReady() { calls.push('app:when-ready'); return pendingReady; }
+    whenReady() { calls.push('app:when-ready'); return ready ? Promise.resolve() : pendingReady; }
   };
   const electron = {
     app,
     BrowserWindow: FakeBrowserWindow,
-    Menu: { setApplicationMenu: () => {} },
-    Tray: function FakeTray() {},
+    Notification: FakeNotification,
+    Menu: { setApplicationMenu: () => {}, buildFromTemplate: template => ({ template }) },
+    Tray: FakeTray,
+    nativeImage: { createFromPath: () => ({ isEmpty: () => true }), createFromBuffer: () => ({ isEmpty: () => false }) },
+    dialog: { showMessageBox: async () => ({ response: 3 }), showErrorBox: () => {} },
     ipcMain: { handle: () => {}, removeHandler: () => {} },
     session: { defaultSession: { setCertificateVerifyProc: () => {} } },
     shell: { openExternal: async () => {}, openPath: async () => '' }
   };
-  const store = { get: () => null, set: () => {} };
-  const runtimeFlags = { testMode: false };
-  const graph = { id: 'graph', installSecurity: null };
+  const store = { get: key => (Object.hasOwn(storeValues, key) ? storeValues[key] : null), set: () => {} };
+  const runtimeFlags = testMode ? { testMode, isolatedUserDataPath: path.join(os.tmpdir(), 'minecraft-core-main-entry-test') } : { testMode };
+  const graph = {
+    id: 'graph',
+    installSecurity: null,
+    serverMutationPolicy: Object.freeze({ marker: 'shared-server-mutation-policy' }),
+    startup: { listActiveWork: () => ['job-in-flight'], getHealth: () => health },
+    paths: { userData: path.join(os.tmpdir(), 'minecraft-core-graph-user-data'), archiveWorker: path.join(os.tmpdir(), 'ArchiveWorker.exe') }
+  };
+  const eventBus = { marker: 'event-bus' };
   const bootstrap = {
     initializeBeforeReady() {
       calls.push('bootstrap:initialize');
       boundaries.push('before-ready:work');
       graph.installSecurity();
     },
-    onReady() { calls.push('bootstrap:ready'); },
+    onReady() {
+      calls.push('bootstrap:ready');
+      return onReady ? onReady({ dependencies: capturedGraphDependencies, getWindow: () => publishedWindow }) : undefined;
+    },
     dispose() { calls.push('bootstrap:dispose'); return disposal; }
   };
 
@@ -802,15 +856,40 @@ async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false
     if (request === './utils/runtime-paths.cjs') return { cleanupRuntimeFiles: () => {} };
     if (request === './utils/tls-utils.cjs') return { getTlsFingerprint: () => null, normalizeFingerprint: value => value };
     if (request === './utils/runtime-mode.cjs') return { shouldUseDevServer: () => false };
-    if (request === './services/update-service.cjs') return { getUpdateService: () => ({ startPeriodicChecks: () => {} }) };
+    if (request === './services/update-service.cjs') return {
+      getUpdateService: () => ({ startPeriodicChecks: () => {} }),
+      setInstallActivityProbe(probe) { probes.push(probe); }
+    };
+    if (request === './utils/install-identity.cjs') return { getInstallIdentity: () => installIdentity };
+    if (request === './utils/native-toast-policy.cjs') return {
+      configureNativeToastPolicy(identity) { toastConfigurations.push(identity); return identity.installed === true; }
+    };
+    if (request === './services/browser-panel-server.cjs') return {
+      configureBrowserPanelMutationPolicy(policy) { boundaries.push('browser-panel:policy'); panelPolicies.push(policy); }
+    };
+    if (request === './utils/event-bus.cjs') return eventBus;
+    if (request === './watchdog/app-watchdog-supervisor.cjs') return {
+      createAppWatchdogSupervisor(options) { supervisorOptions.push(options); return { start: () => true, dispose() {} }; }
+    };
+    if (request === './utils/startup-failure-reporter.cjs') return {
+      createFatalStartupReporter(options) {
+        reporterOptions.push(options);
+        return { async report(error, context) { boundaries.push('fatal:report'); reports.push({ error, context }); return 'quit'; } };
+      }
+    };
     if (request === './services/server-mutation-coordinator.cjs') return { ServerMutationCoordinator: class {} };
     if (request === './services/server-mutation-context.cjs') return { installServerMutationCoordinator: () => {} };
     if (request === './services/logger-service.cjs') return { getLogger() {
       if (loggerNull) throw new Error('PRIVATE_LOGGER_FAILURE');
-      return { info: () => {}, fatal: () => {}, debug: () => {}, warn: () => {} };
+      return {
+        info: () => {}, fatal: () => {}, debug: () => {},
+        warn: (message, options) => logs.push(['warn', message, options]),
+        error: (message, options) => logs.push(['error', message, options])
+      };
     } };
     if (request === '../config/dev-config.cjs') { boundaries.push('imports:last'); return { enableDevConsole: false, enableDevServer: false }; }
     if (request === './bootstrap/runtime-flags.cjs') return {
+      ...originalLoad(request, parent, isMain),
       createRuntimeFlags() { calls.push('flags:create'); return runtimeFlags; }
     };
     if (request === './bootstrap/create-modpack-service-graph.cjs') {
@@ -848,6 +927,11 @@ async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false
     }
     return result;
   };
+  if (argv) process.argv = argv;
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   delete require.cache[mainPath];
   try {
     require(mainPath);
@@ -861,16 +945,18 @@ async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false
       'app:when-ready'
     ]);
     await inspect({ boundaries, traceLines, importEvents, dependencies: capturedGraphDependencies,
-      getWindow: () => publishedWindow, finishNavigation });
+      getWindow: () => publishedWindow, finishNavigation, calls, logs, probes, toastConfigurations, panelPolicies,
+      supervisorOptions, reporterOptions, reports, splashes, graph, eventBus, FakeNotification });
+    const quitsBefore = calls.filter(value => value === 'app:quit').length;
     const firstQuit = { prevented: 0, preventDefault() { this.prevented += 1; } };
     appHandlers.get('before-quit')(firstQuit);
     assert.equal(firstQuit.prevented, 1);
     assert.equal(calls.filter(value => value === 'bootstrap:dispose').length, 1);
-    assert.equal(calls.includes('app:quit'), false);
+    assert.equal(calls.filter(value => value === 'app:quit').length, quitsBefore);
 
     finishDisposal();
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(calls.filter(value => value === 'app:quit').length, 1);
+    assert.equal(calls.filter(value => value === 'app:quit').length, quitsBefore + 1);
 
     const reentry = { prevented: 0, preventDefault() { this.prevented += 1; } };
     appHandlers.get('before-quit')(reentry);
@@ -879,7 +965,19 @@ async function mainEntryFixture(inspect = async () => {}, { traceEnabled = false
   } finally {
     delete require.cache[mainPath];
     Module._load = originalLoad;
+    process.argv = originalArgv;
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
+}
+
+async function settleStartup(predicate) {
+  for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(predicate(), true, 'startup settled');
 }
 
 test('production main entry delegates lifecycle ownership and holds quit until bootstrap disposal settles', async () => {
@@ -919,7 +1017,7 @@ test('startup trace real window IPC boundary precedes listeners import setup and
     assert.deepEqual(boundaries, [
       'main-window:browser-window:create:start', 'browser-window:work', 'main-window:browser-window:create:complete',
       'main:ipc:start', 'listeners:initialize', 'main:ipc:listeners:complete',
-      'ipc-module:load', 'main:ipc:handler-module:complete', 'ipc:setup', 'main:ipc:complete',
+      'ipc-module:load', 'main:ipc:handler-module:complete', 'browser-panel:policy', 'ipc:setup', 'main:ipc:complete',
       'main-window:navigation:start', 'navigation:work'
     ]);
     getWindow().emit('ready-to-show');
@@ -940,7 +1038,7 @@ test('startup trace real main preserves each IPC stage failure identity without 
     ['listenerError', ['main:ipc:start', 'listeners:initialize']],
     ['ipcModuleError', ['main:ipc:start', 'listeners:initialize', 'main:ipc:listeners:complete', 'ipc-module:load']],
     ['ipcError', ['main:ipc:start', 'listeners:initialize', 'main:ipc:listeners:complete',
-      'ipc-module:load', 'main:ipc:handler-module:complete', 'ipc:setup']]
+      'ipc-module:load', 'main:ipc:handler-module:complete', 'browser-panel:policy', 'ipc:setup']]
   ]) {
     await mainEntryFixture(async ({ boundaries, dependencies, traceLines }) => {
       boundaries.length = 0;
@@ -958,10 +1056,168 @@ test('startup trace disabled and broken sink leave actual main graph bootstrap a
     await mainEntryFixture(async ({ traceLines, dependencies, boundaries, finishNavigation }) => {
       dependencies.startup.markTiming('recovery:start', { private: 'PRIVATE_DETAILS' });
       dependencies.windowFactory();
-      assert.deepEqual(boundaries, ['imports:last', 'graph:work', 'before-ready:work', 'browser-window:work', 'listeners:initialize', 'ipc-module:load', 'ipc:setup', 'navigation:work']);
+      assert.deepEqual(boundaries, ['imports:last', 'graph:work', 'before-ready:work', 'browser-window:work', 'listeners:initialize', 'ipc-module:load', 'browser-panel:policy', 'ipc:setup', 'navigation:work']);
       finishNavigation({ status: 'ready', mode: 'production' });
       await new Promise(resolve => setImmediate(resolve));
       assert.deepEqual(traceLines, []);
     }, { traceEnabled, brokenSink: true, loggerNull: true });
+  }
+});
+
+const INTERACTIVE_ENV = Object.freeze({
+  NODE_ENV: undefined,
+  MINECRAFT_CORE_TEST_MODE: undefined,
+  MINECRAFT_CORE_REAL_E2E_DISABLE_NATIVE_NOTIFICATIONS: undefined
+});
+
+test('real main passes OS notifications to the graph only for the installed copy', async () => {
+  for (const installed of [false, true]) {
+    const identity = { installed, isPackaged: installed, reason: installed ? 'uninstaller-present' : 'not-installed-copy' };
+    await mainEntryFixture(async ({ dependencies, toastConfigurations, FakeNotification }) => {
+      assert.deepEqual(toastConfigurations, [identity]);
+      assert.equal(dependencies.Notification, installed ? FakeNotification : null);
+    }, { installIdentity: identity });
+  }
+});
+
+test('real main wires the update activity probe, the graph logger and the watchdog warning to the app', async () => {
+  await mainEntryFixture(async ({ dependencies, probes, logs, supervisorOptions, eventBus }) => {
+    assert.equal(probes.length, 1);
+    assert.deepEqual(probes[0](), ['job-in-flight'], 'the A9 install guard asks the graph for work in flight');
+
+    dependencies.logger.error('Startup entered degraded mode', { category: 'core', data: { reason: 'unexpected' } });
+    dependencies.logger.warn('A startup step failed', { category: 'core', data: { stage: 'cleanup' } });
+    assert.deepEqual(logs.map(([level, message]) => [level, message]),
+      [['error', 'Startup entered degraded mode'], ['warn', 'A startup step failed']]);
+
+    assert.equal(dependencies.watchdog.start(), true);
+    assert.equal(supervisorOptions.length, 1);
+    assert.equal(supervisorOptions[0].eventBus, eventBus);
+    supervisorOptions[0].warn('App watchdog for server-1/42 is still waiting for its ACK: Watchdog ACK deadline exceeded');
+    assert.deepEqual(logs.at(-1), ['warn', 'App watchdog for server-1/42 is still waiting for its ACK: Watchdog ACK deadline exceeded',
+      { category: 'core', data: { service: 'app-watchdog' } }]);
+  });
+});
+
+test('real main gives the browser panel the shared server mutation policy before IPC setup (N5)', async () => {
+  await mainEntryFixture(async ({ boundaries, dependencies, graph, panelPolicies }) => {
+    boundaries.length = 0;
+    dependencies.windowFactory();
+    assert.deepEqual(panelPolicies, [graph.serverMutationPolicy]);
+    assert.ok(boundaries.indexOf('browser-panel:policy') < boundaries.indexOf('ipc:setup'));
+    assert.ok(boundaries.indexOf('browser-panel:policy') > boundaries.indexOf('ipc-module:load'));
+  });
+});
+
+test('a fatal startup destroys the half-started main window, reports over the splash and quits', async () => {
+  const failure = new Error('after-window setup failed');
+  await mainEntryFixture(async ({ boundaries, calls, getWindow, reporterOptions, reports, splashes }) => {
+    await settleStartup(() => calls.includes('app:quit'));
+    assert.equal(splashes.length, 1);
+    assert.equal(reporterOptions.length, 1);
+    assert.equal(reporterOptions[0].interactive, true);
+    assert.equal(typeof reporterOptions[0].getUpdateService, 'function');
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0].error, failure);
+    assert.equal(reports[0].context.splash, splashes[0]);
+    assert.equal(getWindow().isDestroyed(), true, 'the main window with live IPC is destroyed before the report');
+    assert.ok(boundaries.indexOf('window:destroy') < boundaries.indexOf('splash:close'));
+
+    // A late ready-to-show from the failed window never shows it again.
+    getWindow().emit('ready-to-show');
+    assert.equal(boundaries.includes('window:show'), false);
+  }, {
+    ready: true,
+    env: INTERACTIVE_ENV,
+    onReady: async ({ dependencies }) => {
+      dependencies.windowFactory();
+      throw failure;
+    }
+  });
+});
+
+test('a start-minimized login shows no splash, and a fatal failure still reports over a visible window', async () => {
+  const failure = new Error('recovery failed');
+  await mainEntryFixture(async ({ boundaries, calls, reports, splashes }) => {
+    await settleStartup(() => calls.includes('app:quit'));
+    assert.equal(splashes.length, 1, 'the only window is the one opened for the report');
+    assert.equal(reports[0].context.splash, splashes[0]);
+    assert.ok(boundaries.indexOf('splash:create') < boundaries.indexOf('splash:show'));
+    assert.ok(boundaries.indexOf('splash:show') < boundaries.indexOf('fatal:report'), 'the report window is visible before the dialog');
+  }, {
+    ready: true,
+    env: INTERACTIVE_ENV,
+    argv: ['electron', 'main.cjs', '--start-minimized'],
+    onReady: async () => { throw failure; }
+  });
+
+  await mainEntryFixture(async ({ calls, getWindow, splashes }) => {
+    await settleStartup(() => getWindow()?.label === 'window' && calls.includes('bootstrap:ready'));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(splashes.length, 0, 'a successful login start never shows a splash');
+    assert.equal(calls.includes('app:quit'), false);
+  }, {
+    ready: true,
+    env: INTERACTIVE_ENV,
+    argv: ['electron', 'main.cjs', '--start-minimized'],
+    onReady: async ({ dependencies, getWindow }) => {
+      dependencies.windowFactory();
+      const window = getWindow();
+      setImmediate(() => window.emit('ready-to-show'));
+      return window;
+    }
+  });
+});
+
+test('test, smoke and E2E starts report a fatal failure without a dialog and quit', async () => {
+  for (const [label, env, testMode] of [
+    ['real-E2E harness', { ...INTERACTIVE_ENV, MINECRAFT_CORE_REAL_E2E_DISABLE_NATIVE_NOTIFICATIONS: '1' }, false],
+    ['test mode', { ...INTERACTIVE_ENV, NODE_ENV: 'test', MINECRAFT_CORE_TEST_MODE: '1', MINECRAFT_CORE_USER_DATA_DIR: undefined }, true]
+  ]) {
+    const failure = new Error(`${label} startup failed`);
+    await mainEntryFixture(async ({ calls, reporterOptions, reports, splashes }) => {
+      await settleStartup(() => calls.includes('app:quit'));
+      assert.equal(reporterOptions[0].interactive, false, label);
+      assert.equal(reports[0].error, failure, label);
+      if (testMode) assert.equal(splashes.length, 0, 'test mode never opens a window for the report');
+    }, { ready: true, env, testMode, onReady: async () => { throw failure; } });
+  }
+});
+
+test('a splash that cannot close never fails a started app', async () => {
+  await mainEntryFixture(async ({ boundaries, calls, getWindow, logs, reports }) => {
+    await settleStartup(() => boundaries.includes('splash:destroy'));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(getWindow().isDestroyed(), false);
+    assert.equal(boundaries.includes('window:show'), true);
+    assert.equal(calls.includes('app:quit'), false);
+    assert.deepEqual(reports, []);
+    assert.equal(logs.some(([level, message]) => level === 'warn' && /startup window could not be closed/u.test(message)), true);
+  }, {
+    ready: true,
+    env: INTERACTIVE_ENV,
+    splashCloseError: new Error('close failed'),
+    onReady: async ({ dependencies, getWindow }) => {
+      dependencies.windowFactory();
+      const window = getWindow();
+      setImmediate(() => window.emit('ready-to-show'));
+      return window;
+    }
+  });
+});
+
+test('ready-to-show keeps a login start hidden, but shows a degraded start without taking focus', async () => {
+  for (const [status, expected] of [['ready', []], ['degraded', ['window:show-inactive']]]) {
+    await mainEntryFixture(async ({ boundaries, dependencies, getWindow }) => {
+      dependencies.tray.start();
+      dependencies.windowFactory();
+      boundaries.length = 0;
+      getWindow().emit('ready-to-show');
+      assert.deepEqual(boundaries.filter(value => value.startsWith('window:')), expected, status);
+    }, {
+      argv: ['electron', 'main.cjs', '--start-minimized'],
+      storeValues: { appSettings: { startMinimized: true } },
+      health: { status, modpackServices: status === 'ready' ? 'ready' : 'unavailable' }
+    });
   }
 });

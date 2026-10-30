@@ -1,4 +1,4 @@
-const { ModpackError, deepFreeze } = require('../services/modpacks/errors.cjs');
+const { MODPACK_SERVICES_UNAVAILABLE_MESSAGE, ModpackError, deepFreeze } = require('../services/modpacks/errors.cjs');
 const { normalizeCompanionDescriptor } = require('../services/client-modpacks/companion-contracts.cjs');
 
 const CHANNELS = Object.freeze(['get-companion', 'list-companion-assets', 'inspect-companion', 'accept-companion',
@@ -217,4 +217,21 @@ function createClientPackHandlers({clientPackService,companionService} = {}) {
   }
   return {handlers,dispose};
 }
-module.exports={createClientPackHandlers,CLIENT_PACK_INVOKE_CHANNELS:CHANNELS};
+
+// The client pack IPC while the modpack services are off (degraded startup).
+// get-state and verify classify a client without a pack the way a full start
+// does; every other channel is MODPACK_SERVICES_UNAVAILABLE.
+function createUnavailableClientPackHandlers({readClientState = null} = {}) {
+  if (readClientState !== null && typeof readClientState !== 'function') throw fail();
+  const unavailable = () => new ModpackError('MODPACK_SERVICES_UNAVAILABLE', MODPACK_SERVICES_UNAVAILABLE_MESSAGE);
+  const handlers=Object.fromEntries(CHANNELS.map(channel=>[channel,(_event,input)=>{
+    const name=channel.slice('client-packs:'.length);
+    return Promise.resolve().then(async()=>{
+      validateRequest(name,input);
+      if (!['get-state','verify'].includes(name) || !readClientState) throw unavailable();
+      return deepFreeze({ok:true,value:scopedValue(name,await readClientState({clientId:input.clientId}),input)});
+    }).catch(publicError);
+  }]));
+  return {handlers,async dispose() {}};
+}
+module.exports={createClientPackHandlers,createUnavailableClientPackHandlers,CLIENT_PACK_INVOKE_CHANNELS:CHANNELS};

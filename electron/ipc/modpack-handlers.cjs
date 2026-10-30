@@ -1,4 +1,4 @@
-const { ModpackError, deepFreeze } = require('../services/modpacks/errors.cjs');
+const { MODPACK_SERVICES_UNAVAILABLE_MESSAGE, ModpackError, deepFreeze } = require('../services/modpacks/errors.cjs');
 const { matchAssetPatternProvisional } = require('../services/modpacks/providers/github-asset-pattern.cjs');
 const {
   MODPACK_INVOKE_CHANNELS,
@@ -20,6 +20,28 @@ function requireMethods(value, methods) {
 function publicFailure(error) {
   if (error instanceof ModpackError) return error.toPublicResult();
   return new ModpackError('COMMIT_FAILED', 'Minecraft Core could not complete the modpack request', { cause: error }).toPublicResult();
+}
+
+function modpackServicesUnavailable() {
+  return new ModpackError('MODPACK_SERVICES_UNAVAILABLE', MODPACK_SERVICES_UNAVAILABLE_MESSAGE);
+}
+
+// One handler per modpack channel: the request is validated, the operation (or
+// the fallback for a channel without one) runs, and the result or the public
+// failure is validated against the channel's schema.
+function createChannelHandlers(operations, fallback = null) {
+  const handlers = Object.fromEntries(MODPACK_INVOKE_CHANNELS.map(channel => [channel, async (event, request = {}) => {
+    try {
+      const normalized = validateModpackIpcRequest(channel, request);
+      const operation = operations[channel] || fallback;
+      if (typeof operation !== 'function') throw invalid();
+      const value = await operation(normalized, event);
+      return validateModpackIpcResult(channel, { ok: true, value }, normalized);
+    } catch (error) {
+      return validateModpackIpcResult(channel, publicFailure(error));
+    }
+  }]));
+  return deepFreeze(handlers);
 }
 
 function inspectionProgressSink(sender, requestId) {
@@ -525,16 +547,33 @@ function createModpackHandlers({
     'modpacks:perform-safe-action': request => outcomeActionService.performSafeAction(request)
   };
 
-  const handlers = Object.fromEntries(MODPACK_INVOKE_CHANNELS.map(channel => [channel, async (_event, request = {}) => {
-    try {
-      const normalized = validateModpackIpcRequest(channel, request);
-      const value = await operations[channel](normalized, _event);
-      return validateModpackIpcResult(channel, { ok: true, value }, normalized);
-    } catch (error) {
-      return validateModpackIpcResult(channel, publicFailure(error));
-    }
-  }]));
-  return deepFreeze(handlers);
+  return createChannelHandlers(operations);
 }
 
-module.exports = { createModpackHandlers, MODPACK_INVOKE_CHANNELS };
+/**
+ * The modpack IPC while the modpack services are off (degraded startup). Every
+ * channel stays registered so the renderer never meets a missing handler:
+ * get-state answers the unmanaged state of a server without modpack state, no
+ * modpack job can be active, list-recovery lists the servers the startup
+ * recovery gate blocks, and everything else is MODPACK_SERVICES_UNAVAILABLE.
+ * @param {{readServerState?: (serverId: string) => unknown, listRecovery?: () => unknown}} options
+ */
+function createUnavailableModpackHandlers({ readServerState = null, listRecovery = null } = {}) {
+  if ((readServerState !== null && typeof readServerState !== 'function') ||
+      (listRecovery !== null && typeof listRecovery !== 'function')) throw invalid();
+  return createChannelHandlers({
+    'modpacks:get-state': request => {
+      if (!readServerState) throw modpackServicesUnavailable();
+      return readServerState(request.serverId);
+    },
+    'modpacks:get-active-jobs': request => ({ serverId: request.serverId, items: [] }),
+    'modpacks:list-recovery': () => {
+      // Without the gate's answer the blocked servers are unknown: refuse, so
+      // the renderer keeps every start disabled.
+      if (!listRecovery) throw modpackServicesUnavailable();
+      return listRecovery();
+    }
+  }, () => { throw modpackServicesUnavailable(); });
+}
+
+module.exports = { createModpackHandlers, createUnavailableModpackHandlers, MODPACK_INVOKE_CHANNELS };

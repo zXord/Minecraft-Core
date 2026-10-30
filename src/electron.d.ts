@@ -14,6 +14,33 @@ type ModpackEventChannel =
   | 'modpacks:job-progress' | 'modpacks:job-log' | 'modpacks:state-changed' | 'modpacks:notification'
   | 'modpacks:inspection-progress' | 'modpacks:preflight-progress';
 
+type StartupInvokeChannel = 'startup:get-health' | 'startup:relaunch' | 'startup:open-logs';
+
+interface StartupFailureDescription {
+  stage: string | null;
+  reason: 'archive-worker-missing' | 'archive-worker-blocked' | 'profile-on-network-share' | 'unexpected';
+  summary: string;
+  hint: string;
+  technical: string;
+}
+
+// startup:get-health. 'degraded' means the modpack services did not start and
+// the legacy features run on their own.
+interface StartupHealth {
+  status: 'starting' | 'ready' | 'degraded';
+  modpackServices: 'pending' | 'ready' | 'unavailable';
+  legacyFallbacks: 'active' | 'inactive';
+  failure: Readonly<StartupFailureDescription> | null;
+  recoveryGate: Readonly<{
+    basis: 'boundary' | 'no-recovery-records' | 'read-only-scan' | 'unreadable' | 'unsettled';
+    globalBlock: boolean;
+    blockedServers: ReadonlyArray<string | Readonly<Record<string, string | number | boolean | null>>>;
+  }> | null;
+  issues: ReadonlyArray<Readonly<StartupFailureDescription>>;
+}
+
+type StartupActionResult = Readonly<{ success: boolean; error?: string }>;
+
 type ModpackIpcRequest = Readonly<Record<string, unknown>>;
 type ModpackIpcResult<T = unknown> =
   | Readonly<{ ok: true; value: T }>
@@ -32,6 +59,8 @@ interface ElectronAPI {
   on(channel: 'client-packs:progress', listener: (event: import('./types/client-modpack').ClientPackProgress) => void): void;
   removeListener(channel: 'client-packs:progress', listener: (event: import('./types/client-modpack').ClientPackProgress) => void): void;
   invoke<T = unknown>(channel: ModpackInvokeChannel, request: ModpackIpcRequest): Promise<ModpackIpcResult<T>>;
+  invoke(channel: 'startup:get-health'): Promise<Readonly<StartupHealth> | null>;
+  invoke(channel: Exclude<StartupInvokeChannel, 'startup:get-health'>): Promise<StartupActionResult>;
   invoke(channel: string, ...args: any[]): Promise<any>;
   on(channel: ModpackEventChannel, listener: (event: Readonly<Record<string, unknown>>) => void): void;
   on(channel: string, listener: (...args: any[]) => void): void;

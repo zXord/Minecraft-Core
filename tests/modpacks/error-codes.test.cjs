@@ -5,7 +5,13 @@ const os = require('node:os');
 const path = require('node:path');
 const ts = require('typescript');
 
-const { FAILURE_CODES, ModpackError, PUBLIC_ERROR_DETAILS_BY_CODE, isValidPublicErrorResult } = require('../../electron/services/modpacks/errors.cjs');
+const {
+  FAILURE_CODES,
+  MODPACK_SERVICES_UNAVAILABLE_MESSAGE,
+  ModpackError,
+  PUBLIC_ERROR_DETAILS_BY_CODE,
+  isValidPublicErrorResult
+} = require('../../electron/services/modpacks/errors.cjs');
 
 const APPROVED_CODES = [
   'INVALID_RELEASE_URL', 'RATE_LIMITED', 'REPOSITORY_NOT_FOUND', 'RELEASE_NOT_FOUND', 'ASSET_AMBIGUOUS', 'ASSET_SELECTION_REQUIRED', 'ASSET_CHANGED', 'ARTIFACT_UNAVAILABLE',
@@ -14,7 +20,7 @@ const APPROVED_CODES = [
   'MISSING_PROVIDER_DIGEST', 'HASH_MISMATCH', 'PACK_ROOT_AMBIGUOUS', 'LOADER_CONFLICT', 'UNSUPPORTED_LOADER', 'UNSUPPORTED_RUNTIME_LAYOUT',
   'RUNTIME_INCOMPLETE', 'SERVER_PATH_TOO_LONG', 'DOWNGRADE_REQUIRED', 'SWITCH_REQUIRED', 'PLAN_STALE', 'SERVER_RUNNING', 'OPERATION_IN_PROGRESS', 'CANCELLED', 'TARGET_EXISTS', 'INSUFFICIENT_DISK',
   'BACKUP_FAILED', 'COMMIT_FAILED', 'HEALTH_CHECK_FAILED', 'ROLLBACK_FAILED', 'RECOVERY_REQUIRED', 'CLEANUP_FAILED', 'INVALID_REQUEST', 'NO_INSTALLABLE_ASSET', 'CLIENT_PACK_UNAVAILABLE', 'CLIENT_PACK_SERVER_CHANGED', 'CLIENT_RUNNING', 'MANAGED_MOD_EDIT_BLOCKED',
-  'LAUNCH_CURSOR_EXPIRED', 'LAUNCH_DISCOVERY_CAPACITY', 'LAUNCH_LIST_LIMIT_EXCEEDED'
+  'LAUNCH_CURSOR_EXPIRED', 'LAUNCH_DISCOVERY_CAPACITY', 'LAUNCH_LIST_LIMIT_EXCEEDED', 'MODPACK_SERVICES_UNAVAILABLE'
 ];
 
 test('failure code registry contains exactly the approved public and boundary codes', () => {
@@ -42,11 +48,13 @@ test('renderer type contract accepts the runtime-direction failure codes', t => 
     "const refreshSetupList: ModpackFailureCode = 'LAUNCH_CURSOR_EXPIRED';",
     "const retrySetupList: ModpackFailureCode = 'LAUNCH_DISCOVERY_CAPACITY';",
     "const useExactSetup: ModpackFailureCode = 'LAUNCH_LIST_LIMIT_EXCEEDED';",
+    "const modpackFeaturesOff: ModpackFailureCode = 'MODPACK_SERVICES_UNAVAILABLE';",
     'void retryAsDowngrade;',
     'void retryAsSwitch;',
     'void retryAfterRateLimit;',
     'void retryAtShorterPath;',
-    'void refuseManagedModEdit;'
+    'void refuseManagedModEdit;',
+    'void modpackFeaturesOff;'
   ].join('\n'));
   const program = ts.createProgram([sourcePath], {
     noEmit: true, strict: true, skipLibCheck: true,
@@ -84,6 +92,22 @@ for (const { code, message, retryable } of [
     }
   });
 }
+
+test('MODPACK_SERVICES_UNAVAILABLE explains degraded mode with closed empty details', () => {
+  assert.equal(MODPACK_SERVICES_UNAVAILABLE_MESSAGE,
+    'Modpack features are turned off because Minecraft Core could not start them. Servers and clients that do not use modpacks keep working.');
+  const result = new ModpackError('MODPACK_SERVICES_UNAVAILABLE', MODPACK_SERVICES_UNAVAILABLE_MESSAGE, {
+    details: { serverId: 'server-1', path: 'C:\\secret\\server', operationId: 'job-1' },
+    cause: new Error('C:\\secret\\ArchiveWorker.exe')
+  }).toPublicResult();
+
+  assert.deepEqual(result, {
+    ok: false,
+    error: { code: 'MODPACK_SERVICES_UNAVAILABLE', message: MODPACK_SERVICES_UNAVAILABLE_MESSAGE, details: {}, retryable: false }
+  });
+  assert.deepEqual(PUBLIC_ERROR_DETAILS_BY_CODE.MODPACK_SERVICES_UNAVAILABLE, {});
+  assert.equal(isValidPublicErrorResult(result), true);
+});
 
 test('public error details cannot leak paths or signed URLs', () => {
   const error = new ModpackError('HASH_MISMATCH', 'Integrity check failed', {

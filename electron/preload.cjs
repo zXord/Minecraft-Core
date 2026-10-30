@@ -16,6 +16,8 @@ const MODPACK_INVOKE_CHANNELS = Object.freeze([
   'modpacks:ack-notification', 'modpacks:check-updates', 'modpacks:update-tracking', 'modpacks:verify',
   'modpacks:perform-safe-action'
 ]);
+// Startup health for the degraded-mode banner, and its Restart and log actions.
+const STARTUP_INVOKE_CHANNELS = Object.freeze(['startup:get-health', 'startup:relaunch', 'startup:open-logs']);
 const MODPACK_EVENT_CHANNELS = Object.freeze([
   'client-packs:progress',
   'modpacks:job-progress', 'modpacks:job-log', 'modpacks:state-changed', 'modpacks:notification',
@@ -31,6 +33,7 @@ contextBridge.exposeInMainWorld('electron', {
     
     const validChannels = [
       ...MODPACK_INVOKE_CHANNELS,
+      ...STARTUP_INVOKE_CHANNELS,
       'select-mod-files',
       'handle-dropped-files', 
       'get-dropped-file-paths',

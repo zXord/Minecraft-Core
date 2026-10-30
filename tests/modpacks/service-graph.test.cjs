@@ -1565,3 +1565,357 @@ test('mod availability IPC can stay registered without starting its native watch
     Module._load = originalLoad;
   }
 });
+
+const {
+  createScanOnlyDurableFs,
+  establishDegradedRecoveryGate,
+  lifecycleRecordsProvablyAbsent
+} = require('../../electron/services/modpack-lifecycle/degraded-recovery-gate.cjs');
+const { RecoveryRegistry } = require('../../electron/services/modpack-lifecycle/recovery-registry.cjs');
+
+const SEED_CLIENT = Object.freeze({
+  moveWriteThrough: fs.renameSync, replaceFileWriteThrough: fs.renameSync, flushDirectory() {},
+  moveWriteThroughAsync: fs.promises.rename, replaceFileWriteThroughAsync: fs.promises.rename, async flushDirectoryAsync() {}
+});
+
+async function seedInterruptedJob(userDataPath, { jobId, serverId, serverPath }) {
+  let token = 0;
+  const registry = new RecoveryRegistry({
+    userDataPath, fsApi: fs, randomUUID: crypto.randomUUID, clock: () => new Date('2026-10-30T00:00:00.000Z'),
+    durableFs: createDurableFs({ allowedRoots: [userDataPath], durableClient: SEED_CLIENT, tempNameFactory: () => `seed-${++token}` })
+  });
+  await registry.initialize();
+  const parent = path.dirname(serverPath);
+  const name = path.basename(serverPath);
+  await registry.create({
+    schemaVersion: 1, sequence: 0, jobId, operationKind: 'install',
+    target: { kind: 'existing', stableServerId: serverId, path: serverPath },
+    candidatePath: path.join(parent, `.${name}.candidate-${jobId}`), rollbackPath: path.join(parent, `.${name}.rollback-${jobId}`),
+    failedPath: path.join(parent, `.${name}.failed-${jobId}`), restorePoint: { id: 'restore-0001', sha256: 'a'.repeat(64) },
+    journalPath: path.join(serverPath, '.minecraft-core-state', 'operations', jobId, 'journal.json'),
+    priorRuntime: { running: false, autoRestart: false }, phase: 'queued', swapStep: 'none',
+    directoryIdentities: { target: null, candidate: null, rollback: null, failed: null },
+    createdAt: '2026-10-30T00:00:00.000Z', updatedAt: '2026-10-30T00:00:00.000Z', outcome: null
+  });
+}
+
+function filesUnder(directory) {
+  if (!fs.existsSync(directory)) return {};
+  const result = {};
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const child = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      for (const [key, value] of Object.entries(filesUnder(child))) result[path.join(entry.name, key)] = value;
+    } else {
+      result[entry.name] = fs.readFileSync(child).toString('base64');
+    }
+  }
+  return result;
+}
+
+function degradedProfile(t, prefix) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const userDataPath = path.join(root, 'user-data');
+  const runtimeRoot = path.join(root, 'runtime-without-worker');
+  const alpha = path.join(root, 'servers', 'alpha');
+  const beta = path.join(root, 'servers', 'beta');
+  for (const directory of [userDataPath, runtimeRoot, alpha, beta]) fs.mkdirSync(directory, { recursive: true });
+  const instances = [
+    { id: 'alpha', type: 'server', path: alpha },
+    { id: 'beta', type: 'server', path: beta }
+  ];
+  return { alpha, beta, instances, root, runtimeRoot, userDataPath };
+}
+
+test('degraded startup mirrors the full recovery gate without ArchiveWorker: only the interrupted server stays blocked', async t => {
+  const profile = degradedProfile(t, 'minecraft-core-degraded-gate-');
+  await seedInterruptedJob(profile.userDataPath, { jobId: 'job-alpha', serverId: 'alpha', serverPath: profile.alpha });
+  const before = filesUnder(path.join(profile.userDataPath, 'modpack-lifecycle'));
+  const coordinator = new ServerMutationCoordinator();
+  const failure = new ModpackError('EXTRACTOR_UNAVAILABLE', 'The archive worker is unavailable');
+  const logged = [];
+  const { graph } = graphFixture({
+    userDataPath: profile.userDataPath,
+    runtimeRoots: { resourcesPath: profile.runtimeRoot, runtimeRoot: profile.runtimeRoot, isPackaged: false, arch: 'x64' },
+    store: { get: key => (key === 'instances' ? profile.instances : null) },
+    coordinator,
+    isInstanceRunning: () => false,
+    logger: { error: (message, options) => logged.push([message, options.data]), warn() {} },
+    async recoveryFactory() { throw failure; }
+  });
+  assert.equal(graph.startup.getHealth().status, 'starting');
+  await assert.rejects(graph.startup.initializeRecovery(graph), error => error === failure);
+  assert.equal(coordinator.recoveryOpen, true);
+
+  const entered = graph.startup.enterDegradedMode(failure, graph);
+  assert.equal(graph.startup.enterDegradedMode(new Error('later'), graph), entered, 'the first failure decides');
+  assert.deepEqual(await entered, { mode: 'degraded' });
+
+  assert.equal(coordinator.recoveryOpen, false);
+  assert.equal(coordinator.globalRecoveryBlock, false);
+  await assert.rejects(coordinator.acquireStart({ instanceId: 'alpha', serverPath: profile.alpha },
+    { operation: 'server-start', operationId: 'start-alpha' }), { code: 'RECOVERY_REQUIRED' });
+  const lease = await coordinator.acquireStart({ instanceId: 'beta', serverPath: profile.beta },
+    { operation: 'server-start', operationId: 'start-beta' });
+  assert.equal(lease.release(), true);
+
+  const health = graph.startup.getHealth();
+  assert.equal(health.status, 'degraded');
+  assert.equal(health.modpackServices, 'unavailable');
+  assert.equal(health.failure.reason, 'archive-worker-missing');
+  assert.deepEqual(health.recoveryGate, {
+    basis: 'read-only-scan', globalBlock: false, blockedServers: [{ operationId: 'job-alpha', instanceId: 'alpha' }]
+  });
+  assert.deepEqual(filesUnder(path.join(profile.userDataPath, 'modpack-lifecycle')), before, 'the degraded scan writes nothing');
+  assert.equal(logged.length, 1);
+  assert.match(logged[0][0], /degraded mode/u);
+  assert.equal(logged[0][1].reason, 'archive-worker-missing');
+  assert.equal(graph.modpacks.lifecycleService, null);
+  assert.notEqual(graph.modpacks.degraded, null);
+  assert.equal(graph.modpacks.clientPackIntegration, graph.modpacks.degraded.clientPackIntegration);
+  assert.equal(graph.modpacks.stateRepository, graph.modpacks.degraded.stateRepository);
+  assert.equal(graph.modpacks.companionResolver, graph.modpacks.degraded.companionResolver);
+  assert.equal(graph.modpacks.companionResolver('beta'), null);
+});
+
+test('degraded gate releases a profile with no recovery records without building a registry', async t => {
+  for (const layout of ['absent', 'empty']) {
+    const profile = degradedProfile(t, `minecraft-core-degraded-empty-${layout}-`);
+    if (layout === 'empty') {
+      for (const name of ['active', 'history', 'retirements']) {
+        fs.mkdirSync(path.join(profile.userDataPath, 'modpack-lifecycle', name), { recursive: true });
+      }
+    }
+    assert.equal(lifecycleRecordsProvablyAbsent(profile.userDataPath), true, layout);
+    const coordinator = new ServerMutationCoordinator();
+    const result = await establishDegradedRecoveryGate({
+      coordinator,
+      userDataPath: profile.userDataPath,
+      createRegistry() { assert.fail('no registry is built without recovery records'); }
+    });
+    assert.deepEqual(result, { basis: 'no-recovery-records', globalBlock: false, blocks: [], error: null }, layout);
+    assert.equal(coordinator.recoveryOpen, false);
+    assert.equal(coordinator.globalRecoveryBlock, false);
+  }
+});
+
+test('a junction, a file or an unreadable entry takes the full scan-only path and keeps the global block when unreadable', async t => {
+  const results = {};
+  const runGate = async (name, prepare, fsApi = fs) => {
+    const profile = degradedProfile(t, `minecraft-core-degraded-${name}-`);
+    const lifecycle = path.join(profile.userDataPath, 'modpack-lifecycle');
+    for (const directory of ['active', 'history']) fs.mkdirSync(path.join(lifecycle, directory), { recursive: true });
+    if (prepare(lifecycle, profile) === false) return;
+    assert.equal(lifecycleRecordsProvablyAbsent(profile.userDataPath, fsApi), false, name);
+    const coordinator = new ServerMutationCoordinator();
+    let registries = 0;
+    const result = await establishDegradedRecoveryGate({
+      coordinator,
+      userDataPath: profile.userDataPath,
+      fsApi,
+      runtimeVerifier: { async verifyBeforeRecovery() { return { quiescent: true }; } },
+      createRegistry(options) {
+        registries += 1;
+        return new RecoveryRegistry({
+          ...options,
+          durableFs: createScanOnlyDurableFs({ fsApi: options.fsApi, allowedRoots: [options.userDataPath] })
+        });
+      }
+    });
+    assert.equal(registries, 1, `${name} builds the read-only registry`);
+    assert.equal(coordinator.recoveryOpen, false, name);
+    assert.equal(coordinator.globalRecoveryBlock, true, name);
+    results[name] = result.basis;
+  };
+
+  await runGate('junk-file', lifecycle => { fs.writeFileSync(path.join(lifecycle, 'active', 'junk.txt'), 'junk'); });
+  await runGate('active-is-file', lifecycle => {
+    fs.rmSync(path.join(lifecycle, 'active'), { recursive: true });
+    fs.writeFileSync(path.join(lifecycle, 'active'), 'not a folder');
+  });
+  await runGate('junction', (lifecycle, profile) => {
+    const target = path.join(profile.root, 'elsewhere');
+    fs.mkdirSync(target);
+    fs.rmSync(path.join(lifecycle, 'history'), { recursive: true });
+    try {
+      fs.symlinkSync(target, path.join(lifecycle, 'history'), 'junction');
+    } catch {
+      return false;
+    }
+    return true;
+  });
+  const deniedFs = Object.create(fs);
+  deniedFs.lstatSync = (candidate, ...rest) => {
+    if (path.basename(candidate) === 'active') throw Object.assign(new Error('denied'), { code: 'EPERM' });
+    return fs.lstatSync(candidate, ...rest);
+  };
+  await runGate('eperm', () => true, deniedFs);
+
+  assert.equal(results['junk-file'], 'read-only-scan');
+  assert.equal(results['active-is-file'], 'unreadable');
+  assert.equal(results.eperm, 'unreadable');
+  if (process.platform === 'win32') assert.equal(results.junction, 'unreadable');
+});
+
+test('a composition failure after the boundary keeps its blocks and disposal waits for it with no deadline', async t => {
+  const profile = degradedProfile(t, 'minecraft-core-degraded-composition-');
+  const coordinator = new ServerMutationCoordinator();
+  const record = { jobId: 'job-alpha', target: { kind: 'existing', stableServerId: 'alpha', path: profile.alpha } };
+  let releaseDisposal;
+  const slowDisposal = new Promise(resolve => { releaseDisposal = resolve; });
+  let disposeCalls = 0;
+  const failure = new Error('composition initialize failed');
+  const { graph } = graphFixture({
+    userDataPath: profile.userDataPath,
+    runtimeRoots: { resourcesPath: profile.runtimeRoot, runtimeRoot: profile.runtimeRoot, isPackaged: false, arch: 'x64' },
+    store: { get: key => (key === 'instances' ? profile.instances : null) },
+    coordinator,
+    isInstanceRunning: () => false,
+    async recoveryFactory() {
+      return {
+        registry: { async initialize() {
+          return { records: [record], corrupt: [], blocks: [{ jobId: 'job-alpha', stableServerId: 'alpha', targetPathHash: null }], globalBlock: false };
+        } },
+        recoveryService: { async recoverAll() { assert.fail('no automatic recovery at startup'); } },
+        runtimeVerifier: { async verifyBeforeRecovery() { return { quiescent: true }; } }
+      };
+    },
+    async modpackFactory() {
+      return fakeModpackComposition({
+        async initialize() { throw failure; },
+        dispose() { disposeCalls += 1; return slowDisposal; }
+      });
+    }
+  });
+  await assert.rejects(graph.startup.initializeRecovery(graph), error => error === failure);
+  assert.equal(coordinator.recoveryOpen, false, 'the boundary settled before the composition failed');
+  await graph.startup.enterDegradedMode(failure, graph);
+
+  assert.equal(disposeCalls, 1, 'the half-built composition is disposed at once');
+  assert.deepEqual(graph.startup.getHealth().recoveryGate, {
+    basis: 'boundary', globalBlock: false, blockedServers: [{ operationId: 'job-alpha', instanceId: 'alpha' }]
+  });
+  await assert.rejects(coordinator.acquireStart({ instanceId: 'alpha', serverPath: profile.alpha },
+    { operation: 'server-start', operationId: 'start-alpha' }), { code: 'RECOVERY_REQUIRED' });
+  const lease = await coordinator.acquireStart({ instanceId: 'beta', serverPath: profile.beta },
+    { operation: 'server-start', operationId: 'start-beta' });
+  assert.equal(lease.release(), true);
+  assert.deepEqual(graph.modpacks.degraded.listRecovery().items.map(item => item.serverId), ['alpha']);
+  assert.deepEqual(graph.startup.listActiveWork(), ['modpack-composition-disposal'], 'an update install waits for the disposal');
+
+  let disposed = false;
+  const disposal = graph.startup.dispose(graph).then(() => { disposed = true; });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(disposed, false, 'graph disposal (and with it an orderly quit) waits for the half-built composition');
+  releaseDisposal();
+  await disposal;
+  assert.equal(disposed, true);
+  assert.deepEqual(graph.startup.listActiveWork(), []);
+});
+
+test('active work for the update guard: modpack jobs, exclusive client and coordinator holders, never shared writers', async () => {
+  const coordinator = {
+    runMutation() {}, runManyMutations() {}, beginStartupRecovery() {}, installRecoveryBlocks() {}, completeStartupRecovery() {},
+    listActiveOperations: () => [
+      { operationId: 'op-lifecycle', holder: 'lifecycle' },
+      { operationId: 'op-exclusive', holder: 'ordinary-exclusive' },
+      { operationId: 'op-shared', holder: 'ordinary-shared' },
+      { operationId: 'op-start', holder: 'start-pending' }
+    ]
+  };
+  let admittedOnly = false;
+  const { graph } = graphFixture({
+    coordinator,
+    async recoveryFactory() { return EMPTY_RECOVERY_SERVICES; },
+    async modpackFactory() {
+      return fakeModpackComposition({
+        lifecycleService: {
+          listActiveOperationIds: () => (admittedOnly ? [] : ['job-install']),
+          hasActiveWork: () => true
+        },
+        listActiveClientMutations: () => ['client-mutation:abc']
+      });
+    }
+  });
+  assert.deepEqual(graph.startup.listActiveWork(), ['op-lifecycle', 'op-exclusive'], 'before the modpack services exist');
+  await graph.startup.initializeRecovery(graph);
+  assert.deepEqual(graph.startup.listActiveWork(), ['job-install', 'client-mutation:abc', 'op-lifecycle', 'op-exclusive']);
+  admittedOnly = true;
+  assert.deepEqual(graph.startup.listActiveWork(), ['modpack-lifecycle-work', 'client-mutation:abc', 'op-lifecycle', 'op-exclusive']);
+});
+
+test('after-window modpack hooks report their failures and never stop the window', async () => {
+  const warnings = [];
+  const ran = [];
+  const { graph } = graphFixture({
+    logger: { warn: (message, options) => warnings.push([message, options.data.stage]), error() {} },
+    startup: {
+      async initializeRecovery() {},
+      waitForWindowNavigationReady: () => Promise.resolve(true),
+      afterWindowCreated() { ran.push('main-hook'); }
+    },
+    async modpackFactory() {
+      return fakeModpackComposition({
+        nativeNotificationBridge: { start() { throw new Error('toast bridge failed'); }, stop() {} },
+        releaseMonitor: { async checkAll() {}, async checkOne() {}, async start() { ran.push('monitor'); throw new Error('monitor failed'); }, stop() {} },
+        armStartupRetirement() { ran.push('retirement'); throw new Error('retirement failed'); }
+      });
+    }
+  });
+  await graph.startup.initializeRecovery(graph);
+  await graph.startup.afterWindowCreated({ id: 1 }, graph);
+
+  assert.deepEqual(ran, ['main-hook', 'monitor', 'retirement']);
+  const stages = ['native-notifications:start', 'release-monitor:start', 'startup-retirement:arm'];
+  assert.deepEqual(graph.startup.getHealth().issues.map(issue => issue.stage).filter(stage => stages.includes(stage)), stages);
+  assert.deepEqual(warnings.map(([, stage]) => stage).filter(stage => stages.includes(stage)), stages);
+  const fatal = graphFixture({ startup: { async initializeRecovery() {}, afterWindowCreated() { throw new Error('cleanup hook failed'); } } }).graph;
+  await assert.rejects(fatal.startup.afterWindowCreated({ id: 2 }, fatal), /cleanup hook failed/u);
+});
+
+test('a full start is ready and reports a missing ArchiveWorker.exe without degrading', async t => {
+  const profile = degradedProfile(t, 'minecraft-core-ready-health-');
+  const { graph } = graphFixture({
+    userDataPath: profile.userDataPath,
+    runtimeRoots: { resourcesPath: profile.runtimeRoot, runtimeRoot: profile.runtimeRoot, isPackaged: false, arch: 'x64' },
+    async recoveryFactory() { return EMPTY_RECOVERY_SERVICES; }
+  });
+  assert.equal(graph.paths.archiveWorker, path.join(profile.runtimeRoot, 'vendor', 'archive-worker', 'x64', 'ArchiveWorker.exe'));
+  await graph.startup.initializeRecovery(graph);
+  const health = graph.startup.getHealth();
+  assert.equal(health.status, 'ready');
+  assert.equal(health.modpackServices, 'ready');
+  assert.equal(health.failure, null);
+  assert.deepEqual(health.recoveryGate, { basis: 'boundary', globalBlock: false, blockedServers: [] });
+  assert.deepEqual(health.issues.map(issue => [issue.stage, issue.reason]), [['archive-worker', 'archive-worker-missing']]);
+
+  fs.mkdirSync(path.dirname(graph.paths.archiveWorker), { recursive: true });
+  fs.writeFileSync(graph.paths.archiveWorker, 'MZ');
+  const withWorker = graphFixture({
+    userDataPath: profile.userDataPath,
+    runtimeRoots: { resourcesPath: profile.runtimeRoot, runtimeRoot: profile.runtimeRoot, isPackaged: false, arch: 'x64' },
+    async recoveryFactory() { return EMPTY_RECOVERY_SERVICES; }
+  }).graph;
+  await withWorker.startup.initializeRecovery(withWorker);
+  assert.deepEqual(withWorker.startup.getHealth().issues, []);
+});
+
+test('full mode keeps the composition companion resolver and integration ahead of any fallback', async () => {
+  const statuses = [];
+  const { graph } = graphFixture({
+    async recoveryFactory() { return EMPTY_RECOVERY_SERVICES; },
+    async modpackFactory() {
+      return fakeModpackComposition({
+        companionService: { getStatus(request) { statuses.push(request); return 'descriptor'; } },
+        clientPackIntegration: { marker: 'composition-integration' }
+      });
+    }
+  });
+  assert.equal(graph.modpacks.companionResolver, null, 'no resolver before the modpack services or degraded mode');
+  await graph.startup.initializeRecovery(graph);
+  assert.equal(graph.modpacks.degraded, null);
+  assert.equal(graph.modpacks.clientPackIntegration.marker, 'composition-integration');
+  assert.equal(graph.modpacks.companionResolver('server-1'), 'descriptor');
+  assert.deepEqual(statuses, [{ serverId: 'server-1' }]);
+});

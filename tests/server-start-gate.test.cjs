@@ -2168,7 +2168,7 @@ test('main installs the coordinator then runs registry recovery before cleanup',
     if (request.endsWith('utils/navigation-policy.cjs')) return { shouldAllowNavigation() { return false; } };
     if (request.endsWith('utils/tls-utils.cjs')) return { getTlsFingerprint() {}, normalizeFingerprint() {} };
     if (request.endsWith('utils/runtime-mode.cjs')) return { shouldUseDevServer() { return false; } };
-    if (request.endsWith('services/update-service.cjs')) return { getUpdateService() { return {}; } };
+    if (request.endsWith('services/update-service.cjs')) return { getUpdateService() { return {}; }, setInstallActivityProbe() {} };
     if (request.endsWith('config/dev-config.cjs')) return {};
     return originalLoad(request, parent, isMain);
   };

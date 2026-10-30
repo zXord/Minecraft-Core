@@ -117,10 +117,73 @@ test('service graph userData resolves to the isolated test directory before app 
   }), path.resolve(isolated));
   assert.equal(productionReads, 0, 'test composition must not read or reuse production userData');
 
+  const created = [];
+  const fsApi = {
+    mkdirSync(value, options) { created.push([value, options]); },
+    realpathSync: { native: value => value }
+  };
   assert.equal(subject.resolveServiceGraphUserData({
-    runtimeFlags: { testMode: false, isolatedUserDataPath: null }, app, runtimeRoot
+    runtimeFlags: { testMode: false, isolatedUserDataPath: null }, app, runtimeRoot, fsApi
   }), production);
   assert.equal(productionReads, 1);
+  assert.deepEqual(created, [[production, { recursive: true }]]);
+});
+
+test('a junctioned production userData is canonicalised for the service graph only; letter case is kept', {
+  skip: process.platform !== 'win32' && 'drive-letter userData canonicalisation is Windows only'
+}, (t) => {
+  const fs = require('node:fs');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-graph-user-data-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const realProfile = path.join(base, 'real-profile');
+  fs.mkdirSync(realProfile);
+  const canonical = fs.realpathSync.native(realProfile);
+  const linkedProfile = path.join(base, 'linked-profile');
+  try {
+    fs.symlinkSync(realProfile, linkedProfile, 'junction');
+  } catch (error) {
+    t.skip(`directory junctions are unavailable on this host: ${error.code}`);
+    return;
+  }
+  const setPaths = [];
+  const appFor = userData => ({
+    getPath(name) { assert.equal(name, 'userData'); return userData; },
+    setPath(...args) { setPaths.push(args); }
+  });
+  const runtimeFlags = { testMode: false, isolatedUserDataPath: null };
+
+  const junctioned = path.join(linkedProfile, 'Minecraft Core');
+  assert.equal(subject.resolveServiceGraphUserData({ runtimeFlags, app: appFor(junctioned), runtimeRoot: base }),
+    path.join(canonical, 'Minecraft Core'));
+  assert.equal(fs.statSync(path.join(realProfile, 'Minecraft Core')).isDirectory(), true, 'the profile folder is created first');
+
+  const caseOnly = path.join(canonical, 'Minecraft Core').replace(/[a-z]/gu, letter => letter.toUpperCase());
+  assert.notEqual(caseOnly, path.join(canonical, 'Minecraft Core'));
+  assert.equal(subject.resolveServiceGraphUserData({ runtimeFlags, app: appFor(caseOnly), runtimeRoot: base }), caseOnly);
+
+  const plain = path.join(canonical, 'Plain Profile');
+  assert.equal(subject.resolveServiceGraphUserData({ runtimeFlags, app: appFor(plain), runtimeRoot: base }), plain);
+  assert.deepEqual(setPaths, [], 'Electron and app-store keep their own userData spelling');
+});
+
+test('production userData that cannot be created or resolved, or is a network share, keeps its raw spelling', () => {
+  const runtimeFlags = { testMode: false, isolatedUserDataPath: null };
+  const raw = 'C:\\Users\\Someone\\AppData\\Roaming\\Minecraft Core';
+  const app = { getPath: () => raw };
+  const cases = [
+    { mkdirSync() { throw Object.assign(new Error('denied'), { code: 'EPERM' }); }, realpathSync: { native: () => assert.fail('not resolved') } },
+    { mkdirSync() {}, realpathSync: { native() { throw Object.assign(new Error('gone'), { code: 'ENOENT' }); } } },
+    { mkdirSync() {}, realpathSync: { native: () => '\\\\server\\share\\Minecraft Core' } },
+    { mkdirSync() {}, realpathSync: { native: () => '\\\\?\\UNC\\server\\share\\Minecraft Core' } }
+  ];
+  for (const fsApi of cases) {
+    assert.equal(subject.resolveServiceGraphUserData({ runtimeFlags, app, runtimeRoot: os.tmpdir(), fsApi }), raw);
+  }
+  const share = '\\\\server\\share\\Minecraft Core';
+  assert.equal(subject.resolveServiceGraphUserData({
+    runtimeFlags, app: { getPath: () => share }, runtimeRoot: os.tmpdir(),
+    fsApi: { mkdirSync() {}, realpathSync: { native: () => 'Z:\\Minecraft Core' } }
+  }), share, 'a network-share profile is never remapped');
 });
 
 test('test recovery factory uses the same dual-flag and absolute-module authority', () => {

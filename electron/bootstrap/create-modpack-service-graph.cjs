@@ -31,7 +31,11 @@ const { RecoveryRegistry } = require('../services/modpack-lifecycle/recovery-reg
 const { ServerRuntimeWriterAuthority } = require('../services/modpack-lifecycle/server-runtime-writer-authority.cjs');
 const { createWindowsBootSequenceProvider } = require('../services/client-modpacks/client-runtime-ownership.cjs');
 const { RestorePointService, normalizeMetadata } = require('../services/modpack-lifecycle/restore-point-service.cjs');
-const { establishStartupRecoveryBoundary } = require('../services/modpack-lifecycle/startup-recovery-bootstrap.cjs');
+const { establishStartupRecoveryBoundary, mapScanBlocks } = require('../services/modpack-lifecycle/startup-recovery-bootstrap.cjs');
+const {
+  createCoordinatorQuiescenceVerifier,
+  establishDegradedRecoveryGate
+} = require('../services/modpack-lifecycle/degraded-recovery-gate.cjs');
 const { createVerifiedRestoreExtractor } = require('../services/modpack-lifecycle/verified-restore-extractor.cjs');
 const { inspectFolderEvidence } = require('../services/modpacks/instance-ownership.cjs');
 const { createDurableFs } = require('../utils/durable-fs.cjs');
@@ -42,6 +46,7 @@ const {
 } = require('../utils/config-manager.cjs');
 const instanceContext = require('../utils/instance-context.cjs');
 const { createClientConnectionCore } = require('./create-client-connection-core.cjs');
+const { createStartupHealthTracker } = require('./startup-health.cjs');
 const { WindowsDurableFsClient } = require('../utils/windows-durable-fs-client.cjs');
 const { isNetworkAccess } = require('../utils/server-network-properties.cjs');
 const { getRequiredJavaVersion } = require('../services/minecraft-launcher/utils.cjs');
@@ -565,23 +570,7 @@ async function createProductionRecoveryServices(input) {
       restorePointResolver: restore.resolve,
       restorePointService: restore.service
     });
-    const runtimeVerifier = input.runtimeVerifier || Object.freeze({
-      async verifyBeforeRecovery() {
-        try {
-          const lease = await coordinator.acquireStart({
-            instanceId: 'startup-recovery-probe',
-            serverPath: userDataPath
-          }, {
-            operation: 'startup-recovery-probe',
-            operationId: 'startup-recovery-probe'
-          });
-          await lease?.release?.();
-          return Object.freeze({ quiescent: false });
-        } catch (error) {
-          return Object.freeze({ quiescent: error?.code === 'RECOVERY_REQUIRED' });
-        }
-      }
-    });
+    const runtimeVerifier = input.runtimeVerifier || createCoordinatorQuiescenceVerifier({ coordinator, userDataPath });
     return Object.freeze({
       registry,
       recoveryService,
@@ -646,7 +635,21 @@ function createModpackServiceGraph(deps = {}) {
   });
 
   const modpackPaths = createModpackPaths(userDataPath);
-  const paths = Object.freeze({ userData: userDataPath, modpacks: modpackPaths });
+  const workerPath = durableWorkerPaths(runtimeRoots).workerPath;
+  const paths = Object.freeze({ userData: userDataPath, modpacks: modpackPaths, archiveWorker: workerPath });
+  const logger = deps.logger && typeof deps.logger === 'object' ? deps.logger : null;
+  const log = (level, message, data) => {
+    try {
+      logger?.[level]?.(message, { category: 'core', data });
+    } catch {
+      // Diagnostics never change startup.
+    }
+  };
+  const health = createStartupHealthTracker({
+    userDataPath,
+    workerPath,
+    existsSync: candidate => fsSync.existsSync(candidate)
+  });
   const http = deps.httpClient || new PinnedHttpsClient({ lookup: dnsLookup, request: httpsRequest });
   if (!http || typeof http.request !== 'function') throw new TypeError('HTTP client is invalid');
   const modrinthApi = deps.modrinthApiClient || new BoundedApiClient({
@@ -711,16 +714,22 @@ function createModpackServiceGraph(deps = {}) {
     randomUUID,
     clock
   });
+  // Without modpack services (degraded startup) the degraded fallbacks answer:
+  // instances without modpack evidence keep working, evidence is refused.
+  let degradedFallbacks = null;
+  const getClientPackIntegration = () => modpackServices?.clientPackIntegration || degradedFallbacks?.clientPackIntegration || null;
   const beginManagedLaunch = request => {
-    if (!modpackServices?.clientPackIntegration) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client services are not ready');
-    return modpackServices.clientPackIntegration.beginManagedLaunch(request);
+    const integration = getClientPackIntegration();
+    if (!integration) throw new ModpackError('CLIENT_PACK_UNAVAILABLE', 'Matching client services are not ready');
+    return integration.beginManagedLaunch(request);
   };
   // Read-only classification. A composition without an observer keeps the strict
   // repository, which answers the same where the observer answers and refuses more.
-  const getStateObserver = () => modpackServices?.stateObserver || modpackServices?.stateRepository || null;
+  const getStateObserver = () => modpackServices?.stateObserver || modpackServices?.stateRepository ||
+    degradedFallbacks?.stateRepository || null;
   const serverMutationPolicy = deps.serverMutationPolicy || createServerMutationPolicy({
     coordinator,
-    getClientPackIntegration: () => modpackServices?.clientPackIntegration || null,
+    getClientPackIntegration,
     getModpackStateRepository: getStateObserver,
     getInstances: () => store.get('instances') || [],
     createOperationId: channel => channelOperationId(channel, randomUUID)
@@ -728,6 +737,9 @@ function createModpackServiceGraph(deps = {}) {
   let recoveryServices = null;
   let rawRecoveryServices = null;
   let recoveryPromise = null;
+  // The boundary's own scan, kept so a start that degrades after the boundary
+  // settled still knows which servers that boundary blocks.
+  let boundaryScan = null;
   const recoveryFactory = deps.recoveryFactory || createProductionRecoveryServices;
   if (typeof recoveryFactory !== 'function') throw new TypeError('Recovery factory is invalid');
   const recovery = Object.freeze({
@@ -764,7 +776,12 @@ function createModpackServiceGraph(deps = {}) {
           recoveryServices = Object.freeze({ ...services });
           return establishStartupRecoveryBoundary({
             coordinator,
-            registry: recoveryServices.registry,
+            registry: Object.freeze({
+              async initialize() {
+                boundaryScan = await recoveryServices.registry.initialize();
+                return boundaryScan;
+              }
+            }),
             runtimeVerifier: recoveryServices.runtimeVerifier
           });
         })();
@@ -786,6 +803,24 @@ function createModpackServiceGraph(deps = {}) {
   if (typeof modpackFactory !== 'function') throw new TypeError('Modpack composition factory is invalid');
   let modpackServices = null;
   let modpackPromise = null;
+  // A composition whose startup failed may still be settling sent deletions and
+  // client cleanup, so its disposal has no deadline: graph disposal (and with it
+  // an orderly quit) waits for it. It settles to the disposal failure, or null.
+  let compositionDisposal = null;
+  let compositionDisposalPending = false;
+  function disposeHalfBuiltComposition(services) {
+    if (compositionDisposal || !services || typeof services !== 'object' || typeof services.dispose !== 'function') return;
+    compositionDisposalPending = true;
+    compositionDisposal = Promise.resolve()
+      .then(() => services.dispose())
+      .then(() => null, error => {
+        log('error', 'A modpack composition that failed to start could not be disposed', {
+          errorMessage: error?.message || String(error)
+        });
+        return error;
+      })
+      .finally(() => { compositionDisposalPending = false; });
+  }
   async function initializeModpacks() {
     if (!modpackPromise) {
       markStartupTrace('composition:factory:start');
@@ -823,15 +858,20 @@ function createModpackServiceGraph(deps = {}) {
         workerFactory
       })).then(async services => {
         markStartupTrace('composition:factory:complete');
-        if (!services || typeof services !== 'object') throw new TypeError('Modpack composition is invalid');
-        if (services.providers !== undefined && (!services.providers || typeof services.providers !== 'object' ||
-            !services.providers.modrinth || !services.providers.github)) {
-          throw new TypeError('Modpack composition providers are invalid');
-        }
-        if (typeof services.initialize === 'function') {
-          markStartupTrace('composition:initialize:start');
-          await services.initialize();
-          markStartupTrace('composition:initialize:complete');
+        try {
+          if (!services || typeof services !== 'object') throw new TypeError('Modpack composition is invalid');
+          if (services.providers !== undefined && (!services.providers || typeof services.providers !== 'object' ||
+              !services.providers.modrinth || !services.providers.github)) {
+            throw new TypeError('Modpack composition providers are invalid');
+          }
+          if (typeof services.initialize === 'function') {
+            markStartupTrace('composition:initialize:start');
+            await services.initialize();
+            markStartupTrace('composition:initialize:complete');
+          }
+        } catch (error) {
+          disposeHalfBuiltComposition(services);
+          throw error;
         }
         modpackServices = services;
         return services;
@@ -841,13 +881,25 @@ function createModpackServiceGraph(deps = {}) {
   }
 
   const modpacks = {};
+  // The management server's matching-pack requirement per server: the companion
+  // service when modpack services run, the degraded per-server answer otherwise.
+  const getCompanionResolver = () => {
+    const companionService = modpackServices?.companionService;
+    if (typeof companionService?.getStatus === 'function') return serverId => companionService.getStatus({ serverId });
+    return degradedFallbacks?.companionResolver || null;
+  };
   Object.defineProperties(modpacks, {
-    stateRepository: { enumerable: true, get: () => modpackServices?.stateRepository || null },
+    stateRepository: { enumerable: true, get: () => modpackServices?.stateRepository || degradedFallbacks?.stateRepository || null },
     stateObserver: { enumerable: true, get: getStateObserver },
     clientPackService: { enumerable: true, get: () => modpackServices?.clientPackService || null },
     companionService: { enumerable: true, get: () => modpackServices?.companionService || null },
-    clientPackIntegration: { enumerable: true, get: () => modpackServices?.clientPackIntegration || null },
-    listActiveClientMutations: { enumerable: true, get: () => modpackServices?.listActiveClientMutations || null },
+    companionResolver: { enumerable: true, get: getCompanionResolver },
+    clientPackIntegration: { enumerable: true, get: getClientPackIntegration },
+    degraded: { enumerable: true, get: () => degradedFallbacks },
+    listActiveClientMutations: {
+      enumerable: true,
+      get: () => modpackServices?.listActiveClientMutations || degradedFallbacks?.listActiveMutations || null
+    },
     managementSessionBroker: { enumerable: true, get: () => clientConnectionCore.managementSessionBroker },
     resolveClientByPath: { enumerable: true, get: () => clientConnectionCore.resolveClientByPath },
     acquireLegacyManagementContext: { enumerable: true, get: () => clientConnectionCore.acquireLegacyManagementContext },
@@ -910,26 +962,196 @@ function createModpackServiceGraph(deps = {}) {
   };
   const recoveryInitializer = startupInput.initializeRecovery || recovery.initialize;
   if (typeof recoveryInitializer !== 'function') throw new TypeError('Startup recovery initializer is invalid');
+
+  // Recovery blocks as the renderer and the health banner see them: by server id.
+  const blockedServerIds = blocks => {
+    const instances = store.get('instances');
+    const servers = Array.isArray(instances)
+      ? instances.filter(item => item?.type === 'server' && typeof item.id === 'string' && typeof item.path === 'string')
+      : [];
+    return blocks.map(block => {
+      const selector = block?.selector || {};
+      const registered = typeof selector.serverPath === 'string'
+        ? servers.find(server => pathAlias(server.path) === pathAlias(selector.serverPath))
+        : null;
+      return Object.freeze({
+        operationId: String(block?.operationId),
+        instanceId: typeof selector.instanceId === 'string' ? selector.instanceId : (registered?.id ?? null)
+      });
+    });
+  };
+  // The startup health lists at most 1,000 blocked servers; the gate keeps them all.
+  const recoveryGateHealth = (basis, globalBlock, blocks) => ({
+    basis,
+    globalBlock: globalBlock === true,
+    blockedServers: blockedServerIds(blocks.slice(0, 1000))
+  });
+  const boundaryBlocks = () => {
+    try {
+      return boundaryScan ? mapScanBlocks(boundaryScan).blocks : [];
+    } catch {
+      return [];
+    }
+  };
+
+  // At full startup a missing (or unreadable) ArchiveWorker.exe does not stop
+  // anything yet, so it is only recorded for the startup health banner.
+  const recordMissingWorker = () => {
+    let present = false;
+    try {
+      present = fsSync.existsSync(workerPath);
+    } catch {
+      present = false;
+    }
+    if (!present) {
+      reportStartupIssue('archive-worker', new ModpackError('EXTRACTOR_UNAVAILABLE', 'The archive worker is unavailable'));
+    }
+  };
+
   let startupPromise = null;
   const initializeRecovery = graph => {
     if (!startupPromise) {
       startupPromise = Promise.resolve(recoveryInitializer(graph)).then(async result => {
         await initializeModpacks();
+        // Health is diagnostic: its bookkeeping never fails a start that succeeded.
+        try {
+          const globalBlock = typeof result?.globalBlock === 'boolean' ? result.globalBlock : coordinator.globalRecoveryBlock === true;
+          health.markReady({ recoveryGate: recoveryGateHealth('boundary', globalBlock, boundaryBlocks()) });
+        } catch {
+          health.markReady({ recoveryGate: null });
+        }
+        recordMissingWorker();
         return result;
       });
     }
     return startupPromise;
   };
+
+  // Reported, never fatal: a stage that failed is logged and listed in the
+  // startup health, and startup goes on without it.
+  function reportStartupIssue(stage, error) {
+    try {
+      const snapshot = health.recordIssue(stage, error);
+      const issue = snapshot.issues[snapshot.issues.length - 1];
+      log('warn', 'A startup step failed; Minecraft Core continues without it', {
+        stage: issue?.stage ?? null,
+        reason: issue?.reason ?? null,
+        technical: issue?.technical ?? null
+      });
+    } catch {
+      // Reporting is diagnostic; it never turns a failure fatal.
+    }
+  }
+
+  // Degraded startup: the modpack services could not start. The recovery
+  // boundary is settled without them (fail closed for any modpack record), the
+  // degraded fallbacks keep instances without modpack evidence working, and the
+  // health says why. Memoized: the first failure decides.
+  let gateBlocks = null;
+  let degradedPromise = null;
+  async function settleDegradedRecoveryGate() {
+    if (coordinator.recoveryOpen === false) {
+      // Only the composition failed: the boundary it established stays as it is.
+      return recoveryGateHealth('boundary', coordinator.globalRecoveryBlock === true, boundaryBlocks());
+    }
+    const gate = await establishDegradedRecoveryGate({
+      coordinator,
+      userDataPath,
+      fsApi: fsSync,
+      clock: recoveryClock(clock),
+      randomUUID,
+      runtimeVerifier: deps.recoveryRuntimeVerifier || null
+    });
+    gateBlocks = gate.blocks;
+    return recoveryGateHealth(gate.basis, gate.globalBlock, gate.blocks);
+  }
+  const enterDegradedMode = error => {
+    if (!degradedPromise) {
+      degradedPromise = (async () => {
+        const recoveryGate = await settleDegradedRecoveryGate();
+        const { createDegradedModpackFallbacks } = require('./create-degraded-modpack-fallbacks.cjs');
+        degradedFallbacks = createDegradedModpackFallbacks({
+          userDataPath,
+          store,
+          clientConnectionCore,
+          instanceResolver,
+          clock,
+          fsSync,
+          fsPromises,
+          randomUUID,
+          recoveryGate: Object.freeze({
+            globalBlock: recoveryGate.globalBlock,
+            blocks: gateBlocks || boundaryBlocks()
+          }),
+          isCompositionDisposalPending: () => compositionDisposalPending,
+          reparseInspector: deps.reparseInspector || deps.recoveryReparseInspector || null
+        });
+        let snapshot;
+        try {
+          snapshot = health.markDegraded({ stage: 'recovery', error, recoveryGate });
+        } catch {
+          snapshot = health.markDegraded({ stage: 'recovery', error, recoveryGate: null });
+        }
+        log('error', 'Startup entered degraded mode: modpack features are turned off', {
+          reason: snapshot.failure?.reason ?? null,
+          technical: snapshot.failure?.technical ?? null,
+          recoveryGate: snapshot.recoveryGate
+        });
+        return Object.freeze({ mode: 'degraded' });
+      })();
+    }
+    return degradedPromise;
+  };
+
+  // Work an app update must not interrupt (the installer kills the app within
+  // seconds): modpack jobs and admitted lifecycle work, exclusive client pack
+  // mutations, lifecycle and exclusive ordinary coordinator holders, and the
+  // cleanup of a composition that failed to start. Shared ordinary writers do
+  // not block an update, as in v26.6.1.
+  const listActiveWork = () => {
+    const work = new Set();
+    const lifecycle = modpackServices?.lifecycleService;
+    if (typeof lifecycle?.listActiveOperationIds === 'function') {
+      for (const id of lifecycle.listActiveOperationIds()) work.add(id);
+    }
+    if (work.size === 0 && typeof lifecycle?.hasActiveWork === 'function' && lifecycle.hasActiveWork() === true) {
+      work.add('modpack-lifecycle-work');
+    }
+    const listClientMutations = modpacks.listActiveClientMutations;
+    if (typeof listClientMutations === 'function') {
+      for (const id of listClientMutations()) work.add(id);
+    }
+    if (typeof coordinator.listActiveOperations === 'function') {
+      for (const operation of coordinator.listActiveOperations()) {
+        if (operation?.holder === 'lifecycle' || operation?.holder === 'ordinary-exclusive') work.add(operation.operationId);
+      }
+    }
+    if (compositionDisposalPending) work.add('modpack-composition-disposal');
+    return Object.freeze([...work]);
+  };
+
+  const runModpackStartupHook = async (stage, hook) => {
+    try {
+      await hook();
+    } catch (error) {
+      reportStartupIssue(stage, error);
+    }
+  };
   const afterWindowCreated = async (window, graph) => {
     if (typeof startupInput.afterWindowCreated === 'function') await startupInput.afterWindowCreated(window, graph);
-    modpackServices?.nativeNotificationBridge?.start?.();
-    if (automaticReleaseChecksEnabled) await modpackServices?.releaseMonitor?.start?.();
+    // The modpack hooks never stop the window: a failure is reported instead.
+    await runModpackStartupHook('native-notifications:start', () => modpackServices?.nativeNotificationBridge?.start?.());
+    if (automaticReleaseChecksEnabled) {
+      await runModpackStartupHook('release-monitor:start', () => modpackServices?.releaseMonitor?.start?.());
+    }
     if (typeof startupInput.waitForWindowNavigationReady === 'function' &&
         typeof modpackServices?.armStartupRetirement === 'function') {
-      let ready;
-      try { ready = startupInput.waitForWindowNavigationReady(window); }
-      catch { ready = Promise.resolve(false); }
-      modpackServices.armStartupRetirement(Promise.resolve(ready));
+      await runModpackStartupHook('startup-retirement:arm', () => {
+        let ready;
+        try { ready = startupInput.waitForWindowNavigationReady(window); }
+        catch { ready = Promise.resolve(false); }
+        modpackServices.armStartupRetirement(Promise.resolve(ready));
+      });
     }
   };
   const dispose = async graph => {
@@ -938,7 +1160,9 @@ function createModpackServiceGraph(deps = {}) {
       modpackServices?.nativeNotificationBridge?.stop?.();
       await Promise.all([...clientPackIpcDisposers].map(disposeIpc => disposeIpc()));
       await modpackServices?.dispose?.();
+      const halfBuiltDisposalFailure = compositionDisposal ? await compositionDisposal : null;
       if (typeof startupInput.dispose === 'function') await startupInput.dispose(graph);
+      if (halfBuiltDisposalFailure) throw halfBuiltDisposalFailure;
     } finally {
       // Last: client pack work that is still settling may use its sessions. A session
       // read nothing tracks (a local edit's or a launch's requirement check) ends at
@@ -952,6 +1176,10 @@ function createModpackServiceGraph(deps = {}) {
   };
   const startup = Object.freeze({
     initializeRecovery,
+    enterDegradedMode,
+    reportStartupIssue,
+    getHealth: () => health.snapshot(),
+    listActiveWork,
     initializeServerConfig,
     cleanupRuntime: startupInput.cleanupRuntime || null,
     scheduleArtifactCachePrune,

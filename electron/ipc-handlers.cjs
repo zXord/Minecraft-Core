@@ -1,5 +1,6 @@
 // IPC handlers for the Electron app
-const { ipcMain } = require('electron');
+const electron = require('electron');
+const { ipcMain } = electron;
 const fs = require('fs');
 const { registerIpcHandlers, registeredHandlers } = require('./utils/ipc-helpers.cjs');
 const appStore = require('./utils/app-store.cjs');
@@ -26,8 +27,8 @@ const { getLoggerHandlers } = require('./ipc/logger-handlers.cjs');
 const { createErrorMonitoringHandlers } = require('./ipc/error-monitoring-handlers.cjs');
 const { createUtilityHandlers } = require('./ipc/utility-handlers.cjs');
 const { createModAvailabilityHandlers } = require('./ipc/mod-availability-handlers.cjs');
-const { createModpackHandlers } = require('./ipc/modpack-handlers.cjs');
-const { createClientPackHandlers } = require('./ipc/client-pack-handlers.cjs');
+const { createModpackHandlers, createUnavailableModpackHandlers } = require('./ipc/modpack-handlers.cjs');
+const { createClientPackHandlers, createUnavailableClientPackHandlers } = require('./ipc/client-pack-handlers.cjs');
 const { createManagementSessionHandlers } = require('./ipc/management-session-handlers.cjs');
 const { createServerMutationPolicy } = require('./services/server-mutation-policy.cjs');
 
@@ -37,6 +38,52 @@ const {
   getAutoRestartState
 } = require('./services/auto-restart.cjs');
 
+function runningServersForRelaunch() {
+  try {
+    const { getAllServerStates, getServerState } = require('./services/server-manager.cjs');
+    const allStates = typeof getAllServerStates === 'function' ? getAllServerStates() : [];
+    const states = Array.isArray(allStates) && allStates.length > 0
+      ? allStates
+      : [typeof getServerState === 'function' ? getServerState() : null];
+    return states.filter(state => state && state.isRunning);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Startup health for the degraded-mode banner, plus its Restart and Open log
+ * folder actions. Registered without the server mutation policy: none of them
+ * writes server files.
+ */
+function createStartupHandlers({ startup = null, getApp, getShell } = {}) {
+  return {
+    'startup:get-health': () => (typeof startup?.getHealth === 'function' ? startup.getHealth() : null),
+    'startup:relaunch': () => {
+      // A restart must not stop a server or interrupt work without the user's say.
+      if (runningServersForRelaunch().length > 0) {
+        return { success: false, error: 'Stop your running servers, then restart Minecraft Core.' };
+      }
+      const activeWork = typeof startup?.listActiveWork === 'function' ? startup.listActiveWork() : [];
+      if (activeWork.length > 0) {
+        return { success: false, error: 'Minecraft Core is still finishing a change. Wait for it to finish, then restart.' };
+      }
+      const app = getApp();
+      app.relaunch();
+      app.quit();
+      return { success: true };
+    },
+    'startup:open-logs': async () => {
+      try {
+        const logDirectory = require('path').join(getApp().getPath('userData'), 'logs');
+        const failure = await getShell().openPath(logDirectory);
+        return failure ? { success: false, error: 'The log folder could not be opened.' } : { success: true };
+      } catch {
+        return { success: false, error: 'The log folder could not be opened.' };
+      }
+    }
+  };
+}
 
 
 /**
@@ -83,8 +130,11 @@ function setupIpcHandlers(win, dependencies = {}) {
     createUtilityHandlers,
     createModAvailabilityHandlers,
     createModpackHandlers,
+    createUnavailableModpackHandlers,
     createClientPackHandlers,
+    createUnavailableClientPackHandlers,
     createManagementSessionHandlers,
+    createStartupHandlers,
     ...(ipcDependencies.handlerFactories || {})
   };
 
@@ -135,11 +185,28 @@ function setupIpcHandlers(win, dependencies = {}) {
   const modAvailabilityHandlers = handlerFactories.createModAvailabilityHandlers({
     startWatcher: ipcDependencies.nativeNotificationsEnabled !== false
   });
-  const modpackHandlers = dependencies.modpacks
-    ? handlerFactories.createModpackHandlers(dependencies.modpacks)
-    : null;
-  const clientPackIpc = dependencies.modpacks?.clientPackService && dependencies.modpacks?.companionService
-    ? handlerFactories.createClientPackHandlers(dependencies.modpacks) : null;
+  // Modpack services that did not start (degraded startup) keep every modpack
+  // and client pack channel registered, answered by the degraded fallbacks.
+  const startupHealth = typeof dependencies.startup?.getHealth === 'function' ? dependencies.startup.getHealth() : null;
+  const modpacksDegraded = Boolean(dependencies.modpacks && startupHealth) && startupHealth.modpackServices !== 'ready';
+  const degradedModpacks = modpacksDegraded ? dependencies.modpacks.degraded || null : null;
+  let modpackHandlers = null;
+  if (modpacksDegraded) {
+    modpackHandlers = handlerFactories.createUnavailableModpackHandlers({
+      readServerState: degradedModpacks?.readServerState || null,
+      listRecovery: degradedModpacks?.listRecovery || null
+    });
+  } else if (dependencies.modpacks) {
+    modpackHandlers = handlerFactories.createModpackHandlers(dependencies.modpacks);
+  }
+  let clientPackIpc = null;
+  if (modpacksDegraded) {
+    clientPackIpc = handlerFactories.createUnavailableClientPackHandlers({
+      readClientState: degradedModpacks?.readClientState || null
+    });
+  } else if (dependencies.modpacks?.clientPackService && dependencies.modpacks?.companionService) {
+    clientPackIpc = handlerFactories.createClientPackHandlers(dependencies.modpacks);
+  }
   if (clientPackIpc) {
     dependencies.registerClientPackIpcDisposer?.(() => clientPackIpc.dispose());
     win.once?.('closed', () => { void clientPackIpc.dispose().catch(() => {}); });
@@ -151,10 +218,17 @@ function setupIpcHandlers(win, dependencies = {}) {
     dependencies.registerClientPackIpcDisposer?.(() => managementSessionIpc.dispose());
     win.once?.('closed', () => { void managementSessionIpc.dispose().catch(() => {}); });
   }
-  if (dependencies.modpacks?.clientPackIntegration) {
-    require('./services/management-server.cjs').configureClientModpackResolver(serverId =>
-      dependencies.modpacks.companionService.getStatus({ serverId }));
+  // The matching pack requirement friends read from this host's servers: the
+  // companion service, or the degraded per-server answer.
+  const companionResolver = dependencies.modpacks?.companionResolver;
+  if (typeof companionResolver === 'function') {
+    require('./services/management-server.cjs').configureClientModpackResolver(companionResolver);
   }
+  const startupHandlers = handlerFactories.createStartupHandlers({
+    startup: dependencies.startup || null,
+    getApp: () => ipcDependencies.app || electron.app,
+    getShell: () => ipcDependencies.shell || electron.shell
+  });
     
     // Initialize logger handlers (singleton, no creation needed)
     const loggerHandlers = handlerFactories.getLoggerHandlers();
@@ -258,8 +332,8 @@ function setupIpcHandlers(win, dependencies = {}) {
       'set-auto-restart': (_e, options) => setAutoRestartOptions(options)
     }));
     
-    // Register app settings handlers
-    Object.entries(appSettingsHandlers).forEach(([channel, handler]) => {
+    // Register app settings and startup handlers (no server writers among them)
+    Object.entries({ ...appSettingsHandlers, ...startupHandlers }).forEach(([channel, handler]) => {
       // Skip if handler is not a function
       if (typeof handler !== 'function') {
         return;

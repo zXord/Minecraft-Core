@@ -225,3 +225,15 @@ test('default trace initialization clock and serialization failures stay contain
     assert.equal(writes, 0);
   }
 });
+
+test('every startup marker the real main entry emits is admitted by the trace allowlist', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../electron/main.cjs'), 'utf8');
+  const emitted = new Set([...source.matchAll(/mark(?:StartupTrace|StartupTiming)\('([^']+)'/gu)].map(match => match[1]));
+  assert.ok(emitted.has('main:imports:complete') && emitted.has('startup-window:create:complete'));
+  const { mark, lines } = fixture();
+  for (const marker of emitted) {
+    assert.equal(markers.includes(marker), true, `${marker} is in the reviewed marker list`);
+    assert.equal(mark(marker), true, marker);
+  }
+  assert.equal(lines.length, emitted.size);
+});
