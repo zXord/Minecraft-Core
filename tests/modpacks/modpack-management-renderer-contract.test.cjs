@@ -6,6 +6,17 @@ const test = require('node:test');
 const ROOT = path.resolve(__dirname, '../..');
 const source = relativePath => fs.readFileSync(path.join(ROOT, relativePath), 'utf8');
 
+function functionSource(text, signature) {
+  const start = text.indexOf(signature);
+  assert.ok(start >= 0, `Expected ${signature}`);
+  let depth = 0;
+  for (let index = text.indexOf('{', start); index < text.length; index += 1) {
+    if (text[index] === '{') depth += 1;
+    else if (text[index] === '}' && --depth === 0) return text.slice(start, index + 1);
+  }
+  throw new Error(`Unterminated ${signature}`);
+}
+
 test('App exposes a top-level Modpack tab beside Mods and lazy-loads its route', () => {
   const app = source('src/App.svelte');
   assert.match(app, /"mods",\s*"modpack"/);
@@ -221,6 +232,28 @@ test('modpack notification controls stay out of global server and client headers
   assert.doesNotMatch(clientHeader, /ModpackNotificationCenter|Modpack notifications/);
   assert.doesNotMatch(clientInterface, /onModpackNotificationNavigate/);
   assert.match(page, /<ModpackNotificationCenter[\s\S]*variant=["']contextual["']/);
+});
+
+test('a reviewed operation that did not start is explained after its Start button, scrolled into view and focused', () => {
+  const review = source('src/components/modpacks/ModpackPlanReview.svelte');
+  const start = review.indexOf('<div class="mp-actions"><button class="mp-button {isUninstall');
+  assert.ok(start >= 0);
+  const stale = review.indexOf('{#if planStale}<div class="mp-state warning" bind:this={actionRegion} tabindex="-1" role="alert"><strong>Reviewed plan needs a fresh preflight</strong>');
+  const failed = review.indexOf('{:else if error}<div class="mp-state error" bind:this={actionRegion} tabindex="-1" role="alert"><strong>Could not start the reviewed plan</strong><p>{error.message}</p>');
+  assert.ok(stale > start && failed > stale, 'the stale and failed Start outcomes follow the Start button');
+  assert.ok(review.indexOf('</section>', start) > failed, 'the outcomes stay inside the review');
+  assert.equal(review.match(/Run a fresh preflight review/gu)?.length, 1);
+  // The unknown-outcome status keeps its place with the plan details.
+  assert.ok(review.indexOf('Start outcome is unknown') < review.indexOf('aria-label="Planned file diff"'));
+
+  // Only a Start press reveals what it produced; the reveal waits for the region to render.
+  const run = functionSource(review, 'async function run(');
+  assert.match(run, /if \(isPlanStaleError\(result\.error\)\) planStale = true;\s*else error = result\.error;\s*revealOutcome = true;/u);
+  assert.match(run, /if \(revealOutcome\) await revealActionOutcome\(owner\);\s*\}$/u);
+  const reveal = functionSource(review, 'async function revealActionOutcome(');
+  assert.match(reveal, /await tick\(\);/u);
+  assert.match(reveal, /actionRegion\.scrollIntoView\?\.\(\{ block: 'nearest' \}\);\s*actionRegion\.focus\(\{ preventScroll: true \}\);/u);
+  assert.equal(review.match(/revealActionOutcome\(/gu)?.length, 2);
 });
 
 test('an expired management plan cannot execute again and preserves its exact action for re-preflight', () => {

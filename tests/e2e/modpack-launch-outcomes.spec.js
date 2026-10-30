@@ -1,5 +1,5 @@
 // New-server setup wizard: launch outcomes after Start (R4, R5, R12, R13, R14), the C7 amendments, and how the
-// review reports its own destination and preflight outcome. Real ServerSetupWizard and ArchiveGuidedReview
+// review reports its own destination, preflight and Install outcome. Real ServerSetupWizard and ArchiveGuidedReview
 // components; the bridge models a destination reservation table, one plan per preflight and deferrable channels.
 import { expect, test } from '@playwright/test';
 import fs from 'node:fs/promises';
@@ -130,6 +130,11 @@ const flush = (page, channel) => page.evaluate(channel => window.launchTest.flus
 const deferredCount = page => page.evaluate(() => window.launchTest.deferred.length);
 const followsReviewButton = (page, selector) => page.evaluate(selector => {
   const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === 'Choose destination and review plan');
+  const target = document.querySelector(selector);
+  return Boolean(button && target && (button.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING));
+}, selector);
+const followsInstallButton = (page, selector) => page.evaluate(selector => {
+  const button = document.querySelector('[data-launch-start]');
   const target = document.querySelector(selector);
   return Boolean(button && target && (button.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING));
 }, selector);
@@ -622,4 +627,43 @@ test('review action: a pick made while the previous reservation is still being r
   await expect(page.locator('body')).toContainText('Chosen destination: Destination 2');
   expect(await calls(page, 'modpacks:reserve-server-destination')).toBe(2);
   expect(await starts(page)).toBe(0);
+});
+
+// ---------------- The review reports its own Install outcome next to the Install button ----------------
+test('install action: a Start that did not start offers the fresh review next to its button, focused and announced', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 600 });
+  await review(page);
+  await startWith(page, 'not-started');
+  const outcome = page.getByRole('alert').filter({ hasText: 'Reviewed plan needs to be refreshed' });
+  await expect(outcome).toBeVisible();
+  await expect(outcome).toBeFocused();
+  await expect(outcome).toBeInViewport();
+  await expect(outcome.getByRole('button', { name: 'Run a fresh preflight review' })).toBeEnabled();
+  expect(await followsInstallButton(page, '[role="alert"]')).toBe(true);
+  await expect(page.getByRole('alert')).toHaveCount(1);
+  await expect(page.getByText('Reviewed plan needs to be refreshed', { exact: true })).toHaveCount(1);
+  await expectFreshReview(page);
+  await expect(page.getByText(NOT_STARTED)).toBeVisible();
+  expect(await starts(page)).toBe(1);
+  expect(await released(page)).toEqual([]);
+});
+
+test('install action: a later automatic not-started read shows the fresh review next to the button without moving focus', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-10-11T00:00:00Z') });
+  await page.clock.pauseAt(new Date('2026-10-11T00:00:01Z'));
+  await review(page);
+  await startWith(page, 'pending', 'transport');
+  await expect(page.getByText(/Start outcome is unknown/)).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  const check = page.getByRole('button', { name: 'Check exact launch status' });
+  await check.focus();
+  await set(page, { reconcileStatus: 'not-started' });
+  await page.clock.runFor(1200);
+  await expect(page.getByText(NOT_STARTED)).toBeVisible();
+  await expect(page.getByRole('alert').filter({ hasText: 'Reviewed plan needs to be refreshed' })).toBeVisible();
+  expect(await followsInstallButton(page, '[role="alert"]')).toBe(true);
+  await expectFreshReview(page);
+  expect(await page.evaluate(() => document.activeElement?.textContent)).toBe('Check exact launch status');
+  expect(await starts(page)).toBe(1);
+  expect(await released(page)).toEqual([]);
 });

@@ -1,5 +1,5 @@
 <script>
-  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { createEventDispatcher, onDestroy, tick } from 'svelte';
   import { isPlanStaleError } from '../../utils/modpacks/modpackApi.js';
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
 
@@ -20,6 +20,7 @@
   let childAlive = true;
   let startOwner = null;
   let launchUnknown = false;
+  let actionRegion;
   onDestroy(() => { childAlive = false; startOwner = null; });
 
   $: if ((reviewedPlan?.planId || null) !== activePlanId) resetPlanState(reviewedPlan);
@@ -57,6 +58,7 @@
     busy = true;
     error = null;
     showConfirmation = false;
+    let revealOutcome = false;
     try {
       const result = await startReviewedOperation({
         reviewContext: owner.context,
@@ -69,12 +71,23 @@
       if (result?.status === 'not-invoked' && result.error) {
         if (isPlanStaleError(result.error)) planStale = true;
         else error = result.error;
+        revealOutcome = true;
       }
     } catch (caught) {
       if (childAlive && startOwner === owner && reviewContext === owner.context) launchUnknown = true;
     } finally {
       if (childAlive && startOwner === owner && reviewContext === owner.context) { busy = false; startOwner = null; }
     }
+    if (revealOutcome) await revealActionOutcome(owner);
+  }
+
+  // The Start button ends a long review. A Start that did not run is explained right below it, scrolled into view and
+  // focused once, so the user is not left looking at a button that silently reset.
+  async function revealActionOutcome(owner) {
+    await tick();
+    if (!childAlive || startOwner || reviewContext !== owner.context || reviewedPlan !== owner.plan || !actionRegion) return;
+    actionRegion.scrollIntoView?.({ block: 'nearest' });
+    actionRegion.focus({ preventScroll: true });
   }
 </script>
 
@@ -93,8 +106,6 @@
     {:else if ['files-only', 'import-files-only-new'].includes(operationKind)}<div><dt>Runtime</dt><dd>Files only — no managed runtime</dd></div>{/if}
   </dl>
 
-  {#if planStale}<div class="mp-state warning" tabindex="-1" aria-live="assertive"><strong>Reviewed plan needs a fresh preflight</strong><p>The server revision or one-use plan changed before the operation started. Nothing from this stale plan will run.</p><button class="mp-button" type="button" disabled={busy} on:click={() => dispatch('stale')}>Run a fresh preflight review</button></div>
-  {:else if error}<div class="mp-state error" tabindex="-1" aria-live="assertive"><strong>Could not start the reviewed plan</strong><p>{error.message}</p></div>{/if}
   {#if launchUnknown}<div class="mp-state warning" role="status">Start outcome is unknown; it may already have started. Check owned operations before making another change.</div>{/if}
 
   {#if destructive}
@@ -120,6 +131,8 @@
     <label class="acknowledgement"><input type="checkbox" bind:checked={startAfterInstall} /><span>Start after install and validate final health</span></label>
   {/if}
   <div class="mp-actions"><button class="mp-button {isUninstall ? 'danger' : 'primary'}" type="button" disabled={busy || !canRun} on:click={() => destructive ? (showConfirmation = true) : run()}>{busy ? 'Starting…' : isDetach ? 'Detach and keep all files' : isUninstall ? 'Remove managed pack files' : 'Start reviewed operation'}</button></div>
+  {#if planStale}<div class="mp-state warning" bind:this={actionRegion} tabindex="-1" role="alert"><strong>Reviewed plan needs a fresh preflight</strong><p>The server revision or one-use plan changed before the operation started. Nothing from this stale plan will run.</p><button class="mp-button" type="button" disabled={busy} on:click={() => dispatch('stale')}>Run a fresh preflight review</button></div>
+  {:else if error}<div class="mp-state error" bind:this={actionRegion} tabindex="-1" role="alert"><strong>Could not start the reviewed plan</strong><p>{error.message}</p></div>{/if}
 </section>
 
 <ConfirmationDialog visible={showConfirmation} title={isDetach ? 'Detach modpack management?' : 'Remove managed pack files?'} message={isDetach ? 'Management and notifications will stop; zero files are removed.' : 'Only the exact reviewed unchanged managed files will be removed. Worlds, user additions, and modified files stay.'} confirmText={isDetach ? 'Detach' : 'Remove managed files'} confirmType={isUninstall ? 'danger' : 'primary'} initialFocus="cancel" on:cancel={() => (showConfirmation = false)} on:confirm={run} />

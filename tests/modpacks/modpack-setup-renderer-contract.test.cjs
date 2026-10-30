@@ -114,6 +114,44 @@ test('the review reports its destination and preflight outcome next to its butto
   assert.doesNotMatch(setup, /selectingDestination = !pendingInstanceId/u);
 });
 
+test('an Install press that did not start is reported next to the Install button, scrolled into view and focused', () => {
+  const review = source('src/components/setup/ArchiveGuidedReview.svelte');
+  // Every reason for a fresh review relabels the Install button, not only a not-started read from the parent.
+  assert.match(review, /\$: reviewRequiresRefresh = launchNotStarted \|\| installNotStarted \|\| planStale \|\| isPlanStaleError\(error\);/u);
+  assert.match(review, /on:click=\{startReviewedPlan\}>\{reviewRequiresRefresh \? 'Fresh review required' : starting \? 'Starting…' : launchUnknown \? 'Checking Start outcome…' : 'Install this exact reviewed plan'\}<\/button><\/div>/u);
+  assert.match(review, /\$: installRefreshShown = Boolean\(reviewedPlan\) && !conflictReview && \(launchNotStarted \|\| planStale \|\| installNotStarted\);/u);
+
+  // The outcome region directly follows the Install button and holds the only refresh action after a press.
+  const install = review.indexOf('<button data-launch-start');
+  assert.ok(install >= 0);
+  const outcome = review.slice(install, review.indexOf('</section>{/if}', install));
+  const refresh = outcome.indexOf('{#if installRefreshShown}<section class="mp-state warning install-action-outcome" bind:this={installActionRegion} tabindex="-1" role="alert">');
+  const failed = outcome.indexOf('{:else if installError}<section class="mp-state error install-action-outcome" bind:this={installActionRegion} tabindex="-1" role="alert">');
+  assert.ok(refresh > 0 && failed > refresh, 'the refresh and failure outcomes follow the Install button');
+  assert.match(outcome.slice(refresh, failed), /<strong>Reviewed plan needs to be refreshed<\/strong>.*disabled=\{busy \|\| starting\} on:click=\{\(\) => dispatch\('stale'\)\}>Run a fresh preflight review<\/button>/u);
+  assert.match(outcome.slice(failed), /<strong>Could not start the reviewed plan<\/strong><p>\{installError\.message\}<\/p>/u);
+  // The top banner keeps only staleness the parent reports, such as a stale preflight.
+  assert.match(review, /\{#if reviewRequiresRefresh\}\{#if !installRefreshShown\}<section class="mp-state warning" tabindex="-1" aria-live="assertive"><strong>Reviewed plan needs to be refreshed<\/strong>/u);
+  assert.ok(review.indexOf('{#if reviewRequiresRefresh}') < review.indexOf('aria-label="Archive inspection evidence"'));
+
+  // A Start that was not invoked stays with this review instead of being repeated by the parent at the top.
+  const start = functionSource(review, 'async function startReviewedPlan(');
+  assert.doesNotMatch(review, /dispatch\('error'/u);
+  assert.match(start, /installNotStarted = false;\s*installError = null;/u);
+  assert.match(start, /if \(result\?\.status === 'not-started'\) installNotStarted = true;/u);
+  assert.match(start, /if \(isPlanStaleError\(result\.error\)\) planStale = true;\s*else installError = result\.error;/u);
+  assert.match(start, /if \(revealOutcome\) await revealInstallOutcome\(owner\);\s*\}$/u);
+  const reset = functionSource(review, 'function resetReviewedPlanState(');
+  assert.match(reset, /installNotStarted = false;\s*installError = null;/u);
+
+  // Only the press reveals its outcome; status re-checks and prop changes never move focus.
+  const reveal = functionSource(review, 'async function revealInstallOutcome(');
+  assert.match(reveal, /await tick\(\);/u);
+  assert.match(reveal, /installActionRegion\.scrollIntoView\?\.\(\{ block: 'nearest' \}\);\s*installActionRegion\.focus\(\{ preventScroll: true \}\);/u);
+  assert.equal(review.match(/revealInstallOutcome\(/gu)?.length, 2);
+  assert.doesNotMatch(review, /\$:[^\n]*(?:revealInstallOutcome|installActionRegion)/u);
+});
+
 test('renderer modpack client uses only lifecycle IPC and symmetric event cleanup', () => {
   const api = source('src/utils/modpacks/modpackApi.js');
   for (const channel of [

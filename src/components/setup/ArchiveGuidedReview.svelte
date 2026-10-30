@@ -1,5 +1,5 @@
 <script>
-  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { createEventDispatcher, onDestroy, tick } from 'svelte';
   import { isPlanStaleError } from '../../utils/modpacks/modpackApi.js';
 
   const dispatch = createEventDispatcher();
@@ -42,6 +42,7 @@
     'assembling-files': 'Assembling files',
     'hashing-candidate-files': 'Hashing candidate files'
   });
+  const refreshExplanation = 'The server, archive session, or one-use plan changed before installation started. Nothing was installed. Refresh the exact selection and review a newly generated plan before continuing.';
 
   let acceptEula = false;
   let startAfterInstall = true;
@@ -64,6 +65,9 @@
   let childAlive = true;
   let startOwner = null;
   let unresolvedLaunch = false;
+  let installNotStarted = false;
+  let installError = null;
+  let installActionRegion;
   onDestroy(() => { childAlive = false; startOwner = null; });
 
   $: rootCandidates = inspection?.rootCandidates || [];
@@ -109,7 +113,10 @@
   $: launchNotStarted = Boolean(reviewContext && launchOutcome?.reviewContext === reviewContext &&
     reviewContext.plan === reviewedPlan && launchOutcome?.status === 'not-started');
   $: launchUnknown = unresolvedLaunch && !launchNotStarted;
-  $: reviewRequiresRefresh = launchNotStarted || planStale || isPlanStaleError(error);
+  $: reviewRequiresRefresh = launchNotStarted || installNotStarted || planStale || isPlanStaleError(error);
+  // What an Install press produced is shown right after the Install button. The top banner keeps only staleness the
+  // parent reports, such as a stale preflight, so a single fresh-review action is offered.
+  $: installRefreshShown = Boolean(reviewedPlan) && !conflictReview && (launchNotStarted || planStale || installNotStarted);
   $: downgradeRiskAccepted = operationKind !== 'downgrade' || acknowledgeDowngradeWorldRisk;
   $: needsNewServerResources = operationKind === 'install-new';
   $: validMaxRam = Number.isSafeInteger(Number(maxRam)) && Number(maxRam) >= 1 && Number(maxRam) <= 64;
@@ -207,6 +214,8 @@
     startOwner = null;
     starting = false;
     unresolvedLaunch = false;
+    installNotStarted = false;
+    installError = null;
   }
 
   function conflictDecision(conflictId, selections = conflictChoices) {
@@ -299,21 +308,37 @@
     const owner = { context: reviewContext, plan: reviewedPlan };
     startOwner = owner;
     starting = true;
+    installNotStarted = false;
+    installError = null;
+    let revealOutcome = false;
     try {
       const { planId, planFingerprint } = reviewedPlan;
       const choices = { acceptEula, startAfterInstall, restorePointId: null };
       const result = await startReviewedOperation({ reviewContext: owner.context, planId, planFingerprint, choices });
       if (!childAlive || startOwner !== owner || reviewContext !== owner.context || reviewedPlan !== owner.plan) return;
       unresolvedLaunch = result?.status === 'unknown';
-      if (result?.status === 'not-invoked' && result.error) {
+      if (result?.status === 'not-started') installNotStarted = true;
+      else if (result?.status === 'not-invoked' && result.error) {
+        // Shown here rather than dispatched: the parent would report it at the top, away from this button.
         if (isPlanStaleError(result.error)) planStale = true;
-        else dispatch('error', { error: result.error });
+        else installError = result.error;
       }
+      revealOutcome = installNotStarted || planStale || Boolean(installError);
     } catch (caught) {
       if (childAlive && startOwner === owner && reviewContext === owner.context) unresolvedLaunch = true;
     } finally {
       if (childAlive && startOwner === owner && reviewContext === owner.context) starting = false;
     }
+    if (revealOutcome) await revealInstallOutcome(owner);
+  }
+
+  // The Install button ends a long review. What its press produced is shown right below it, scrolled into view and
+  // focused once. Status re-checks and prop changes never move focus.
+  async function revealInstallOutcome(owner) {
+    await tick();
+    if (!childAlive || startOwner !== owner || reviewContext !== owner.context || reviewedPlan !== owner.plan || !installActionRegion) return;
+    installActionRegion.scrollIntoView?.({ block: 'nearest' });
+    installActionRegion.focus({ preventScroll: true });
   }
 
   function count(value) {
@@ -330,7 +355,7 @@
 <div class="modpack-surface mp-stack">
   <div class="mp-toolbar"><div class="grow"><p class="mp-kicker">Guided archive review</p><h2 class="mp-title">Inspect evidence before installation</h2><p class="mp-subtitle">No server write occurs until this exact plan is accepted and started.</p></div><button type="button" class="mp-button" on:click={() => dispatch('back')}>Choose another asset</button></div>
 
-  {#if reviewRequiresRefresh}<section class="mp-state warning" tabindex="-1" aria-live="assertive"><strong>Reviewed plan needs to be refreshed</strong><p>The server, archive session, or one-use plan changed before installation started. Nothing was installed. Refresh the exact selection and review a newly generated plan before continuing.</p><button type="button" class="mp-button" disabled={busy || starting} on:click={() => dispatch('stale')}>Run a fresh preflight review</button></section>
+  {#if reviewRequiresRefresh}{#if !installRefreshShown}<section class="mp-state warning" tabindex="-1" aria-live="assertive"><strong>Reviewed plan needs to be refreshed</strong><p>{refreshExplanation}</p><button type="button" class="mp-button" disabled={busy || starting} on:click={() => dispatch('stale')}>Run a fresh preflight review</button></section>{/if}
   {:else if error}<section class="mp-state error" tabindex="-1" aria-live="assertive"><strong>Review could not continue</strong><p>{error.message}</p></section>{/if}
 
   <section class="mp-grid" aria-label="Archive inspection evidence">
@@ -435,7 +460,9 @@
       {#if blockers.length}<div class="mp-state error"><strong>Plan has unresolved blockers</strong><ul>{#each blockers as blocker, index (index)}<li>{blocker.message || blocker.code || blocker}</li>{/each}</ul></div>{/if}
       <label class="acknowledgement"><input type="checkbox" bind:checked={acceptEula} /><span><strong>I accept the Minecraft EULA</strong><br /><small>Pack-supplied EULA files are ignored; this explicit choice controls application-owned acceptance.</small></span></label>
       <label class="acknowledgement"><input type="checkbox" bind:checked={startAfterInstall} /><span>Start after install and validate final health</span></label>
-      <div class="mp-actions"><button data-launch-start type="button" class="mp-button primary" disabled={!canStart || busy || starting || launchUnknown} on:click={startReviewedPlan}>{launchNotStarted ? 'Fresh review required' : starting ? 'Starting…' : launchUnknown ? 'Checking Start outcome…' : 'Install this exact reviewed plan'}</button></div>
+      <div class="mp-actions"><button data-launch-start type="button" class="mp-button primary" disabled={!canStart || busy || starting || launchUnknown} on:click={startReviewedPlan}>{reviewRequiresRefresh ? 'Fresh review required' : starting ? 'Starting…' : launchUnknown ? 'Checking Start outcome…' : 'Install this exact reviewed plan'}</button></div>
+      {#if installRefreshShown}<section class="mp-state warning install-action-outcome" bind:this={installActionRegion} tabindex="-1" role="alert"><strong>Reviewed plan needs to be refreshed</strong><p>{refreshExplanation}</p><button type="button" class="mp-button" disabled={busy || starting} on:click={() => dispatch('stale')}>Run a fresh preflight review</button></section>
+      {:else if installError}<section class="mp-state error install-action-outcome" bind:this={installActionRegion} tabindex="-1" role="alert"><strong>Could not start the reviewed plan</strong><p>{installError.message}</p></section>{/if}
     </section>
   {/if}
 </div>
