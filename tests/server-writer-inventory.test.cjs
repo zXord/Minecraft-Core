@@ -69,6 +69,35 @@ test('the inventory scanner covers descriptor and file-handle writes', () => {
   }
 });
 
+test('the inventory scanner covers computed open flags, durable publication, revision restores and zip writes', () => {
+  const fixture = 'fixture.cjs';
+  const reviewedSource = 'async function readOnly() { return true; }';
+  const reviewedDigest = computeWriteSiteDigest(reviewedSource);
+  const mutations = [
+    'descriptor = fsApi.openSync(filePath, flag);',
+    'const handle = await fs.promises.open(path.join(root, name), flags);',
+    'fsApi.ftruncateSync(descriptor, bytes.length);',
+    'durableFs.writeJsonAtomic(configPath, planned.normalized, { expectedTargetSha256 });',
+    'await this.durableFs.writeJsonAtomicAsync(target, value);',
+    'durableFs?.writeFileAtomic(target, bytes);',
+    'const preservedPath = durableFs.preserveUnreadable(configPath, bytes);',
+    'await durable.renameDurableAsync(source, destination);',
+    'restoreContentRevision(serverPath, preRestoreRevision);',
+    'zip.extractAllTo(serverPath, true);',
+    'archive.writeZip(fabricJarPath);'
+  ];
+
+  for (const mutation of mutations) {
+    const result = scanUnaccountedWriteSites({
+      repositoryRoot,
+      expectedDigests: { [fixture]: reviewedDigest },
+      readFile: () => `${reviewedSource}\n${mutation}\n`
+    });
+
+    assert.deepEqual(result, [fixture], mutation);
+  }
+});
+
 test('the inventory scanner ignores read-only opens and unrelated write methods', () => {
   const fixture = 'fixture.cjs';
   const reviewedSource = 'async function readOnly() { return true; }';
@@ -76,6 +105,10 @@ test('the inventory scanner ignores read-only opens and unrelated write methods'
   const nonMutations = [
     "await fs.promises.open('artifact.bin', 'r');",
     "fs.openSync('artifact.bin', 'rs');",
+    "fs.openSync(path.join(root, name), 'r');",
+    'await fs.promises.open(filePath);',
+    'descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);',
+    'descriptor = fsApi.openSync(resolved, fsApi.constants.O_RDONLY);',
     "res.write('x');",
     "socket.write('x');",
     "buffer.write('x');"
@@ -106,6 +139,49 @@ test('the inventory scanner covers writes introduced in the Electron main entry 
   });
 
   assert.deepEqual(result, [mainEntry]);
+});
+
+test('instance configuration writers added in the 26.11 fix wave are closed by the write-site inventory', () => {
+  for (const relativePath of [
+    'electron/utils/instance-config-fs.cjs',
+    'electron/bootstrap/create-degraded-modpack-fallbacks.cjs',
+    'electron/services/modpacks/instance-ownership.cjs',
+    'electron/services/modpack-lifecycle/live-server-folder-probe.cjs',
+    'electron/services/server-launcher.cjs'
+  ]) {
+    assert.equal(typeof SERVER_WRITER_WRITE_SITE_DIGESTS[relativePath], 'string', relativePath);
+  }
+
+  // Each edit changes only a write site the earlier patterns could not see.
+  const changedWrites = new Map([
+    [
+      'electron/utils/instance-config-fs.cjs',
+      ['descriptor = fsApi.openSync(filePath, flag);', 'descriptor = fsApi.openSync(filePath, flag, 0o666);']
+    ],
+    [
+      'electron/services/backup-service.cjs',
+      ['restoreContentRevision(serverPath, preRestoreRevision);', 'restoreContentRevision(serverPath, preRestoreRevision + 1);']
+    ],
+    [
+      'electron/utils/config-manager.cjs',
+      ['const preservedPath = durableFs.preserveUnreadable(configPath, bytes);', 'const preservedPath = durableFs.preserveUnreadable(configPath, Buffer.from(bytes));']
+    ]
+  ]);
+
+  for (const [relativePath, [reviewed, changed]] of changedWrites) {
+    const result = scanUnaccountedWriteSites({
+      repositoryRoot,
+      expectedDigests: SERVER_WRITER_WRITE_SITE_DIGESTS,
+      readFile: filePath => {
+        const source = fs.readFileSync(filePath, 'utf8');
+        if (path.relative(repositoryRoot, filePath).replaceAll('\\', '/') !== relativePath) return source;
+        assert.ok(source.includes(reviewed), `${relativePath} no longer contains: ${reviewed}`);
+        return source.replace(reviewed, changed);
+      }
+    });
+
+    assert.deepEqual(result, [relativePath], relativePath);
+  }
 });
 
 test('loader-mediated child server writers remain closed by the write-site inventory', () => {

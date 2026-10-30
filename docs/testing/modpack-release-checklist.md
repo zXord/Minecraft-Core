@@ -1,12 +1,95 @@
 # Modpack release checklist
 
-Updated 13 October 2026, Asia/Riyadh. **Not release ready.** This is the restart checklist for normal, visible app testing. Automated tests support these checks; they do not replace installing the real pack, running Minecraft, and joining the server.
+Updated 30 October 2026, Asia/Riyadh. **Not release ready.** This is the restart checklist for normal, visible app testing. Automated tests support these checks; they do not replace installing the real pack, running Minecraft, and joining the server.
+
+## 26.11.1 fix wave — 30 October 2026
+
+**Not release ready until the [native test plan](#native-test-plan) passes on the final build.** On 30 October an audit found that the modpack branch broke many things existing 26.6.1 users rely on. The fix wave on `codex/verify-modpacks-client-packs` (commit `3e21a09` onwards, on top of `ebbff2b`) is committed; nothing of it has been verified natively yet. The owner's answers of 30 October are binding; user-facing notes and the decision table are in the [26.11.1 release notes](../release-notes-26.11.1.md).
+
+### What the fix wave changed
+
+The product rule: an instance without modpack evidence, which is every server and client a 26.6.1 user has, behaves exactly like 26.6.1. One ownership predicate (`electron/services/modpacks/instance-ownership.cjs`) decides this from on-disk evidence only. Modpack lifecycle and recovery work keep their strict, fail-closed machinery. The boundary is documented in the [server writer inventory](../security/server-writer-inventory.md).
+
+- **Version** 26.11.1.
+- **Config writes:** a legacy writer for folders without evidence (no ArchiveWorker; junction, SUBST, mapped, UNC, drive-root and NFD folders work); damaged configs are repaired with their bytes kept as `*.unreadable-*`; a full backup restore keeps the change counter monotonic (N4); the backup lock works where native realpath fails.
+- **Server actions while running:** only Restore backup, Delete world, Delete instance, Version update/loader install and Repair need the server stopped (management settings too on modpack-managed servers). Shared ordinary writers with per-file lanes replace the exclusive queue; registry edits (client rename/delete, adding and reordering instances) work as in 26.6.1; one stable coordinator identity per folder, whatever the sidebar order; a deleted server's folder can be reused in the same session (R2); a change counter that could not be saved only fences modpack work instead of quarantining the server.
+- **Starts:** v26.6.1 launch parity for Forge 1.20.1 without runtime metadata, NeoForge- and Quilt-labelled servers, paper and snapshot labels; ordinary servers are 'running' at spawn with a best-effort watchdog, while modpack servers wait for an armed watchdog and are never hard-killed for a missing one; user edits to `user_jvm_args.txt` never block a managed start; Java extraction works through folder aliases.
+- **Modpack safety:** a modpack operation is refused while a server that Minecraft Core did not start holds the world (session.lock probe); uninstall removes exactly the reviewed files; keep-both files stay the user's and custom-named worlds are protected; full restores that would roll back modpack state are refused; saved GitHub asset patterns accept ordinary name characters such as '+'.
+- **Clients:** unmanaged clients take a shared guard with no process scans; own shaders, resource packs and client mods stay editable while the host gives no answer (10 s budget for a slow host); 26.6.1 hosts work (no pack panel); nested and twice-registered clients keep launch, sync and toggles; a larger server info cap, an unreachable-host reason and a registered-connection pin fallback.
+- **Updater:** installs wait for unfinished work, copies that are not the installed app never install or touch the Start Menu link, toast activator or Run key, the guarded downgrade, and honest "Host Update Required" messaging.
+- **Startup:** startup never exits silently; degraded mode (modpack features off, everything else working) with a health banner, Restart and Open log folder; source runs use the "Minecraft Core Development" profile and never poll GitHub.
+- **Setup wizard:** Install and Start outcomes are shown next to the button, focused and scrolled into view (see the wizard rule below).
+- **Release pipeline:** the committed ArchiveWorker, pinned identities, dry runs and verified publishing (see the [runbook](#release-pipeline-runbook)).
+- **Automated parity gate:** `tests/v26-upgrade-parity.integration.test.cjs` runs the real policy, coordinator, config writer, handlers and server manager on a 26.6.1-shaped profile. It covers every NT-02 action while a server runs (no ArchiveWorker), the stopped-only set, N4 restores, junction servers and clients, R2, the browser panel's shared policy (N5), v26.6.1 Forge, Quilt and NeoForge starts, a server directly under a drive root, client rename/delete, adding and reordering while a server runs, and auto-start. Every case fails on `ebbff2b`.
+
+### Setup wizard rule (C7, owner sign-off Q2)
+
+Within the setup wizard, a Start whose outcome is "not observed" counts as not admitted. Its settled destination reservation is released only through the guarded backend release, which fences the plans bound to it and refuses while anything still holds the folder; the wizard may do this automatically when that review is no longer on screen. This supersedes the 13 October rule of "no automatic Start or destination release" for that case. A pending, recovery-required or unavailable outcome never releases or unlocks anything.
+
+### Hosts update first, and the guarded downgrade
+
+A friend on 26.11.1 cannot play on a 26.6.1 host: Play shows **Host Update Required** with Refresh, and the host must update. On a PC with no modpack data the friend is also offered "Use version 26.6.1 on this PC", with a warning (the 26.6.1 remedy). On a PC with any modpack data (an active or historical lifecycle record, a client-pack transaction, or a registered instance with modpack evidence) that switch is refused with the reason. Play still needs exactly equal versions, as in 26.6.1.
+
+### Known limitations (accepted by the owner, Q4)
+
+- Modpack features are refused up front for a drive root or a folder directly under one, junction, SUBST, mapped-drive and network-share paths, NFD or leading/trailing-space names, and a folder registered twice. Everything 26.6.1 supports keeps working for those instances.
+- AppData on a network share runs with modpack features off.
+- Wizard: a Start that failed for a reason other than an expired review can leave the wizard paused until it is reopened (R5 residual); a destination deleted and recreated before an app restart stays reserved until the restart (R11 residual).
+- Downgrading to 26.6.1 after using modpacks: see the release notes (sibling folders, NeoForge guard, legacy Forge assets, 26.6.1 Repair).
+- QA only: 26.6.1 copies run a watchdog that can kill server JVMs (A62). Keep the QA patch that stops test copies of 26.6.1 from spawning it.
+
+### Native results recorded on 30 October (pre-fix build)
+
+Driven with mouse and keyboard in isolated sandboxes that redirect USERPROFILE, APPDATA and LOCALAPPDATA; the guard was checked after every session. **The build under test was the 13 October QA build** (asar `32257A46…`), which is `ebbff2b` plus the modStore commit, so these results predate the fix wave.
+
+New version, sandbox `modpacks-1`:
+
+| Check | Result |
+| --- | --- |
+| Modrinth browse, Adrenaline `26.5.1+mc26.2.fabric`, review (27 add / 0 / 0) | Pass |
+| Cancel during staging | Pass: "Cancelled, no server files changed", download kept |
+| Same-folder fresh install after that cancel (the 13 October INVALID_REQUEST bug) | Pass: installed, booted `Done (2.945s)` on 127.0.0.1:25601 |
+| Verify managed files | Pass: 358 checked, 0 mismatches |
+| Uninstall "Remove managed pack files" | **Fail**: PLAN_STALE twice (358 ≠ 357, `server.properties` recorded as a replaceable runtime file); nothing changed. Fixed by `d938174`. |
+| Local `.mrpack` through the native picker | Pass |
+| GitHub Releases via a Modrinth-linked repo, `mc1.21.1` asset, install and boot | Pass |
+| GitHub "Use this asset pattern for future releases" | **Fail**: "GitHub asset pattern is invalid" for `Adrenaline-26.5.1+mc1.21.1.fabric.mrpack`. Fixed by `bf4e62a`. |
+| 7-day retained download and cache cleanup (simulated ageing, restart) | Pass: 22 files to 0, retention list emptied |
+
+UX notes: the review error banner appeared at the top of the page, far from the button just pressed (fixed by `95600ec` and `51a7241`); once, after a destination was picked, the review did not start until the button was pressed again (in the same batches; needs a native recheck); cancelling a new install removes the empty folder the user picked (harmless, unchanged). Side effects: the packaged QA build registered the HKCU toast activator and wrote a Start Menu shortcut into the redirected profile (the installed-copy gate now prevents this), and it ran the live GitHub update check (source and QA copies no longer install updates; source runs no longer poll).
+
+26.6.1 golden data, sandboxes `upgrade-owner` and `upgrade-friend`, created through the real 26.6.1 UI: a Fabric 1.21.1 "Default Server" with mods (Lithium disabled, Sodium client-only), a whitelist and op, a manual backup plus daily 03:00 backups capped at 14, server and management auto-start on; a Forge 1.20.1/47.4.13 server (26.6.1's own Forge install failed with "reply was never sent", so it was completed with the official installer; 26.6.1 then died at mod discovery); `D:\MCQA Root Server` directly under a drive root (Fabric, port 25567); and a friend client paired to 127.0.0.1:8080 with required mods synced and the disabled Lithium correctly not required.
+
+Upgrade, pre-fix build opening that 26.6.1 owner data:
+
+- Both servers were refused with "Minecraft port 25565 is already used by 'Server 2'" although neither was running (both kept the 26.6.1 defaults 25565/8080), so server and management auto-start did nothing on first launch. Owner ruling: the cross-instance port check is the same as in 26.6.1 and is not changed by this wave; NT-01 rechecks it against 26.6.1 with the same profile.
+- A23 confirmed: the Forge server failed with "Server process failed to launch" (fixed by `28a970f`).
+- A13/A25 confirmed: the drive-root server's Mods tab stayed on "Checking modpack ownership" for more than 20 s, with Add disabled and delete/disable locked (fixed by the state observer and policy batches).
+- Logged: "XMCL Forge version lookup failed: maxRedirections is not supported, use the redirect interceptor"; the app falls back to Forge metadata. Forge server creation in 26.11.1 must be tested natively.
+
+### Still to verify natively on the final build
+
+- [ ] Execute the whole [native test plan](#native-test-plan) (NT-01 to NT-30) on the final build, in disposable profiles only, and record the results in the evidence ledger.
+- [ ] Re-run both 30 October failures: uninstall "Remove managed pack files" and saving the GitHub asset pattern for a name with '+'.
+- [ ] Re-check the wizard UX: errors next to the pressed button, and the review starting after a destination is picked without a second press.
+- [ ] On the 26.6.1 golden profile: the Forge 1.20.1 server starts (NT-13), the `D:\MCQA Root Server` Mods tab is usable (NT-09), and auto-start behaves as 26.6.1 did with the same port settings (NT-01).
+- [ ] Create a new Forge server in 26.11.1 (NT-13); note whether the XMCL lookup warning still appears.
+- [ ] A QA copy refuses updates as "not the installed app", registers no toast activator, leaves the Start Menu link and Run key alone and shows only in-app notifications (NT-23).
+
+### Open items found in review, not fixed in this wave
+
+- Owner decision Q6 (cache the ArchiveWorker verification per process) was not carried by any batch; strict writes on modpack-managed servers still re-hash the worker each time.
+- Deleting a client with "keep files" whose folder is the exact folder of a running registered server gives "the server must be stopped"; 26.6.1 allowed it (rename works).
+- Two client folders that share one client ID (a copied folder) cannot be renamed or deleted; 26.6.1 could.
+- Backup list and delete on a server folder that is missing (for example an unplugged drive) fail; 26.6.1 listed nothing and reported success.
+- After a keep-both choice, deleting or editing the `.pack` copy makes Verify report a damaged managed file and Repair fail until an update, uninstall or detach; keep-both works only for files in the server's top folder.
+- A failed NeoForge or Quilt loader install in the 26.11.1 wizard is reported as healthy and starts vanilla, as in 26.6.1 (the wizard never checked the install result).
 
 ## Scope update — 13 October 11:58
 
 The user explicitly cancelled Microsoft sign-in and authenticated gameplay testing. **Do not log in, reuse credentials, ask for sign-in, or run authenticated launch/join/rejoin tests.** These checks are **excluded by user request, not passed and no longer waiting on user input**. Continue only the remaining non-authentication checks on disposable QA instances. Older sign-in handoff instructions below are historical and superseded.
 
-## Latest native retry checkpoint — 13 October 17:45
+## Historical native retry checkpoint — 13 October 17:45
 
 The user authorized continuing the d1 retry. Normal mouse/keyboard use exposed two genuine defects; neither is a passed test:
 
@@ -555,6 +638,7 @@ Record each step's duration and the total against the 180-minute cap, plus the s
 
 - [ ] **Throwaway-repository rehearsal.** Push the release-ready branch, with the version bumped, as `main` of a disposable public repository, so stage, publish (discard, draft, verify-and-publish) and confirm-feed run for real. On a disposable Windows account or VM with public v26.6.1 installed, point its `resources\app-update.yml` (`owner`/`repo`) at the rehearsal repository, then check that the app offers the update, downloads it, passes the SHA-512 check, installs it and relaunches on the new version. Delete the rehearsal repository afterwards. Installed apps only read zXord/Minecraft-Core, so the rehearsal cannot reach users.
 - [ ] **Full preflight on a default (CRLF) clone.** Clone the branch into a throwaway folder with default settings, then run `npm ci`, `npm run verify:archive-worker`, the full `npm test`, `npm run test:failure-matrix` and both E2E suites with `LOCALAPPDATA` pointed at a fresh temporary folder. Run the file-symlink tests once, elevated or with Developer Mode on.
+- [ ] **Local artifact check.** `node scripts/verify-release-artifacts.cjs dist <version>` refuses a `dist` folder that holds more than one installer or blockmap, so remove installers of earlier versions from `dist` before a local `npm run dist` and check.
 
 **ArchiveWorker changes.** CI ships the committed `vendor/archive-worker/x64/ArchiveWorker.exe`. `native/archive-worker-source-digest.json` records the LF-normalised SHA-256 of every `native/ArchiveWorker` source file (bin and obj excluded) together with that exe's size and SHA-256, so `verify:archive-worker` fails when the sources change without a rebuild. After any edit under `native/ArchiveWorker`:
 
@@ -564,8 +648,46 @@ Record each step's duration and the total against the 180-minute cap, plus the s
 
 Never rerun the build script only to refresh the manifest: it rebuilds the exe with a new hash. If `git ls-files --eol build-resources/archive-runtime` shows `w/crlf` for `archive-worker-x64.json`, delete that file and run `git checkout -- build-resources/archive-runtime/archive-worker-x64.json`.
 
+## Native test plan
+
+The native checks for the 26.11.1 fix wave, from the 30 October integration plan. Execute them on the final build before the merge and record each result in the evidence ledger.
+
+Rules for every check: disposable Windows accounts, VMs or profiles and disposable instances only; the real visible app; no Microsoft login (stop at the launcher); never the owner's real `%APPDATA%\Minecraft Core`, `%LOCALAPPDATA%\Programs\Minecraft Core` or Start Menu.
+
+- [ ] **NT-01 Upgrade install.** Start from public 26.6.1 with a populated profile: a vanilla server, a Fabric server with mods, a Forge 1.20.1 server, a client paired to a server, backups, mod watches, ignored updates, auto-start on. Install the dry-run `Minecraft-Core-Setup-26.11.1.exe`. Expect the same install folder, the profile intact, the app opening on 26.11.1 with no banner, and instances listed in the same order.
+- [ ] **NT-02 Unmanaged server while it runs, every action:** add/remove whitelist, op and ban; ban-ip from the context menu; toggle auto-restart and both auto-start boxes; change the management port; start the management server; change the invite host and regenerate the secret; save server.properties (restart-to-apply banner); rename/delete a backup; change backup automation and retention; update/delete/disable a client-only mod; add/remove a mod watch; rename the server. Expect no "Another operation…" and no "Server recovery must be completed". Restart the app: everything persisted.
+- [ ] **NT-03** While running, Restore backup, Delete world, Delete instance, Version update/loader install and Repair are still refused. After stopping, each works.
+- [ ] **NT-04 Backup restore (N4):** restore a full backup made by 26.6.1, and another made after a settings change in the new build. Each reports success, the server starts, settings save again, and no recovery message appears.
+- [ ] **NT-05 Registry:** Add Instance → Custom server, with no server running and again while another runs; drag-reorder the sidebar while a server runs; delete a server keeping its files, re-add the same folder in the same session, then start it and change settings; delete the only server and create a new one; rename and delete clients (keep files, delete files, friend's host offline, client folder already deleted). Restart: everything persisted.
+- [ ] **NT-06** Tick two server settings checkboxes quickly in succession: both values persist and no error appears.
+- [ ] **NT-07** Kill the server's java.exe with auto-restart on: it restarts by itself; the crash limit is still honoured.
+- [ ] **NT-08 Nested and duplicate layouts:** client folder inside the server folder and the reverse; a folder registered twice (from a 26.6.1 profile). Settings, players, management start and mods work, and start/stop works after reordering the sidebar.
+- [ ] **NT-09 Folder shapes:** a server under a junctioned parent (`mklink /J`), a server folder that is itself a junction, a SUBST drive, a mapped NAS drive, `\\NAS\share\Server`, a dedicated drive root (`E:\`), a leading-space name and an NFD name copied from macOS. For each: start twice; change port/RAM and confirm after restart; add/delete a mod; edit server.properties; accept the EULA; make a manual backup, list and delete backups; confirm a scheduled backup is created; run Check Health; start management and have a friend connect and sync. For the junction, SUBST and mapped cases, also do a first start that downloads Java.
+- [ ] **NT-10 Damaged configs:** 0-byte, PowerShell-5 BOM and trailing-comma `.minecraft-core.json`. Start works and a settings save repairs the file, with `*.unreadable-*` holding the damaged bytes (none for 0 bytes). With a read-only config: start works with and without a port change, the server is not blocked, and a settings save errors as in 26.6.1.
+- [ ] **NT-11** ANSI server.properties containing `motd=§6Café`: start works, the bytes are unchanged, the MOTD shows correctly in the multiplayer list, and the port line is updated in place. An unchanged start does not change `contentRevision`.
+- [ ] **NT-12** Process Monitor filtered on ArchiveWorker.exe: two unmanaged starts, a settings save and several mod installs spawn none, and the window never freezes. A disposable modpack-managed server's settings change still spawns it.
+- [ ] **NT-13 Forge parity:** 26.6.1 Forge 1.20.1 reaches 'Done', both manually and through auto-start at login, with 26.6.1 spawn args and no `.minecraft-core-state`; Forge 1.12.2 shows the 26.6.1 'Forge launch assets are missing' message; a 'paper'-labelled server.jar starts, and a snapshot-version server starts; a new manual-wizard Forge server starts.
+- [ ] **NT-14 Watchdog:** slow VM with Defender, repeated starts including at login: no server is killed. PowerShell blocked by an AppLocker test rule: an unmanaged server runs with a [WARNING]; a managed server is refused before Java starts. End task powershell.exe during a run: the server keeps running. End task Minecraft Core.exe with PowerShell working: the server is killed within seconds.
+- [ ] **NT-15** Stop a server with a large world on a slow disk: Stopping goes to Stopped with no 'did not finish stopping' error. Restart-to-apply still works. Kill is available while a managed server is Starting.
+- [ ] **NT-16** Upgraded friend client paired to an upgraded host: connects, checks mods, downloads the required ones, and Play becomes enabled (stop at the launcher); toggles a mod; toggles and deletes shaders/resource packs. With the host's management server stopped: shaders and resource packs stay usable (each action within about 3 s); mods show 'Cannot Connect to Server'; the panel says the requirement could not be checked.
+- [ ] **NT-17** Friend PC running an elevated java.exe, a run.bat Forge server and Prism: sync, download, toggle and launch preparation are not blocked, with no added multi-second delay compared with 26.6.1.
+- [ ] **NT-18** Friend of a drive-root-child host (`D:\Server`) and of a junction host: no 'Matching pack unavailable'; mods sync; the owner's mod edits work; no sibling folders appear in the drive root.
+- [ ] **NT-19 Mixed versions:** new friend vs 26.6.1 host: no pack panel, mods sync, 'Host Update Required' with Refresh; on a PC with no modpack data 'Use version 26.6.1' is offered with a warning; on a PC with modpack data the switch is refused with the reason. 26.6.1 friend vs new host: the upgrade is offered and installs.
+- [ ] **NT-20** 400–1000 dummy jars in server and client mods: the friend loads server info and the mod list. Record the `/api/server/info` time.
+- [ ] **NT-21** Remove `managementCertFingerprint` and then the invite secret from a friend's client-config.json: it still connects. A second client of the same host whose own pin is missing binds through the first client's pin.
+- [ ] **NT-22 Startup resilience:** in a throwaway install copy, rename ArchiveWorker.exe: the app opens on a fresh and on an existing profile; legacy start/stop, settings, mods, backups and client sync work; the banner names ArchiveWorker, and Check for updates works from it. An interrupted modpack job plus a missing worker: only that server shows recovery required, and the others start from the UI. `%APPDATA%` behind a junction: opens normally. AppData redirected to UNC: degraded banner, legacy features work. Injected fatal error (unpackaged dev run): dialog over the splash, Open log folder and Quit work. Start minimized at login: no splash, the app stays in the tray.
+- [ ] **NT-23 Updater guards:** start a modpack install, or a client-pack recover: Install update is refused with 'still finishing a change', and proceeds once the work ends (also with auto-install on). QA copy without an uninstaller: updates refused as 'not the installed app'; the Start Menu link, HKCU CLSID and the Run key are untouched; only in-app notifications appear. Installed copy: toasts, auto-update and the login item work.
+- [ ] **NT-24 Modpack regression guard, on disposable managed instances:** mod edits are blocked; edit a setting while the server runs, then commit a previously reviewed update: 'review again'; an update stops the server first; management Start is disabled while the server runs; a friend without the pack sees 'Matching pack installation required'; corrupt modpack.json: friends are blocked and owner edits say 'ownership could not be checked'; start server.jar by hand in the managed folder: the update is refused with 'not started by Minecraft Core'; installing a modpack into `D:\Server` or a junction folder is refused up front with the subfolder message.
+- [ ] **NT-25 Setup wizard:** a normal modpack install into a new empty folder; before Start, Choose another asset and re-pick the same folder; a review left open for more than 2 h: Install shows Fresh review required, the same folder is reusable, and no stale notice appears; cancel right after Start: the folder is reusable without restarting the app; keyboard and Narrator focus stays on 'Check exact launch status'; the Empty/Custom server wizard shows no new notice and never jumps stage.
+- [ ] **NT-26 Ignored updates:** 0-byte, truncated and BOM `ignored-mod-updates.json` on the upgrade path; close the app within a second of ignoring; quick switch to another instance and back; move the folder away and back with its existing entries: entries kept, path not recreated; corrupt file, select the server while it runs, stop, restore a backup: the backup's ignores are kept; on a Synology folder: no `.tmp` files left.
+- [ ] **NT-27 Downgrade VM:** with NeoForge and Quilt packs installed by 26.11.1, install 26.6.1 over it: the NeoForge copy refuses to start with the UpdateRequired class, the world is untouched and no Repair is offered; Quilt runs Quilt with its mods; re-upgrade: both start; after 26.6.1's Repair on a legacy-Forge pack and a re-upgrade: start shows the Verify and Repair guidance, and a friend's info read does not get a 500.
+- [ ] **NT-28 CI dry run** on the branch (`gh workflow run release.yml --ref <branch> -f dry_run=true`): see the [release pipeline runbook](#release-pipeline-runbook).
+- [ ] **NT-29** Throwaway-repository rehearsal of stage/publish/confirm-feed, with a disposable 26.6.1 install whose `app-update.yml` points at the rehearsal repository: the updater downloads, verifies sha512 (differential), installs and relaunches on 26.11.1. Needs the owner's throwaway repository (Q12, deferred).
+- [ ] **NT-30 Real release after the merge:** the publish job is green, including confirm-feed; Latest is v26.11.1 with exactly three assets; a disposable 26.6.1 install offers the update in-app, installs it and relaunches on 26.11.1.
+
 ## Final acceptance
 
+- [ ] Execute the [native test plan](#native-test-plan) (NT-01 to NT-27) on the final build before the merge, and NT-30 after it.
 - [ ] Complete the release pipeline runbook above: a green CI dry run on the branch (NT-28) with timings recorded, the throwaway-repository rehearsal and the full CRLF-clone preflight.
 - [ ] For each native check above, record date, exact pack/asset, isolated instance, observed result and any screenshot/log reference in the evidence ledger. Keep failed, blocked and automated-only results distinct from native passes.
 - [ ] Fix discovered defects with regressions and independent review; rerun affected native scenarios on the final code.
