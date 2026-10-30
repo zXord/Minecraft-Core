@@ -8,6 +8,8 @@ const SERVER_CONFIG_FILENAME = '.minecraft-core.json';
 const CLIENT_CONFIG_FILENAME = 'client-config.json';
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const BUMP_OPTION_KEYS = new Set(['expectedRevision', 'operationId', 'durableFs']);
+const DEVICE_NAMESPACE_PATTERN = /^\\\\[?.]\\/;
+const EXPLICIT_ROOT_PATTERN = /^(?:[A-Za-z]:\\+|\\\\[^\\]+\\[^\\]+\\*)$/;
 const activeRevisionWrites = new Map();
 
 function invalidRequest(cause) {
@@ -40,11 +42,20 @@ function assertOperationId(operationId) {
   return operationId;
 }
 
+// Hand-edited configs are often saved with a UTF-8 BOM (PowerShell 5, Notepad).
+function parseConfigText(text) {
+  return JSON.parse(text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text);
+}
+
 function serverKey(serverPath) {
   if (typeof serverPath !== 'string' || serverPath.length === 0 || !path.isAbsolute(serverPath)) throw invalidRequest();
   const resolved = path.resolve(serverPath);
-  if (resolved === path.parse(resolved).root) throw invalidRequest();
-  return process.platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved;
+  const windows = process.platform === 'win32';
+  const slashed = windows ? serverPath.replace(/\//g, '\\') : serverPath;
+  if (windows && DEVICE_NAMESPACE_PATTERN.test(slashed)) throw invalidRequest();
+  // A whole drive or share may hold a server (A22); a bare '\' or '/' may not.
+  if (resolved === path.parse(resolved).root && !(windows && EXPLICIT_ROOT_PATTERN.test(slashed))) throw invalidRequest();
+  return windows ? resolved.toLocaleLowerCase('en-US') : resolved;
 }
 
 function withContentRevisionLock(serverPath, operationId, work) {
@@ -80,7 +91,7 @@ function readRawConfig(serverPath) {
   const { configPath } = resolveRevisionConfig(serverPath);
   if (!fs.existsSync(configPath)) return {};
   try {
-    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const parsed = parseConfigText(fs.readFileSync(configPath, 'utf8'));
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.getPrototypeOf(parsed) !== Object.prototype) {
       throw new TypeError('Config must be a plain object');
     }
@@ -97,7 +108,7 @@ function bumpClientContentRevision(serverPath, expectedRevision, operationId, du
       allowMissing: false,
       maxBytes: 1024 * 1024
     });
-    const parsed = JSON.parse(bytes.toString('utf8'));
+    const parsed = parseConfigText(bytes.toString('utf8'));
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
         Object.getPrototypeOf(parsed) !== Object.prototype) {
       throw new TypeError('Client config must be a plain object');
@@ -153,6 +164,7 @@ module.exports = {
   assertOperationId,
   bumpContentRevision,
   normalizeContentRevision,
+  parseConfigText,
   readContentRevision,
   withContentRevisionLock
 };

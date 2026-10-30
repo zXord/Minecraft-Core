@@ -7,6 +7,8 @@ const { getLoggerHandlers } = require('../ipc/logger-handlers.cjs');
 const { safeSend } = require('../utils/safe-send.cjs');
 const { withBackupMutationLock } = require('./backup-mutation-lock.cjs');
 const { markCurrentServerMutationDirty } = require('./server-mutation-context.cjs');
+const { readContentRevision } = require('./server-content-revision.cjs');
+const { SERVER_CONFIG_FILENAME, restoreContentRevision } = require('../utils/config-manager.cjs');
 const {
   METADATA_KIND: LIFECYCLE_METADATA_KIND,
   normalizeMetadata: normalizeLifecycleMetadata
@@ -883,6 +885,16 @@ async function renameBackup({ serverPath, oldName, newName }) {
   });
 }
 
+// A full backup can bring back an older .minecraft-core.json; every v26.6.1
+// backup has no contentRevision at all. Put the pre-restore revision back so
+// the restore's own revision bump continues from it instead of failing the
+// compare-and-set (N4). A world-only backup leaves the config as it was.
+function keepPreRestoreContentRevision(serverPath, preRestoreRevision) {
+  if (!fs.existsSync(path.join(serverPath, SERVER_CONFIG_FILENAME))) return;
+  if (readContentRevision(serverPath) === preRestoreRevision) return;
+  restoreContentRevision(serverPath, preRestoreRevision);
+}
+
 async function restoreBackup({ serverPath, name, serverStatus }) {
   try {
     void serverStatus;
@@ -940,6 +952,8 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
     const zip = new (/** @type {any} */ (AdmZip))(zipPath);
     validateZipEntriesStayInside(zip, serverPath);
     markCurrentServerMutationDirty(serverPath);
+    // Equals the coordinator lease base for this restore.
+    const preRestoreRevision = readContentRevision(serverPath);
     // For world-type backups, delete only world folders first
     if (isWorldType) {
       for (const folder of ['world', 'world_nether', 'world_the_end']) {
@@ -951,6 +965,7 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
     }
     // For full backups, just extract and overwrite everything
     zip.extractAllTo(serverPath, true);
+    keepPreRestoreContentRevision(serverPath, preRestoreRevision);
     return { success: true, message: 'Backup restored successfully.', preRestoreBackup: preRestoreBackupName };
   } catch (err) {
     return { success: false, error: err.message };

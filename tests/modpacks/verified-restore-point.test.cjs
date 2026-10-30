@@ -1300,10 +1300,18 @@ test('a junction alias cannot bypass the canonical pin-delete lock', async (t) =
   await withBackupService(async (backupService) => {
     const pin = environment.service.pinRestorePoint({ ...reference, pinId: 'history-alias-race' });
     await enteredPromise;
-    const deletion = await backupService.deleteBackup({ serverPath: alias, name: reference.name });
-    assert.equal(deletion.success, false);
+    // Every spelling of the folder shares the canonical lock, so the alias
+    // delete waits for the paused pin instead of being refused up front.
+    let deleteSettled = false;
+    const deletion = backupService.deleteBackup({ serverPath: alias, name: reference.name })
+      .then(result => { deleteSettled = true; return result; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(deleteSettled, false);
     release();
     await pin;
+    const result = await deletion;
+    assert.equal(result.success, false);
+    assert.match(result.error, /pinned/i);
     assert.equal(fs.existsSync(reference.archivePath), true);
   });
 });

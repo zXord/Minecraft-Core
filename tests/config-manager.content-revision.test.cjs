@@ -12,7 +12,8 @@ const {
 } = require('../electron/utils/config-manager.cjs');
 const {
   bumpContentRevision,
-  readContentRevision
+  readContentRevision,
+  withContentRevisionLock
 } = require('../electron/services/server-content-revision.cjs');
 const { createDurableFs } = require('../electron/utils/durable-fs.cjs');
 
@@ -287,6 +288,41 @@ test('malformed existing config fails closed and preserves its exact bytes', (t)
     error => error.code === 'COMMIT_FAILED'
   );
   assert.deepEqual(fs.readFileSync(configPath), malformed);
+});
+
+test('a BOM config reports its stored revision and bumps from it', (t) => {
+  const { serverPath, configPath, durableFs } = fixture(t);
+  fs.writeFileSync(configPath, Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from(JSON.stringify({ contentRevision: 7, maxRam: 8, port: 25570 }), 'utf8')
+  ]));
+
+  assert.equal(readContentRevision(serverPath), 7);
+  assert.equal(readServerConfig(serverPath).port, 25570);
+  assert.equal(bumpContentRevision(serverPath, {
+    expectedRevision: 7,
+    operationId: 'operation-bom',
+    durableFs
+  }), 8);
+
+  const written = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.deepEqual([written.contentRevision, written.maxRam, written.port], [8, 8, 25570]);
+});
+
+test('revision lock keys accept drive and share roots but refuse device and relative paths', {
+  skip: process.platform !== 'win32' && 'Windows path forms'
+}, () => {
+  // Lexical only: neither root is touched on disk.
+  assert.equal(withContentRevisionLock('X:\\', 'operation-drive-root', () => 'drive-root'), 'drive-root');
+  assert.equal(withContentRevisionLock('\\\\nas\\share', 'operation-share-root', () => 'share-root'), 'share-root');
+  for (const refused of ['\\\\?\\C:\\x', '\\\\.\\C:\\x', 'relative\\server', '\\', '/']) {
+    assert.throws(
+      () => withContentRevisionLock(refused, 'operation-refused', () => 'ran'),
+      error => error.code === 'INVALID_REQUEST',
+      refused
+    );
+    assert.throws(() => readContentRevision(refused), error => error.code === 'INVALID_REQUEST', refused);
+  }
 });
 
 test('config writes refuse a missing server directory instead of creating it', (t) => {

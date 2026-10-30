@@ -3,17 +3,17 @@ const path = require('node:path');
 
 const locks = new Map();
 
+// Every spelling of a folder (junction, symlink, SUBST or mapped drive, letter
+// case) resolves to the real directory, so all of them share one lock. Alias
+// refusal for modpack lifecycle work stays in restore-point-service.
 function lockKey(serverPath) {
   if (typeof serverPath !== 'string' || !path.isAbsolute(serverPath) || serverPath.includes('\0')) {
-    throw new TypeError('A canonical server path is required');
+    throw new TypeError('An absolute server path is required');
   }
-  const resolved = path.resolve(serverPath);
-  const stat = fs.lstatSync(resolved, { bigint: true });
-  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new TypeError('A canonical server directory is required');
-  const canonical = path.resolve(fs.realpathSync.native(resolved));
-  const comparableResolved = process.platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved;
+  const canonical = path.resolve(fs.realpathSync.native(path.resolve(serverPath)));
+  const stat = fs.statSync(canonical, { bigint: true });
+  if (!stat.isDirectory()) throw new TypeError('A server directory is required');
   const comparableCanonical = process.platform === 'win32' ? canonical.toLocaleLowerCase('en-US') : canonical;
-  if (comparableResolved !== comparableCanonical) throw new TypeError('Server path aliases are not allowed');
   return `${comparableCanonical}|${stat.dev}|${stat.ino}|${stat.birthtimeNs}`;
 }
 
