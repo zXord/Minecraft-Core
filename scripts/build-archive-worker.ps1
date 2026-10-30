@@ -7,6 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+. (Join-Path $PSScriptRoot 'archive-worker-manifest.ps1')
 
 function Resolve-ExactDirectory {
   param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Label)
@@ -117,6 +118,7 @@ $sdkLog = Join-Path $logsRoot 'dotnet-sdk.txt'
 $publishLog = Join-Path $logsRoot 'dotnet-publish.log'
 $selfTestOut = Join-Path $logsRoot 'worker-self-test.stdout.log'
 $selfTestErr = Join-Path $logsRoot 'worker-self-test.stderr.log'
+$sourceDigest = Get-ArchiveWorkerSourceDigest -SourceRoot $projectRoot
 
 Push-Location -LiteralPath $projectRoot
 try {
@@ -180,6 +182,7 @@ try {
 }
 if ($selfTestExit -ne 0) { throw "ArchiveWorker self-test failed with exit $selfTestExit" }
 if ($selfTestStdout.Length -ne 0 -or $selfTestStderr.Length -ne 0) { throw 'ArchiveWorker self-test emitted unexpected output' }
+if ((Get-ArchiveWorkerSourceDigest -SourceRoot $projectRoot).Sha256 -cne $sourceDigest.Sha256) { throw 'ArchiveWorker sources changed during the build' }
 
 $vendorRoot = Assert-Within -Root $repositoryRoot -Candidate (Join-Path $repositoryRoot 'vendor') -Label 'vendor root'
 $workerParent = Assert-Within -Root $repositoryRoot -Candidate (Join-Path $vendorRoot 'archive-worker') -Label 'worker parent'
@@ -210,18 +213,7 @@ $manifestDirectory = Assert-Within -Root $repositoryRoot -Candidate (Join-Path $
 $manifestDirectory = Resolve-ExactDirectory -Path $manifestDirectory -Label 'manifest directory'
 $manifestTarget = Assert-Within -Root $repositoryRoot -Candidate (Join-Path $manifestDirectory 'archive-worker-x64.json') -Label 'manifest target'
 $manifestStage = Assert-Within -Root $repositoryRoot -Candidate (Join-Path $manifestDirectory (".archive-worker-x64.stage-{0}.json" -f [Guid]::NewGuid().ToString('N'))) -Label 'manifest stage'
-$manifest = [ordered]@{
-  schemaVersion = 2
-  architecture = 'x64'
-  runtimeIdentifier = 'win-x64'
-  targetFramework = 'net8.0-windows'
-  sdkVersion = '10.0.204'
-  runtimeMode = 'in-memory-single-file'
-  files = [ordered]@{
-    'ArchiveWorker.exe' = [ordered]@{ size = $publishedSize; sha256 = $publishedHash }
-  }
-}
-$manifestText = ($manifest | ConvertTo-Json -Depth 4) + [Environment]::NewLine
+$manifestText = Format-ArchiveWorkerManifest -Size $publishedSize -Sha256 $publishedHash
 [IO.File]::WriteAllText($manifestStage, $manifestText, [Text.UTF8Encoding]::new($false))
 $stagedManifest = Assert-RegularExactFile -Path $manifestStage -ExpectedParent $manifestDirectory -ExpectedName ([IO.Path]::GetFileName($manifestStage)) -Label 'staged manifest'
 if ($stagedManifest.Length -gt 65536) { throw 'ArchiveWorker manifest is too large' }
@@ -230,11 +222,25 @@ if (Test-Path -LiteralPath $manifestTarget) {
 }
 Move-Item -LiteralPath $manifestStage -Destination $manifestTarget -Force -ErrorAction Stop
 
+# Ties the committed exe to these sources: CI ships the exe without rebuilding it, and verify:archive-worker
+# fails when native/ArchiveWorker no longer matches this record.
+$nativeRoot = Resolve-ExactDirectory -Path (Assert-Within -Root $repositoryRoot -Candidate (Join-Path $repositoryRoot 'native') -Label 'native root') -Label 'native root'
+$sourceDigestTarget = Assert-Within -Root $repositoryRoot -Candidate (Join-Path $repositoryRoot 'native\archive-worker-source-digest.json') -Label 'source digest target'
+$sourceDigestStage = Assert-Within -Root $repositoryRoot -Candidate (Join-Path $nativeRoot (".archive-worker-source-digest.stage-{0}.json" -f [Guid]::NewGuid().ToString('N'))) -Label 'source digest stage'
+$sourceDigestText = Format-ArchiveWorkerSourceDigest -Digest $sourceDigest -WorkerSize $publishedSize -WorkerSha256 $publishedHash
+[IO.File]::WriteAllText($sourceDigestStage, $sourceDigestText, [Text.UTF8Encoding]::new($false))
+[void](Assert-RegularExactFile -Path $sourceDigestStage -ExpectedParent $nativeRoot -ExpectedName ([IO.Path]::GetFileName($sourceDigestStage)) -Label 'staged source digest')
+if (Test-Path -LiteralPath $sourceDigestTarget) {
+  [void](Assert-RegularExactFile -Path $sourceDigestTarget -ExpectedParent $nativeRoot -ExpectedName 'archive-worker-source-digest.json' -Label 'existing source digest')
+}
+Move-Item -LiteralPath $sourceDigestStage -Destination $sourceDigestTarget -Force -ErrorAction Stop
+
 $identityRecord = [ordered]@{
   schemaVersion = 1
   worker = [ordered]@{ size = $publishedSize; sha256 = $publishedHash }
   manifest = 'build-resources/archive-runtime/archive-worker-x64.json'
   executable = 'vendor/archive-worker/x64/ArchiveWorker.exe'
+  sourceDigest = $sourceDigest.Sha256
 }
 [IO.File]::WriteAllText((Join-Path $operationRootFull 'build-result.json'), ($identityRecord | ConvertTo-Json -Depth 3) + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
 Write-Output ("ArchiveWorker built: size={0} sha256={1}" -f $publishedSize, $publishedHash)

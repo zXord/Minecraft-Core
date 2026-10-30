@@ -20,6 +20,57 @@ const {
 const repositoryRoot = path.resolve(__dirname, '..', '..');
 const workerPath = path.join(repositoryRoot, 'vendor', 'archive-worker', 'x64', 'ArchiveWorker.exe');
 const workerManifestPath = path.join(repositoryRoot, 'build-resources', 'archive-runtime', 'archive-worker-x64.json');
+const manifestFormatterPath = path.join(repositoryRoot, 'scripts', 'archive-worker-manifest.ps1');
+const sourceDigestPath = path.join(repositoryRoot, 'native', 'archive-worker-source-digest.json');
+const COMMITTED_WORKER = Object.freeze({
+  size: 67764851,
+  sha256: '279e3beb4c2b7e9425b7768be27764661eb53ff6e8d7b6da8823c3bfaff58083'
+});
+
+function installedPowerShells() {
+  const shells = [{
+    name: 'Windows PowerShell',
+    path: path.join(process.env.SystemRoot || process.env.WINDIR, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  }];
+  const located = childProcess.spawnSync('where.exe', ['pwsh'], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  const pwsh = located.status === 0 ? located.stdout.split(/\r?\n/u).map(line => line.trim()).find(Boolean) : null;
+  if (pwsh) shells.push({ name: 'PowerShell 7', path: pwsh });
+  return shells;
+}
+
+function powerShellLiteral(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function runPowerShell(shell, statements) {
+  const result = childProcess.spawnSync(shell.path, [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-Command', ["$ErrorActionPreference = 'Stop'", 'Set-StrictMode -Version Latest', `. ${powerShellLiteral(manifestFormatterPath)}`, ...statements].join('\n')
+  ], { encoding: 'utf8', windowsHide: true, timeout: 120000, shell: false });
+  assert.equal(result.status, 0, `${shell.name}: ${result.error || result.stderr || result.stdout}`);
+  return result.stdout;
+}
+
+function copyLineEndingVariant(root, lineEnding) {
+  const target = path.join(root, `ArchiveWorker-${lineEnding === '\n' ? 'lf' : 'crlf'}`);
+  fs.cpSync(path.join(repositoryRoot, 'native', 'ArchiveWorker'), target, {
+    recursive: true,
+    filter: source => !(['bin', 'obj'].includes(path.basename(source)) && fs.lstatSync(source).isDirectory())
+  });
+  const rewrite = directory => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        rewrite(entryPath);
+        continue;
+      }
+      const text = fs.readFileSync(entryPath, 'latin1').replaceAll('\r\n', '\n');
+      fs.writeFileSync(entryPath, lineEnding === '\n' ? text : text.replaceAll('\n', '\r\n'), 'latin1');
+    }
+  };
+  rewrite(target);
+  return target;
+}
 
 function copyPackagedArchiveResources(targetRoot) {
   const archiveRoot = path.join(targetRoot, 'archive');
@@ -103,6 +154,93 @@ test('worker build script pins the SDK, publishes one self-contained AMD64 execu
   assert.match(source, /\.archive-worker-x64\.stage-/);
   assert.doesNotMatch(source, /Remove-Item[^\r\n]*(?:-Recurse|-r\b)/i);
   assert.doesNotMatch(source, /& \$published\.FullName '--build-self-test'/);
+});
+
+test('worker build script writes the manifest and the source digest from the shared LF formatters', () => {
+  const source = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'build-archive-worker.ps1'), 'utf8');
+  assert.match(source, /^\. \(Join-Path \$PSScriptRoot 'archive-worker-manifest\.ps1'\)\r?$/mu);
+  assert.match(source, /\$manifestText = Format-ArchiveWorkerManifest -Size \$publishedSize -Sha256 \$publishedHash/u);
+  assert.doesNotMatch(source, /\$manifest\s*\|\s*ConvertTo-Json/u, 'ConvertTo-Json output differs between PowerShell editions');
+  assert.doesNotMatch(source, /\$manifestText\s*=[^\r\n]*\[Environment\]::NewLine/u);
+  const sourceBefore = source.indexOf('Get-ArchiveWorkerSourceDigest -SourceRoot $projectRoot');
+  const publish = source.indexOf('& dotnet @publishArguments');
+  const sourceAfter = source.indexOf('Get-ArchiveWorkerSourceDigest -SourceRoot $projectRoot', publish);
+  assert.ok(sourceBefore >= 0 && sourceBefore < publish && sourceAfter > publish,
+    'the source digest is taken before the build and re-checked after it');
+  assert.match(source, /Format-ArchiveWorkerSourceDigest -Digest \$sourceDigest -WorkerSize \$publishedSize -WorkerSha256 \$publishedHash/u);
+  assert.match(source, /'native\\archive-worker-source-digest\.json'/u);
+  assert.match(source, /\.archive-worker-source-digest\.stage-/u);
+});
+
+test('the manifest formatter writes the pinned LF bytes under every installed PowerShell edition', (t) => {
+  const { MANIFEST_IDENTITIES } = require('../../scripts/verify-packaged-archive.cjs');
+  const pin = MANIFEST_IDENTITIES['archive-worker-x64.json'];
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-worker-manifest-format-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const [index, shell] of installedPowerShells().entries()) {
+    const output = path.join(root, `manifest-${index}.json`);
+    const stdout = runPowerShell(shell, [
+      `$text = Format-ArchiveWorkerManifest -Size ${COMMITTED_WORKER.size} -Sha256 '${COMMITTED_WORKER.sha256}'`,
+      `[IO.File]::WriteAllText(${powerShellLiteral(output)}, $text, [Text.UTF8Encoding]::new($false))`,
+      '$rejected = 0',
+      `try { [void](Format-ArchiveWorkerManifest -Size 0 -Sha256 '${COMMITTED_WORKER.sha256}') } catch { $rejected++ }`,
+      `try { [void](Format-ArchiveWorkerManifest -Size 1 -Sha256 '${COMMITTED_WORKER.sha256.toUpperCase()}') } catch { $rejected++ }`,
+      "[Console]::Out.Write(\"rejected=$rejected\")"
+    ]);
+    assert.equal(stdout, 'rejected=2', shell.name);
+    const bytes = fs.readFileSync(output);
+    assert.equal(bytes.includes(0x0d), false, `${shell.name} must write LF line endings`);
+    assert.equal(bytes.length, pin.size, shell.name);
+    assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), pin.sha256, shell.name);
+    assert.deepEqual(JSON.parse(bytes.toString('utf8')).files['ArchiveWorker.exe'], COMMITTED_WORKER, shell.name);
+  }
+});
+
+test('PowerShell and Node compute the same LF-normalised source digest, which the committed record holds', { timeout: 120000 }, (t) => {
+  const { computeArchiveWorkerSourceDigest } = require('../../scripts/verify-packaged-archive.cjs');
+  assert.equal(typeof computeArchiveWorkerSourceDigest, 'function', 'computeArchiveWorkerSourceDigest is required');
+  const record = JSON.parse(fs.readFileSync(sourceDigestPath, 'utf8'));
+  assert.deepEqual(record.worker, COMMITTED_WORKER);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-worker-source-digest-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const variants = [
+    path.join(repositoryRoot, 'native', 'ArchiveWorker'),
+    copyLineEndingVariant(root, '\n'),
+    copyLineEndingVariant(root, '\r\n')
+  ];
+  for (const sourceRoot of variants) {
+    const digest = computeArchiveWorkerSourceDigest(sourceRoot);
+    assert.equal(digest.sha256, record.sha256, sourceRoot);
+    assert.deepEqual(digest.files, record.files, sourceRoot);
+  }
+  const linkedRoot = path.join(root, 'ArchiveWorker-linked');
+  fs.cpSync(variants[1], linkedRoot, { recursive: true });
+  fs.symlinkSync(path.join(variants[1], 'Security'), path.join(linkedRoot, 'Linked'), 'junction');
+  assert.throws(() => computeArchiveWorkerSourceDigest(linkedRoot), error => error?.code === 'EXTRACTOR_UNAVAILABLE');
+  const emptyFileRoot = path.join(root, 'ArchiveWorker-empty-file');
+  fs.cpSync(variants[1], emptyFileRoot, { recursive: true });
+  fs.writeFileSync(path.join(emptyFileRoot, 'Security', 'Empty.cs'), '');
+  const emptyFileDigest = computeArchiveWorkerSourceDigest(emptyFileRoot).sha256;
+  assert.notEqual(emptyFileDigest, record.sha256, 'an added empty file changes the digest');
+  for (const [index, shell] of installedPowerShells().entries()) {
+    assert.equal(runPowerShell(shell, [
+      `try { [void](Get-ArchiveWorkerSourceDigest -SourceRoot ${powerShellLiteral(linkedRoot)}); [Console]::Out.Write('accepted') }`,
+      "catch { [Console]::Out.Write('rejected') }"
+    ]), 'rejected', `${shell.name} must refuse a linked source tree`);
+    assert.equal(runPowerShell(shell, [
+      `[Console]::Out.Write((Get-ArchiveWorkerSourceDigest -SourceRoot ${powerShellLiteral(emptyFileRoot)}).Sha256)`
+    ]), emptyFileDigest, `${shell.name} must hash an empty source file like Node`);
+    for (const [variantIndex, sourceRoot] of variants.entries()) {
+      const output = path.join(root, `digest-${index}-${variantIndex}.json`);
+      runPowerShell(shell, [
+        `$sourceDigest = Get-ArchiveWorkerSourceDigest -SourceRoot ${powerShellLiteral(sourceRoot)}`,
+        `$text = Format-ArchiveWorkerSourceDigest -Digest $sourceDigest -WorkerSize ${COMMITTED_WORKER.size} -WorkerSha256 '${COMMITTED_WORKER.sha256}'`,
+        `[IO.File]::WriteAllText(${powerShellLiteral(output)}, $text, [Text.UTF8Encoding]::new($false))`
+      ]);
+      const written = fs.readFileSync(output, 'utf8');
+      assert.equal(written, `${JSON.stringify(record, null, 2)}\n`, `${shell.name}: ${sourceRoot}`);
+    }
+  }
 });
 
 test('the verified single-file worker loads in memory without writing a private runtime copy', (t) => {

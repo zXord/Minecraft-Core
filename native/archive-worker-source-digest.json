@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "source": "native/ArchiveWorker",
+  "sha256": "f89b65332cd66de89a7edad5218384da37891a877ffba6ce5ea02f07e329c432",
+  "files": {
+    "ArchiveWorker.csproj": "8eb0007d4b89ae6f1a46282327b1c30e33eb7c002f58a0ad2fd4e678fd42dabe",
+    "Durability/DurabilityRetryExecutor.cs": "9bf9d220a94dda8430de8b9cff9bef795c7c8dd10a10fe585b893a888ec49a06",
+    "Durability/DurabilityRetryPolicy.cs": "6095a86072b6cc52065493c13ae25546a6731656cae2520246c5db3c0b761bef",
+    "Durability/DurableFilesystem.cs": "ca61821dbd189cd2a4703fbaf601cbff204bed08cd08aadd0e0fe38374cf959e",
+    "Program.cs": "1eaaab3ee1beeee08dc163de0873c11cf55da206f1e436f1dc23145111266d5f",
+    "Protocol/FrameReader.cs": "50a9710a4ae93b1765102235edde2c98b947f301146cefa3933725f33e954963",
+    "Protocol/FrameWriter.cs": "fbee0aa69687106d3178c6b1c7b22efdaffe318cc823b9eefedb5f3d3e841d76",
+    "Protocol/TextChunker.cs": "f3e3582745aedf86e454fda6e5f93de4e7abf0d5329bad954e602f2072319c84",
+    "Protocol/WorkerDtos.cs": "38506449b61214511e030a7dfb5b1cd64c1d74cc78f9e640566cd04fe6ef56fe",
+    "Protocol/WorkerJsonContext.cs": "ee10e51c9f85c934d936cdc19e689de3c1b0f49050f65c01f58d4e53a8469b90",
+    "Sandbox/AclAccessMaskPolicy.cs": "52dbc5a9de1329a2e1200da4713be7a310306d8afce8d2a84112b710502def02",
+    "Sandbox/AclLease.cs": "74069a05025af2b6c17352df0046dcf02df07eb98659b3ea4d062303cda74a55",
+    "Sandbox/AclRecoveryPolicy.cs": "3d6ae85fc1eba265a86771481f53a7df058e3d7df579f6ba174add5bce260e6f",
+    "Sandbox/AppContainerProfile.cs": "f1f4424bb9040d207c4715094525605314ad2fad95810f8d7ecf653b602780e7",
+    "Sandbox/JobObject.cs": "2f6aafca574747593553f9adc39a66cbb8b51dce56addb9b02056426e92c8411",
+    "Sandbox/NamedMutexScope.cs": "17cac75c07c5d04139ba58a718cd5aac5fd9cfad3f04714d61bc5fbeea7c2cfc",
+    "Sandbox/NativeMethods.cs": "403b4b6b599453995c0a91f08526e5a4666d67783067590897289b2a48f3b916",
+    "Sandbox/SandboxedProcess.cs": "7f98e3e30f812b775b05f2223ca544e8762db4213129c9e27c48c2e47ea23607",
+    "Security/CanonicalPaths.cs": "697965511dd418bdde441d2d7503feccc837c2477894f2f52e483ecf59958f6a",
+    "Security/NativeFilePath.cs": "6f4dc9f4acc7ddf4daaa82c76e7d91989a20e3baa251dc0008b5e7e843ab4f00",
+    "Security/OperationWorkspace.cs": "88b0afe527d83ca18468dc5a74be7f6c42265ffdc3e1b98bb645177c4d5f4a75",
+    "Security/PathInputPolicy.cs": "958ff1d5491fc4502c545660e7703326ea0a5f12b1ba2135f646e72119a0156a",
+    "Security/PinnedFile.cs": "53885cd692b4cc312ab679a85024de0740c4b74ce9b0e06eaa55aa44b5da6774",
+    "Security/Redaction.cs": "7cbfd0d27c3b841cd304a361c49e420fa7e0bdcffacaee403ed643d4fbce6ad4",
+    "Security/ReparsePointPolicy.cs": "f205d8063a7c8108a495b7cf0b148c37766fceae4f9f3e081125af6c6982ae4b",
+    "Security/ReparseTagPolicy.cs": "bdf51a207bb6501ed25dc7557be846f5c7d0819b61072324cd49f98637ce6fa2",
+    "SevenZip/SevenZipCommandFactory.cs": "0aa75ccdcb0ec7fd3aefb4fd829ead4184f66033baaccf678d53ec549a0e2a6f",
+    "SevenZip/SevenZipRuntimeVerifier.cs": "3b0545105d4adc13694b881f63b55f8cabadca3fcb7d56f030e5b19f6d385f2a",
+    "global.json": "db4cb4a402c7f8a23da585ec0d02a66f635b8d34db3498fa6fc0a20811e1e99b"
+  },
+  "worker": {
+    "size": 67764851,
+    "sha256": "279e3beb4c2b7e9425b7768be27764661eb53ff6e8d7b6da8823c3bfaff58083"
+  }
+}

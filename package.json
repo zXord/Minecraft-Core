@@ -31,10 +31,11 @@
     "build:icons": "node scripts/generate-icon.cjs",
     "verify:archive-runtime": "node scripts/verify-archive-runtime.cjs",
     "verify:packaged-archive": "node scripts/verify-packaged-archive.cjs",
+    "verify:archive-worker": "node scripts/verify-packaged-archive.cjs --source-identity",
     "start": "electron .",
     "prod": "npm run build && npm run start",
-    "pack": "npm run build && npm run build:icons && npm run verify:archive-runtime && electron-builder --dir",
-    "dist": "npm run build && npm run build:icons && npm run verify:archive-runtime && electron-builder",
+    "pack": "npm run build && npm run build:icons && npm run verify:archive-runtime && electron-builder --dir --publish never",
+    "dist": "npm run build && npm run build:icons && npm run verify:archive-runtime && electron-builder --publish never",
     "release": "npm run build && npm run build:icons && npm run verify:archive-runtime && electron-builder --publish=always"
   },
   "devDependencies": {

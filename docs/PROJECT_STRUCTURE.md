@@ -27,7 +27,7 @@ minecraft-core/
 ## Directory Details
 
 ### `.github/`
-Contains GitHub Actions workflow files for automated releases and CI/CD pipelines. These workflows handle building and publishing releases when tags are pushed.
+Contains the GitHub Actions release workflow (`workflows/release.yml`). A version bump that reaches `main` builds, verifies and publishes the release; a manual run with `dry_run` (the default) runs every release gate on any branch without publishing. See the release pipeline runbook in `docs/testing/modpack-release-checklist.md`.
 
 ### `build-resources/`
 Source files required for building the application installer:

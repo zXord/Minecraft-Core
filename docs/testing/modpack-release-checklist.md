@@ -523,8 +523,50 @@ Preserve the older **a1** interrupted operation `op2-bbb18ef48d2efa541c9569569b4
 - [ ] Capture a naturally slow cold `npm run dev` startup with phase timings, then a warm restart without clearing caches. Latest audit separates warm Vite993ms from an approximately32-second Electron process-to-updater interval, currently unattributed. Bounded opt-in early/main startup tracing is implemented and independently reviewed;82/82 focused tests passed. It is diagnostic instrumentation, not a demonstrated speed fix. Determine the slow interval; do not call the cold-start problem fixed based on warm timings or blame updater network work from its initialization log.
 - [ ] Launch the locally packaged app normally in an isolated profile: check startup, renderer, taskbar icon, bundled archive/runtime tools, installation and client workflow. Do not publish the build.
 
+## Release pipeline runbook
+
+Releases are built and published only by `.github/workflows/release.yml` (Build and Release). It has four jobs:
+
+- **check-version** runs `node scripts/release-plan.cjs plan`. A push to `main` with a version that is newer than every `v*` tag and not yet tagged builds and publishes. A push whose version is already tagged is a green no-op. A manual run with `dry_run` (ticked by default) builds on any branch and never publishes; it refuses a version that is already released or not newer than the highest tag.
+- **build** (windows-latest, read-only, no credentials, 180 minutes) runs every gate in order. It never rebuilds ArchiveWorker.exe: `npm run verify:archive-worker` proves the committed exe, its pinned manifest and its sources instead. The last steps verify the installer's `resources/app-update.yml` and the exact release files, then keep the installer, its blockmap and `latest.yml` as the artifact `release-files-v<version>` for 7 days.
+- **stage** (ubuntu, read-only) downloads that artifact and verifies it again. It runs in dry runs too, so the download and the Linux verification are exercised before the first real release.
+- **publish** runs only for a non-dry-run on `main`. It verifies the files again, deletes unpublished drafts for the tag that `github-actions[bot]` left from an earlier attempt (it refuses on a published release or on any other draft), creates a **draft**, compares the draft's assets with the verified files (exact names, sizes and SHA-256 digests) and only then publishes it as Latest. **Confirm the update feed** finally checks, without a token, what installed apps download: `releases/latest`, `latest.yml`, and the installer's size and SHA-512 and the blockmap.
+
+**Version.** The version is `YY.M.N` (month of release, no leading zeros) and must be newer than the highest release tag. This wave uses **26.11.1**; use 26.12.1 if the merge slips into December. Never create or push a tag by hand: publishing creates `v<version>`. Never merge to `main` before the branch is release-ready, because a merge that changes `package.json` publishes.
+
+**Dry run (native check NT-28).** Run `gh workflow run release.yml --ref <branch> -f dry_run=true`. Always pass both `--ref` and `-f dry_run=true`: `main` still has the v26.6.1 workflow, which has no `dry_run` input, so a forgotten `--ref` fails instead of building on `main`. Never press Run workflow on `main` before the merge: the v26.6.1 workflow always builds on dispatch and would upload into the public v26.6.1 release. In the run, confirm:
+
+- check-version reports a dry run, and the TEMP step prints `C:\Users\runneradmin\…` (no `~`);
+- "Implicit publishing triggered by CI detection" never appears;
+- `verify:archive-worker` passes, the native RecoveryTests run passes, and the file-symlink tests ran rather than skipped;
+- every build and stage step is green, publish shows as skipped, and the artifact holds exactly the installer, the blockmap and `latest.yml`.
+
+Record each step's duration and the total against the 180-minute cap, plus the slowest tests' durations from the test logs (including `oversized native cleanup inventory…`, whose explicit timeout is 30 minutes). If the build job takes more than about 135 minutes, drop the duplicate `test:modpacks` and failure-matrix steps (`npm test` already runs those files) instead of raising the cap.
+
+**Re-runs.**
+
+- Build or stage failed: fix it on the branch and run again.
+- Publish failed before the draft was published: **Re-run failed jobs** publishes the same tested files after deleting the bot draft from the failed attempt. **Re-run all jobs** rebuilds, and the draft is still deleted first. After the artifact expires (7 days), only Re-run all jobs works.
+- A draft for the tag that `github-actions[bot]` did not create blocks publication: publish or delete it by hand first.
+- **Only "Confirm the update feed" failed:** the release is already public. Do not re-run (the tag now exists, so the discard step refuses). Check by hand that the release page shows v<version> as Latest with exactly three assets, that the public `latest.yml` equals the artifact's, and that the installer's size and SHA-512 match it.
+- The pipeline never edits a published release. Fix a broken release forward with the next version (26.11.2); unpublish the broken one by hand if users must not receive it.
+
+**Required before the first real release.**
+
+- [ ] **Throwaway-repository rehearsal.** Push the release-ready branch, with the version bumped, as `main` of a disposable public repository, so stage, publish (discard, draft, verify-and-publish) and confirm-feed run for real. On a disposable Windows account or VM with public v26.6.1 installed, point its `resources\app-update.yml` (`owner`/`repo`) at the rehearsal repository, then check that the app offers the update, downloads it, passes the SHA-512 check, installs it and relaunches on the new version. Delete the rehearsal repository afterwards. Installed apps only read zXord/Minecraft-Core, so the rehearsal cannot reach users.
+- [ ] **Full preflight on a default (CRLF) clone.** Clone the branch into a throwaway folder with default settings, then run `npm ci`, `npm run verify:archive-worker`, the full `npm test`, `npm run test:failure-matrix` and both E2E suites with `LOCALAPPDATA` pointed at a fresh temporary folder. Run the file-symlink tests once, elevated or with Developer Mode on.
+
+**ArchiveWorker changes.** CI ships the committed `vendor/archive-worker/x64/ArchiveWorker.exe`. `native/archive-worker-source-digest.json` records the LF-normalised SHA-256 of every `native/ArchiveWorker` source file (bin and obj excluded) together with that exe's size and SHA-256, so `verify:archive-worker` fails when the sources change without a rebuild. After any edit under `native/ArchiveWorker`:
+
+1. rebuild with `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-archive-worker.ps1`; it writes the exe, the LF manifest and the source digest;
+2. re-pin `MANIFEST_IDENTITIES['archive-worker-x64.json']` in `scripts/verify-packaged-archive.cjs` and the worker size and SHA-256 in the archive tests (`tests/modpacks/archive-worker-packaged.test.cjs`, `tests/modpacks/archive-worker-containment.test.cjs`);
+3. re-run the native worker tests and native QA with the new exe.
+
+Never rerun the build script only to refresh the manifest: it rebuilds the exe with a new hash. If `git ls-files --eol build-resources/archive-runtime` shows `w/crlf` for `archive-worker-x64.json`, delete that file and run `git checkout -- build-resources/archive-runtime/archive-worker-x64.json`.
+
 ## Final acceptance
 
+- [ ] Complete the release pipeline runbook above: a green CI dry run on the branch (NT-28) with timings recorded, the throwaway-repository rehearsal and the full CRLF-clone preflight.
 - [ ] For each native check above, record date, exact pack/asset, isolated instance, observed result and any screenshot/log reference in the evidence ledger. Keep failed, blocked and automated-only results distinct from native passes.
 - [ ] Fix discovered defects with regressions and independent review; rerun affected native scenarios on the final code.
 - [ ] Run the full automated suite and production build after the last source change, then complete final review. Preserve the user's unrelated edits.

@@ -612,7 +612,8 @@ test('completed operation does not starve older pending history at the operation
   assert.ok(resumed.completed.includes(first.operationId));
   assert.equal(fs.existsSync(first.previousPath), false);
 });
-test('oversized native cleanup inventory retains previous but does not block valid publication', async t => {
+// Measured 6.4 min alone and 6.2-9.6 min in full local runs (16 cores); 30 min names a hang on a 4-vCPU runner.
+test('oversized native cleanup inventory retains previous but does not block valid publication', { timeout: 1_800_000 }, async t => {
   const f = fixture(t);
   const bulk = path.join(f.live, 'bulk'); fs.mkdirSync(bulk);
   for (let index = 0; index < 20000; index++) fs.writeFileSync(path.join(bulk, `${index}.txt`), '');

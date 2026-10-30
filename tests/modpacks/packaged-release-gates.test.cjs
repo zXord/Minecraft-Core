@@ -398,9 +398,61 @@ test('packaged smoke waits for every shared-root probe before failure cleanup', 
   assert.equal(archiveRootExistedAtSettlement, true);
 });
 
+const workflowPath = path.join(repositoryRoot, '.github', 'workflows', 'release.yml');
+const VERSION = '${{ needs.check-version.outputs.version }}';
+const RELEASE_FILES = Object.freeze([
+  `dist/Minecraft-Core-Setup-${VERSION}.exe`,
+  `dist/Minecraft-Core-Setup-${VERSION}.exe.blockmap`,
+  'dist/latest.yml'
+]);
+const CREDENTIAL_REFERENCE = /secrets\.|github\.token/u;
+const PUBLISH_CONDITION = "needs.check-version.outputs.publish == 'true' && github.ref == 'refs/heads/main' && " +
+  "!(github.event_name == 'workflow_dispatch' && inputs.dry_run)";
+
+function loadWorkflow() {
+  return yaml.load(fs.readFileSync(workflowPath, 'utf8'));
+}
+
+function loadPackageJson() {
+  return JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
+}
+
+function commandLine(step, command) {
+  return String(step.run || '').split(/\r?\n/u).some(line => line.trim() === command);
+}
+
+function lines(value) {
+  return String(value || '').split(/\r?\n/u).map(line => line.trim()).filter(Boolean);
+}
+
+function credentialFree(step) {
+  return !CREDENTIAL_REFERENCE.test(JSON.stringify(step)) &&
+    !Object.keys(step.env || {}).some(key => /(?:TOKEN|SECRET|PASSWORD)/iu.test(key));
+}
+
+function checkoutWithoutCredentials(step) {
+  return step.uses === 'actions/checkout@v4' && step.with?.['persist-credentials'] === false;
+}
+
+function pinnedNode(step) {
+  return step.uses === 'actions/setup-node@v4' && String(step.with?.['node-version']) === '24.19.0';
+}
+
+function assertOrdered(steps, predicates, label) {
+  let prior = -1;
+  for (const [index, predicate] of predicates.entries()) {
+    const found = steps.findIndex((step, current) => current > prior && predicate(step));
+    assert.notEqual(found, -1, `${label}: missing required step #${index} after step ${prior}`);
+    assert.equal(steps[found].if, undefined, `${label}: gated steps must be unconditional`);
+    assert.notEqual(steps[found]['continue-on-error'], true, `${label}: gated steps must not be softened`);
+    prior = found;
+  }
+  return prior;
+}
+
 test('release browser gates discover launch reconciliation before packaging', () => {
-  const workflow = yaml.load(fs.readFileSync(path.join(repositoryRoot, '.github', 'workflows', 'release.yml'), 'utf8'));
-  const steps = workflow.jobs['build-and-release'].steps;
+  const workflow = loadWorkflow();
+  const steps = workflow.jobs.build.steps;
   const packagingIndex = steps.findIndex(step => String(step.run || '').trim() === 'npm run pack');
   assert.ok(packagingIndex >= 0, 'the release must have a packaging boundary');
   const scriptNames = steps.slice(0, packagingIndex)
@@ -436,77 +488,183 @@ test('release browser gates discover launch reconciliation before packaging', ()
   }
 });
 
-test('release workflow makes every Windows x64 modpack gate mandatory and ordered before installer publication', () => {
-  const workflow = yaml.load(fs.readFileSync(path.join(repositoryRoot, '.github', 'workflows', 'release.yml'), 'utf8'));
+test('release dry runs are a default-on dispatch input and one plan decides whether to build and publish', () => {
+  const workflow = loadWorkflow();
+  assert.deepEqual(workflow.on.push, { branches: ['main'], paths: ['package.json', '.github/workflows/release.yml'] });
+  assert.deepEqual(Object.keys(workflow.on.workflow_dispatch.inputs), ['dry_run']);
+  assert.equal(workflow.on.workflow_dispatch.inputs.dry_run.type, 'boolean');
+  assert.equal(workflow.on.workflow_dispatch.inputs.dry_run.default, true);
   assert.deepEqual(workflow.permissions, { contents: 'read' });
   assert.equal(workflow.concurrency?.['cancel-in-progress'], false);
   assert.match(String(workflow.concurrency?.group), /minecraft-core-release/u);
-  const checkJob = workflow?.jobs?.['check-version'];
-  const versionCheck = checkJob?.steps?.find(step => step.id === 'check');
-  assert.match(String(versionCheck?.run), /GITHUB_REF/u);
-  assert.match(String(versionCheck?.run), /refs\/heads\/main/u);
-  assert.match(String(versionCheck?.run), /\^\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$/u);
-  assert.match(String(versionCheck?.run), /tag v\$CURRENT_VERSION already exists/u);
-  assert.match(String(versionCheck?.run), /TAG_QUERY_STATUS=\$\?/u);
-  assert.match(String(versionCheck?.run), /TAG_QUERY_STATUS" -ne 2/u);
-  assert.doesNotMatch(String(versionCheck?.run), /Manual trigger - building/u);
-  const job = workflow?.jobs?.['build-and-release'];
-  assert.equal(job?.['runs-on'], 'windows-latest');
-  assert.equal(job?.['timeout-minutes'], 120);
-  assert.deepEqual(job?.permissions, { contents: 'write' });
-  const steps = job.steps;
-  assert.ok(Array.isArray(steps));
+  assert.deepEqual(Object.keys(workflow.jobs), ['check-version', 'build', 'stage', 'publish']);
 
-  const checkout = steps.find(step => step.uses === 'actions/checkout@v4');
-  assert.equal(checkout?.with?.['persist-credentials'], false);
+  const check = workflow.jobs['check-version'];
+  assert.equal(check.permissions, undefined, 'check-version keeps the read-only workflow permissions');
+  assert.equal(check.if, undefined);
+  assert.deepEqual(check.outputs, {
+    version: '${{ steps.plan.outputs.version }}',
+    build: '${{ steps.plan.outputs.build }}',
+    publish: '${{ steps.plan.outputs.publish }}'
+  });
+  assert.equal(check.steps.every(credentialFree), true);
+  const planIndex = assertOrdered(check.steps, [
+    checkoutWithoutCredentials,
+    pinnedNode,
+    step => step.id === 'plan' && commandLine(step, 'node scripts/release-plan.cjs plan')
+  ], 'check-version');
+  assert.deepEqual(check.steps[planIndex].env, { DRY_RUN: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}" });
+});
 
-  const commandLine = (step, command) => String(step.run || '').split(/\r?\n/u).some(line => line.trim() === command);
-  const required = [
-    step => step.uses === 'actions/setup-dotnet@v4' && String(step.with?.['dotnet-version']) === '10.0.204',
+test('the build job runs every gate in order, read-only and without credentials, and keeps exactly the release files', () => {
+  const build = loadWorkflow().jobs.build;
+  assert.equal(build.needs, 'check-version');
+  assert.equal(build.if, "needs.check-version.outputs.build == 'true'");
+  assert.deepEqual(build.permissions, { contents: 'read' });
+  assert.equal(build['runs-on'], 'windows-latest');
+  assert.equal(build['timeout-minutes'], 180);
+  for (const step of build.steps) {
+    assert.equal(credentialFree(step), true, `${step.name || step.uses} must not see credentials`);
+    assert.doesNotMatch(String(step.run || ''), /build-archive-worker\.ps1|dotnet\s+publish/u,
+      'CI ships the committed, natively tested worker instead of rebuilding it');
+  }
+  const testStep = command => step => commandLine(step, command) && Number.isInteger(step['timeout-minutes']) &&
+    step['timeout-minutes'] > 0 && step['timeout-minutes'] < build['timeout-minutes'];
+  const last = assertOrdered(build.steps, [
+    checkoutWithoutCredentials,
+    step => pinnedNode(step) && step.with?.cache === 'npm',
+    step => /realpathSync\.native\(process\.env\.TEMP\)/u.test(String(step.run)) && /Contains\('~'\)/u.test(String(step.run)) &&
+      /"TEMP=\$long"/u.test(String(step.run)) && /"TMP=\$long"/u.test(String(step.run)) && /GITHUB_ENV/u.test(String(step.run)),
+    step => commandLine(step, 'npm install -g npm@12.0.2') && /npm --version/u.test(String(step.run)) && /'12\.0\.2'/u.test(String(step.run)),
+    step => step.uses === 'actions/setup-dotnet@v4' && lines(step.with?.['dotnet-version']).join(',') === '8.0.x,10.0.204',
     step => step.name === 'Require Windows x64 host' && /OSArchitecture/u.test(String(step.run)) && /X64/u.test(String(step.run)),
     step => commandLine(step, 'npm ci'),
-    step => step.name === 'Verify or acquire pinned 7-Zip runtime' && /acquire-7zip\.ps1/u.test(String(step.run)) && commandLine(step, 'npm run verify:archive-runtime'),
-    step => /build-archive-worker\.ps1/u.test(String(step.run)),
-    step => commandLine(step, 'npm test'),
-    step => commandLine(step, 'npm run test:modpacks'),
-    step => commandLine(step, 'npm run test:failure-matrix'),
+    step => step.name === 'Verify or acquire pinned 7-Zip runtime' && /acquire-7zip\.ps1/u.test(String(step.run)) &&
+      commandLine(step, 'npm run verify:archive-runtime'),
+    step => commandLine(step, 'npm run verify:archive-worker'),
+    step => commandLine(step, 'dotnet build native/ArchiveWorker.RecoveryTests/ArchiveWorker.RecoveryTests.csproj --configuration Release --nologo'),
+    testStep('npm test'),
+    testStep('npm run test:modpacks'),
+    testStep('npm run test:failure-matrix'),
     step => commandLine(step, 'npm run build'),
     step => commandLine(step, 'npm run test:e2e:modpacks'),
+    step => commandLine(step, 'node node_modules/playwright/cli.js install chromium'),
+    step => commandLine(step, 'npm run test:e2e:modpack-launch-reconciliation'),
     step => commandLine(step, 'npm run pack'),
     step => commandLine(step, 'npm run verify:packaged-archive'),
     step => commandLine(step, 'npm run smoke:packaged:modpacks'),
     step => commandLine(step, 'npm run dist'),
+    step => commandLine(step, 'node scripts/verify-release-artifacts.cjs --app-update dist/win-unpacked'),
     step => step.name === 'Re-verify final installer payload' && commandLine(step, 'npm run verify:packaged-archive'),
     step => step.name === 'Re-smoke final installer payload' && commandLine(step, 'npm run smoke:packaged:modpacks'),
-    step => step.name === 'Verify exact release artifacts' && /Minecraft-Core-Setup-/u.test(String(step.run)) &&
-      /SHA512/u.test(String(step.run)) && /latest\.yml/u.test(String(step.run)),
-    step => step.uses === 'softprops/action-gh-release@v3'
-  ];
+    step => commandLine(step, `node scripts/verify-release-artifacts.cjs dist ${VERSION}`),
+    step => step.uses === 'actions/upload-artifact@v7'
+  ], 'build');
+  assert.equal(last, build.steps.length - 1, 'keeping the verified files is the last build step');
+  const upload = build.steps[last];
+  assert.deepEqual(lines(upload.with.path), RELEASE_FILES);
+  assert.deepEqual({ ...upload.with, path: undefined }, {
+    name: `release-files-v${VERSION}`,
+    path: undefined,
+    'if-no-files-found': 'error',
+    'retention-days': 7,
+    'compression-level': 0,
+    overwrite: true
+  });
+  const packageJson = loadPackageJson();
+  assert.equal(packageJson.packageManager, 'npm@12.0.2', 'CI installs the npm that wrote package-lock.json');
+});
 
-  let prior = -1;
-  for (const predicate of required) {
-    const index = steps.findIndex((step, current) => current > prior && predicate(step));
-    assert.notEqual(index, -1, `missing required release gate after step ${prior}`);
-    assert.notEqual(steps[index]['continue-on-error'], true);
-    assert.equal(steps[index].if, undefined);
-    prior = index;
-  }
-  assert.equal(steps.some(step => step['continue-on-error'] === true), false);
-  assert.equal(steps.some(step => /\|\|\s*(?:true|exit\s+0)/iu.test(String(step.run || ''))), false);
+test('the stage job re-verifies the kept release files in dry runs too, without credentials', () => {
+  const stage = loadWorkflow().jobs.stage;
+  assert.deepEqual(stage.needs, ['check-version', 'build']);
+  assert.equal(stage.if, undefined, 'staging is not skipped by dry runs');
+  assert.deepEqual(stage.permissions, { contents: 'read' });
+  assert.equal(stage['runs-on'], 'ubuntu-latest');
+  assert.equal(stage.steps.every(credentialFree), true);
+  const last = assertOrdered(stage.steps, [
+    checkoutWithoutCredentials,
+    pinnedNode,
+    step => step.uses === 'actions/download-artifact@v8' && step.with?.name === `release-files-v${VERSION}` && step.with?.path === 'dist',
+    step => commandLine(step, `node scripts/verify-release-artifacts.cjs dist ${VERSION}`)
+  ], 'stage');
+  assert.equal(last, stage.steps.length - 1);
+});
 
-  const releaseIndex = steps.findIndex(step => step.uses === 'softprops/action-gh-release@v3');
-  assert.ok(releaseIndex > 0);
-  for (const step of steps.slice(0, releaseIndex)) {
-    assert.equal(Object.keys(step.env || {}).some(key => /(?:TOKEN|SECRET|PASSWORD)/iu.test(key)), false,
-      `${step.name || step.uses} exposes release credentials before publication`);
+test('only an untagged main release reaches the credentialed publish job, which publishes a verified draft', () => {
+  const publish = loadWorkflow().jobs.publish;
+  assert.deepEqual(publish.needs, ['check-version', 'build', 'stage']);
+  assert.equal(publish.if, PUBLISH_CONDITION);
+  assert.deepEqual(publish.permissions, { contents: 'write' });
+  assert.equal(publish['runs-on'], 'ubuntu-latest');
+  for (const step of publish.steps) {
+    assert.doesNotMatch(String(step.run || ''), /\bnpm\b|\bnpx\b/u, 'the publish job never runs project dependencies');
   }
-  const release = steps[releaseIndex];
-  assert.equal(release.with?.['fail_on_unmatched_files'], true);
-  assert.equal(release.with?.['overwrite_files'], false);
-  assert.equal(release.with?.['target_commitish'], '${{ github.sha }}');
-  assert.equal(release.with?.token, '${{ secrets.GITHUB_TOKEN }}');
+  assert.deepEqual(publish.steps.filter(step => !credentialFree(step)).map(step => step.name), [
+    'Discard unpublished drafts from an earlier attempt',
+    'Create the draft release',
+    'Verify the draft and publish it'
+  ]);
+  const last = assertOrdered(publish.steps, [
+    checkoutWithoutCredentials,
+    pinnedNode,
+    step => step.uses === 'actions/download-artifact@v8' && step.with?.name === `release-files-v${VERSION}` && step.with?.path === 'dist',
+    step => commandLine(step, `node scripts/verify-release-artifacts.cjs dist ${VERSION}`) && credentialFree(step),
+    step => commandLine(step, 'node scripts/release-plan.cjs discard-stale-drafts'),
+    step => step.uses === 'softprops/action-gh-release@v3' && step.id === 'draft',
+    step => commandLine(step, 'node scripts/release-plan.cjs verify-and-publish'),
+    step => commandLine(step, 'node scripts/release-plan.cjs confirm-feed') && step.env === undefined
+  ], 'publish');
+  assert.equal(last, publish.steps.length - 1);
+
+  const discard = publish.steps.find(step => commandLine(step, 'node scripts/release-plan.cjs discard-stale-drafts'));
+  assert.deepEqual(discard.env, { GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}' });
+  const verify = publish.steps.find(step => commandLine(step, 'node scripts/release-plan.cjs verify-and-publish'));
+  assert.deepEqual(verify.env, { GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}', RELEASE_ID: '${{ steps.draft.outputs.id }}' });
+
+  const release = publish.steps.find(step => step.uses === 'softprops/action-gh-release@v3');
+  assert.equal(release.with.draft, true, 'the release stays a draft until its uploaded bytes are proven');
+  assert.equal(release.with.prerelease, false);
+  assert.equal(release.with.make_latest, undefined, 'only the verified publication marks the release latest');
+  assert.equal(release.with.overwrite_files, false);
+  assert.equal(release.with.fail_on_unmatched_files, true);
+  assert.equal(release.with.target_commitish, '${{ github.sha }}');
+  assert.equal(release.with.tag_name, `v${VERSION}`);
+  assert.equal(release.with.token, '${{ secrets.GITHUB_TOKEN }}');
   assert.equal(release.env, undefined);
+  assert.deepEqual(lines(release.with.files), RELEASE_FILES);
+});
 
-  const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
-  assert.equal(packageJson.scripts['smoke:packaged:modpacks'], 'node scripts/run-modpack-packaged-smoke.mjs');
+test('no job can soften or skip a release gate', () => {
+  const workflow = loadWorkflow();
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    assert.notEqual(job['continue-on-error'], true, name);
+    for (const step of job.steps) {
+      assert.equal(step.if, undefined, `${name}: ${step.name || step.uses} must not be conditional`);
+      assert.notEqual(step['continue-on-error'], true, `${name}: ${step.name || step.uses}`);
+      assert.doesNotMatch(String(step.run || ''), /\|\||\bexit\s+0\b/iu, `${name}: ${step.name || step.uses} must not swallow a failure`);
+      assert.doesNotMatch(String(step.run || ''), /--test-timeout/u);
+    }
+  }
+  assert.equal(workflow.jobs['check-version'].if, undefined);
+  assert.equal(workflow.jobs.stage.if, undefined);
+  assert.equal(workflow.jobs.publish.if, PUBLISH_CONDITION, 'the publication condition is the only new condition');
+});
+
+test('electron-builder scripts never publish implicitly and the release scripts stay exact', () => {
+  const { scripts } = loadPackageJson();
+  const builderScripts = Object.entries(scripts).filter(([, command]) => /\belectron-builder\b/u.test(command));
+  assert.deepEqual(builderScripts.map(([name]) => name).sort(), ['dist', 'pack', 'release']);
+  for (const [name, command] of builderScripts) {
+    assert.match(command, /\belectron-builder\b[^&|;]*\s--publish(?:=|\s)(?:never|always)$/u, `${name} must pass an explicit publish flag`);
+  }
+  assert.match(scripts.pack, / && electron-builder --dir --publish never$/u);
+  assert.match(scripts.dist, / && electron-builder --publish never$/u);
+  assert.match(scripts.release, / && electron-builder --publish=always$/u);
+  assert.equal(scripts['verify:archive-worker'], 'node scripts/verify-packaged-archive.cjs --source-identity');
+  assert.equal(scripts['verify:packaged-archive'], 'node scripts/verify-packaged-archive.cjs');
+  assert.equal(scripts['smoke:packaged:modpacks'], 'node scripts/run-modpack-packaged-smoke.mjs');
+  for (const name of ['test', 'test:modpacks', 'test:failure-matrix']) {
+    assert.doesNotMatch(scripts[name], /--test-timeout/u, `${name} must not impose a global per-test timeout`);
+  }
 });

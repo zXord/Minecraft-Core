@@ -10,6 +10,7 @@ const {
   ARCHIVE_RUNTIME_MANIFEST,
   verifyArchiveRuntime
 } = require('../../scripts/verify-archive-runtime.cjs');
+const packagedVerifier = require('../../scripts/verify-packaged-archive.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..', '..');
 const runtimeFileNames = ['7z.exe', '7z.dll', 'License.txt'];
@@ -298,6 +299,7 @@ test('archive runtime line-ending policy preserves exact upstream bytes across g
   assert.match(attributes, /^vendor\/7zip\/x64\/License\.txt binary$/m);
   assert.match(attributes, /^third-party\/7zip\/\*\.txt text eol=lf$/m);
   assert.match(attributes, /^third-party\/7zip\/\*\.md text eol=lf$/m);
+  assert.match(attributes, /^build-resources\/archive-runtime\/\*\.json text eol=lf$/m);
 
   const license = await fs.readFile(path.join(repositoryRoot, 'vendor', '7zip', 'x64', 'License.txt'));
   assert.equal(license.length, 6031);
@@ -352,6 +354,31 @@ test('fresh index checkouts preserve runtime identities with autocrlf enabled or
         const notice = await fs.readFile(path.join(destination, 'third-party', '7zip', name));
         assert.equal(notice.includes(Buffer.from('\r\n')), false, `${mode}:${name}`);
       }
+
+      // The packaging pins are the bytes git checks out, not one developer's working copy.
+      for (const [name, expected] of Object.entries(packagedVerifier.MANIFEST_IDENTITIES)) {
+        const bytes = await fs.readFile(path.join(destination, 'build-resources', 'archive-runtime', name));
+        assert.equal(bytes.length, expected.size, `${mode}:${name}`);
+        assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), expected.sha256, `${mode}:${name}`);
+      }
+      const workerManifest = JSON.parse(await fs.readFile(
+        path.join(destination, 'build-resources', 'archive-runtime', 'archive-worker-x64.json'),
+        'utf8'
+      ));
+      const worker = await fs.readFile(path.join(destination, 'vendor', 'archive-worker', 'x64', 'ArchiveWorker.exe'));
+      assert.equal(worker.length, workerManifest.files['ArchiveWorker.exe'].size, mode);
+      assert.equal(crypto.createHash('sha256').update(worker).digest('hex'), workerManifest.files['ArchiveWorker.exe'].sha256, mode);
+
+      // A fresh clone passes verify:archive-worker, including the source digest over its re-encoded line endings.
+      await fs.copyFile(
+        path.join(repositoryRoot, 'native', 'archive-worker-source-digest.json'),
+        path.join(destination, 'native', 'archive-worker-source-digest.json')
+      );
+      const identity = await packagedVerifier.verifySourceArchiveIdentity({ repositoryRoot: destination });
+      assert.deepEqual(identity.worker, {
+        size: workerManifest.files['ArchiveWorker.exe'].size,
+        sha256: workerManifest.files['ArchiveWorker.exe'].sha256
+      }, mode);
     }
   } finally {
     await fs.rm(root, { recursive: true, force: true });
