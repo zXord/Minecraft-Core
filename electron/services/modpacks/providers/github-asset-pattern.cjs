@@ -11,6 +11,8 @@ const ID = /^[1-9][0-9]*$/;
 const MAX_OVERRIDE_NODES = 4096;
 const MAX_OVERRIDE_UTF8_BYTES = 64 * 1024;
 const MAX_MATCH_WORK = 32 * 1024;
+const UNSTORABLE_ASSET_NAME = 'This GitHub asset name cannot be saved as a pattern for future releases. ' +
+  'Clear "Use this asset pattern for future releases" and review again.';
 
 function invalid(field) {
   throw new ModpackError('INVALID_REQUEST', 'GitHub asset pattern is invalid', {
@@ -39,8 +41,9 @@ function actualFileName(value, field, { pattern = false } = {}) {
 }
 
 function compileMatcher(value, field) {
+  // Matchers are compared as plain text (the whole name, or one prefix and suffix around a single '*'), never as an
+  // expression, so every character the Windows name policy accepts is literal and '*' stays the only wildcard.
   const normalized = actualFileName(value, field, { pattern: true });
-  if ([...normalized].some(character => '?[](){}+^$|'.includes(character))) invalid(field);
   const stars = normalized.split('*').length - 1;
   if (stars > 1) invalid(field);
   if (stars === 0) return { kind: 'literal', value: normalized };
@@ -168,25 +171,52 @@ function reviewedRoleForClassification(value) {
   invalid('classificationKind');
 }
 
+// Start of each non-overlapping, case-insensitive occurrence of the token (two are enough to call it ambiguous).
+// Lowercasing can lengthen a name (U+0130 becomes two code units); then same-length slices of the original name are
+// compared instead, so an index always points into the name the wildcard is cut from.
+function versionTokenIndexes(fileName, token) {
+  const lowerName = fileName.toLocaleLowerCase('en-US');
+  const lowerToken = token.toLocaleLowerCase('en-US');
+  if (lowerName.length === fileName.length && lowerToken.length === token.length) {
+    const first = lowerName.indexOf(lowerToken);
+    if (first < 0) return [];
+    const second = lowerName.indexOf(lowerToken, first + token.length);
+    return second < 0 ? [first] : [first, second];
+  }
+  const indexes = [];
+  for (let index = 0; index + token.length <= fileName.length && indexes.length < 2; index += 1) {
+    if (fileName.slice(index, index + token.length).toLocaleLowerCase('en-US') !== lowerToken) continue;
+    indexes.push(index);
+    index += token.length - 1;
+  }
+  return indexes;
+}
+
+// The matcher exactly as modpack state, release tracking and preflight will re-validate it, or null.
+function storedMatcher(value) {
+  try {
+    return normalizeMatcher(compileMatcher(value, 'seed.fileNames'), 'seed.fileNames');
+  } catch {
+    return null;
+  }
+}
+
 function matcherFromVersion(fileName, version) {
-  actualFileName(fileName, 'seed.fileNames');
+  const fileKey = actualFileName(fileName, 'seed.fileNames');
   if (typeof version !== 'string' || version.length < 1 || version.length > 128 || hasControl(version)) invalid('version');
   const tokens = [];
   if (/^[vV].+/u.test(version)) tokens.push(version.slice(1));
   tokens.push(version);
   for (const token of tokens) {
     if (token.length < 1) continue;
-    const lowerName = fileName.toLocaleLowerCase('en-US');
-    const lowerToken = token.toLocaleLowerCase('en-US');
-    const first = lowerName.indexOf(lowerToken);
-    if (first < 0 || lowerName.indexOf(lowerToken, first + lowerToken.length) >= 0) continue;
-    const candidate = `${fileName.slice(0, first)}*${fileName.slice(first + token.length)}`;
-    try {
-      compileMatcher(candidate, 'seed.fileNames');
-      return candidate;
-    } catch {}
+    const indexes = versionTokenIndexes(fileName, token);
+    if (indexes.length !== 1) continue;
+    const candidate = `${fileName.slice(0, indexes[0])}*${fileName.slice(indexes[0] + token.length)}`;
+    const matcher = storedMatcher(candidate);
+    if (matcher && matcherMatches(matcher, fileKey)) return candidate;
   }
-  return fileName;
+  if (storedMatcher(fileName)) return fileName;
+  throw new ModpackError('INVALID_REQUEST', UNSTORABLE_ASSET_NAME, { details: { field: 'seed.fileNames' } });
 }
 
 function structuralRootFingerprint(inspectionResult, classificationKind) {
