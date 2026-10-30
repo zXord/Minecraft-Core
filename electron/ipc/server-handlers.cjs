@@ -86,11 +86,19 @@ function createServerHandlers() {
         { instanceId: payload.instanceId || null, targetPath: payload.targetPath || null },
         { gracefulTimeoutMs: 60000, killTimeoutMs: 5000, forceKill: false }
       );
-      return {
+      const result = {
         success: shutdown.success === true,
         forced: shutdown.forced === true,
         alreadyStopped: shutdown.alreadyStopped === true
       };
+      if (result.success) return result;
+      // A large world can take longer than the wait to save. When every server
+      // still running received 'stop', it is stopping, not failing to stop.
+      const pending = (Array.isArray(shutdown.results) ? shutdown.results : []).filter(item => item?.stopped !== true);
+      if (pending.length > 0 && pending.every(item => item.gracefulRequested === true)) {
+        return { success: true, stopping: true, forced: result.forced, alreadyStopped: false };
+      }
+      return { ...result, error: 'The server could not be asked to stop. Try again or use Kill.' };
     },
 
     'kill-server': async (_event, payload = {}) => {

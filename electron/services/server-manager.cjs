@@ -11,11 +11,15 @@ const { readServerConfig, getDefaultServerConfig, detectMinecraftVersion } = req
 const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
 const { normalizeRuntimeTuple } = require('./modpacks/contracts.cjs');
 const { normalizeServerDirectoryPath } = require('./modpack-lifecycle/server-directory-identity.cjs');
+const { canonicalCoordinatorSelector } = require('./coordinator-identity.cjs');
 const { syncServerPort } = require('./server-launcher.cjs');
 const { launchServerProcess } = require('./server-process-runner.cjs');
 const { runManagedRuntimeVerificationWorker } = require('./managed-runtime-worker-client.cjs');
 const { requestServerProcessSupervision } = require('../watchdog/server-process-supervision.cjs');
-const { isServerProcessSupervisionRequired } = require('../watchdog/server-process-supervision-policy.cjs');
+const {
+  getSupervisionAvailability,
+  isServerProcessSupervisionRequired
+} = require('../watchdog/server-process-supervision-policy.cjs');
 const {
   getCurrentServerMutationLease,
   getServerMutationCoordinator,
@@ -30,6 +34,24 @@ const lifecycleAdoptions = new Map();
 const METRICS_INTERVAL_MS = 2000;
 const LIST_COMMAND_THROTTLE = 30000;
 const FAILED_START_STOP_TIMEOUT_MS = 5000;
+// How long a modpack server may wait for its app watchdog after its ready marker.
+const MANAGED_WATCHDOG_GRACE_MS = 60000;
+const SUPERVISION_DEGRADED_EVENT = 'server-process-supervision-degraded';
+const LEGACY_LAUNCH_FAMILIES = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
+// Launch-plan failures whose own message tells the user what to do, as v26.6.1 showed them.
+const LAUNCH_PLAN_ERROR_CODES = new Set([
+  'FORGE_LAUNCH_ASSETS_MISSING',
+  'FABRIC_LAUNCH_JAR_MISSING',
+  'FABRIC_BROKEN',
+  'SERVER_JAR_MISSING',
+  'UNSUPPORTED_LOADER',
+  'RUNTIME_INCOMPLETE'
+]);
+const MANAGED_RUNTIME_CHANGED_MESSAGE = 'Modpack runtime files changed - use Modpack Verify and Repair';
+const WATCHDOG_UNAVAILABLE_MESSAGE =
+  'Modpack servers need Windows PowerShell for crash protection; it is blocked or missing on this PC.';
+const UNPROTECTED_SERVER_NOTE =
+  'The server keeps running, but it will not be stopped automatically if Minecraft Core closes unexpectedly.';
 const monitoredServerInputStreams = new WeakSet();
 const failedServerInputStreams = new WeakSet();
 
@@ -61,6 +83,9 @@ function createDefaultState(instanceId, targetPath = null) {
     fatalMarkers: [],
     runtime: null,
     startupOutcome: null,
+    requireArmedWatchdog: false,
+    watchdogGraceTimer: null,
+    supervisionIssue: null,
     processCloseBarrier: null
   };
 }
@@ -241,11 +266,19 @@ function clearResponseTimeout(state) {
   }
 }
 
+function clearWatchdogGraceTimer(state) {
+  if (state.watchdogGraceTimer) {
+    clearTimeout(state.watchdogGraceTimer);
+    state.watchdogGraceTimer = null;
+  }
+}
+
 function clearStateTimers(state) {
   clearMetricsInterval(state);
   clearListInterval(state);
   clearResponseTimeout(state);
   clearIntensiveChecking(state);
+  clearWatchdogGraceTimer(state);
 }
 
 function markServerInputFailed(state, child, stdin, error) {
@@ -468,6 +501,161 @@ function parsePlayerList(state, text) {
   return false;
 }
 
+function isChildProcessAlive(child) {
+  return Boolean(child) && child.exitCode === null && child.signalCode === null && !child.killed;
+}
+
+// Reports a starting server as running, once: right after spawn for an ordinary
+// server (v26.6.1 parity), at its ready marker with an armed watchdog for a
+// modpack server.
+function publishServerRunning(state, child) {
+  if (state.process !== child || state.status !== 'starting' || state.shutdownRequest || !isChildProcessAlive(child)) {
+    return false;
+  }
+  clearWatchdogGraceTimer(state);
+  state.startupOutcome = 'ready';
+  state.status = 'running';
+  emitServerStatus(state);
+  startMetricsReporting(state);
+  eventBus.emit('server-started', {
+    instanceId: state.instanceId,
+    pid: child.pid,
+    targetPath: state.targetPath,
+    port: state.port,
+    maxRam: state.maxRam,
+    loader: state.loader,
+    runtime: state.runtime
+  });
+  return true;
+}
+
+function isAwaitingWatchdog(state, child) {
+  return state.process === child && state.startupOutcome === 'ready-pending-supervision';
+}
+
+function requestGracefulStop(state) {
+  state.shutdownRequest = 'stop';
+  state.status = 'stopping';
+  clearStateTimers(state);
+  emitServerStatus(state);
+
+  return writeServerInput(state, 'stop\n', { allowDuringShutdown: true });
+}
+
+// A modpack server whose app watchdog never armed is stopped the normal way, so
+// the world is saved. The stop is a requested one: no crash event and no
+// auto-restart loop. It never escalates to a hard kill; Kill stays available to
+// the user while the server is stopping.
+function stopForMissingWatchdog(state, child, reason) {
+  if (state.process !== child || state.shutdownRequest) return false;
+  state.startupOutcome = 'watchdog-unavailable';
+  const detail = typeof reason === 'string' && reason.trim() ? ` (${reason.trim()})` : '';
+  emitServerLog(
+    state,
+    `[ERROR] Crash protection could not be confirmed for this modpack server${detail}, so Minecraft Core is ` +
+      'stopping it normally to keep the world safe. Make sure Windows PowerShell is not blocked by antivirus ' +
+      'or a system policy, then start the server again.'
+  );
+  logger.error('Modpack server stopped because its watchdog did not arm', {
+    category: 'server',
+    instanceId: state.instanceId,
+    data: {
+      service: 'ServerManager',
+      operation: 'stopForMissingWatchdog',
+      pid: child?.pid ?? null,
+      reason: reason || null
+    }
+  });
+  return requestGracefulStop(state);
+}
+
+// A modpack server is reported running only once the app watchdog that stops it
+// when Minecraft Core dies has armed. A watchdog that is still not armed one
+// grace period after the ready marker gets the server stopped normally.
+function awaitArmedWatchdog(state, child) {
+  state.startupOutcome = 'ready-pending-supervision';
+  if (!state.requireArmedWatchdog) {
+    publishServerRunning(state, child);
+    return;
+  }
+  const supervision = child?.serverProcessHandle?.supervision;
+  if (!supervision || typeof supervision.state !== 'function') {
+    stopForMissingWatchdog(state, child, 'the server process reports no watchdog state');
+    return;
+  }
+  if (supervision.state() === 'armed') {
+    publishServerRunning(state, child);
+    return;
+  }
+  clearWatchdogGraceTimer(state);
+  state.watchdogGraceTimer = setTimeout(() => {
+    state.watchdogGraceTimer = null;
+    if (!isAwaitingWatchdog(state, child)) return;
+    if (supervision.state() === 'armed') publishServerRunning(state, child);
+    else stopForMissingWatchdog(state, child, state.supervisionIssue);
+  }, MANAGED_WATCHDOG_GRACE_MS);
+  // A late watchdog ACK is also reported through the degraded-supervision event.
+  Promise.resolve(supervision.settled).then((outcome) => {
+    if (outcome === 'armed' && isAwaitingWatchdog(state, child)) publishServerRunning(state, child);
+  }, () => {});
+}
+
+function supervisionReasonText(reason) {
+  const text = reason instanceof Error ? reason.message : reason;
+  return typeof text === 'string' && text.trim() ? text.trim() : 'no reason was reported';
+}
+
+function warnSupervisionDegraded(state, reason, { lost = false } = {}) {
+  const text = supervisionReasonText(reason);
+  state.supervisionIssue = text;
+  const summary = lost
+    ? `Crash protection stopped watching this server (${text}).`
+    : `Crash protection is not active for this server (${text}).`;
+  emitServerLog(state, `[WARNING] ${summary} ${UNPROTECTED_SERVER_NOTE}`);
+  logger.warn(`Server watchdog is not protecting the server: ${text}`, {
+    category: 'server',
+    instanceId: state.instanceId,
+    data: {
+      service: 'ServerManager',
+      operation: 'serverProcess.supervision',
+      lost,
+      pid: state.process?.pid ?? null
+    }
+  });
+}
+
+function findProcessState(event) {
+  if (!event || !Number.isSafeInteger(event.pid)) return null;
+  for (const state of serverStates.values()) {
+    const child = state.process;
+    if (child && child.pid === event.pid && child.serverProcessHandle?.operationId === event.operationId) return state;
+  }
+  return null;
+}
+
+// The process runner reports each watchdog transition of a best-effort launch.
+// A watchdog fault never stops the server; the user is told instead.
+function handleSupervisionDegraded(event) {
+  const state = findProcessState(event);
+  if (!state) return;
+  const child = state.process;
+  if (event.state === 'armed') {
+    state.supervisionIssue = null;
+    if (isAwaitingWatchdog(state, child)) publishServerRunning(state, child);
+    if (isServerProcessSupervisionRequired()) emitServerLog(state, '[INFO] Crash protection is now active for this server.');
+    return;
+  }
+  // Without an installed watchdog supervisor (tests, E2E runs) no watchdog can arm, so there is nothing to report.
+  if (!isServerProcessSupervisionRequired()) {
+    state.supervisionIssue = supervisionReasonText(event.reason);
+    return;
+  }
+  const reason = getSupervisionAvailability().available === false
+    ? 'Windows PowerShell is blocked or missing on this PC'
+    : event.reason;
+  warnSupervisionDegraded(state, reason, { lost: event.state === 'lost' });
+}
+
 function handleLogLine(state, text) {
   const trimmed = text.trimEnd();
   if (!trimmed) {
@@ -475,6 +663,8 @@ function handleLogLine(state, text) {
   }
 
   maybeSendCloudSyncWarning(state, trimmed);
+  // Only a modpack server is still 'starting' after spawn; an ordinary server is
+  // running from spawn, so its log lines never change its status.
   if (state.status === 'starting' && state.startupOutcome === null) {
     const fatalMarker = state.fatalMarkers.find(marker => trimmed.includes(marker));
     if (fatalMarker) {
@@ -482,43 +672,7 @@ function handleLogLine(state, text) {
       state.status = 'error';
       emitServerStatus(state);
     } else if (state.readyMarkers.some(marker => trimmed.includes(marker))) {
-      const child = state.process;
-      const supervisionReady = child?.serverProcessHandle?.supervisionReady;
-      state.startupOutcome = 'ready-pending-supervision';
-      if (!supervisionReady || typeof supervisionReady.then !== 'function') {
-        state.startupOutcome = 'fatal';
-        state.status = 'error';
-        emitServerStatus(state);
-        try { child?.kill?.('SIGKILL'); } catch { /* exact child only */ }
-      } else {
-        Promise.resolve(supervisionReady).then(() => {
-          if (state.process !== child || state.startupOutcome !== 'ready-pending-supervision') return;
-          if (typeof child.serverProcessHandle?.isLive !== 'function' || !child.serverProcessHandle.isLive()) {
-            state.startupOutcome = 'fatal';
-            state.status = 'error';
-            emitServerStatus(state);
-            return;
-          }
-          state.startupOutcome = 'ready';
-          state.status = 'running';
-          emitServerStatus(state);
-          startMetricsReporting(state);
-          eventBus.emit('server-started', {
-            instanceId: state.instanceId,
-            pid: child.pid,
-            targetPath: state.targetPath,
-            port: state.port,
-            maxRam: state.maxRam,
-            loader: state.loader,
-            runtime: state.runtime
-          });
-        }, () => {
-          if (state.process !== child || state.startupOutcome !== 'ready-pending-supervision') return;
-          state.startupOutcome = 'fatal';
-          state.status = 'error';
-          emitServerStatus(state);
-        });
-      }
+      awaitArmedWatchdog(state, state.process);
     }
   }
   const isListResponse = /There are \d+ of a max of \d+ players online/.test(trimmed);
@@ -553,21 +707,23 @@ function normalizeStartArguments(targetPathOrOptions, port, maxRam) {
   };
 }
 
+// Best effort: a watchdog fault on an adopted server is reported, never turned
+// into a kill. A missed ACK deadline keeps the watcher, so a late ACK still arms.
 function emitServerProcessOwnership(state, child, operationId) {
   if (!state || typeof state.instanceId !== 'string' || !state.instanceId ||
       !child || !Number.isSafeInteger(child.pid) || child.pid <= 0 ||
       typeof operationId !== 'string' || !operationId) {
     throw new Error('Managed server process ownership is invalid');
   }
+  const reportFault = (_identity, reason) => {
+    if (state.process === child) warnSupervisionDegraded(state, reason);
+  };
   return requestServerProcessSupervision({
     eventBus,
     identity: { instanceId: state.instanceId, operationId, pid: child.pid },
-    onFailure() {
-      try { child.kill('SIGKILL'); } catch {
-        // Exact-child termination is best effort; the active start lease remains fail-closed.
-      }
-    },
-    required: isServerProcessSupervisionRequired()
+    onFailure: reportFault,
+    onDeadline: reportFault,
+    required: false
   });
 }
 
@@ -580,6 +736,47 @@ function managedRuntimeFromConfig(config) {
     error.code = 'RUNTIME_INCOMPLETE';
     throw error;
   }
+}
+
+// v26.6.1 launched loader labels it had no launcher for (paper, spigot, ...) as
+// a plain server jar. Only the launch tuple uses the family; the label is kept.
+function legacyLaunchFamily(loader) {
+  return LEGACY_LAUNCH_FAMILIES.has(loader) ? loader : 'vanilla';
+}
+
+// The process runner reports every launch-plan problem as a failed health
+// check. v26.6.1 showed the plan's own message, which says how to fix it.
+function launchFailure(error) {
+  if (error?.code !== 'HEALTH_CHECK_FAILED') return error;
+  if (LAUNCH_PLAN_ERROR_CODES.has(error.cause?.code)) return error.cause;
+  return new Error('Server process failed to launch', { cause: error });
+}
+
+// A modpack server whose runtime no longer matches what its pack recorded (for
+// example after a v26.6.1 Repair) is restored only by Modpack Verify and Repair.
+function startFailureFor(error, modpackManaged) {
+  if (!modpackManaged || error?.code !== 'RUNTIME_INCOMPLETE') return error;
+  const changed = new Error(MANAGED_RUNTIME_CHANGED_MESSAGE, { cause: error });
+  changed.code = 'RUNTIME_INCOMPLETE';
+  changed.details = error.details;
+  return changed;
+}
+
+function watchdogUnavailableError() {
+  const error = new Error(WATCHDOG_UNAVAILABLE_MESSAGE);
+  error.code = 'WATCHDOG_UNAVAILABLE';
+  return error;
+}
+
+// Every start path (IPC, browser panel, auto-restart) reaches the coordinator
+// through one stable identity per folder, whatever the sidebar order, so a
+// folder registered twice or shared by a client and a server can still start.
+function startGateSelector(coordinator, instanceId, targetPath) {
+  return canonicalCoordinatorSelector({
+    instances: appStore.get('instances'),
+    selector: { instanceId, serverPath: targetPath },
+    coordinator
+  });
 }
 
 function buildConfigDefaultsFromStore() {
@@ -816,6 +1013,10 @@ function adoptValidatedLifecycleProcess(request) {
     ? request.maxRam : toNumber(config.maxRam, 4);
   const runtime = request.runtime || launchPlan.runtime;
 
+  // The health check needed an armed watchdog. From here on a watchdog fault on
+  // this accepted server is reported instead of killing it.
+  if (typeof processHandle.relaxSupervision === 'function') processHandle.relaxSupervision();
+
   state.targetPath = request.serverPath;
   state.port = port;
   state.maxRam = maxRam;
@@ -831,6 +1032,8 @@ function adoptValidatedLifecycleProcess(request) {
   state.fatalMarkers = [...launchPlan.fatalMarkers];
   state.runtime = runtime;
   state.startupOutcome = 'ready';
+  state.requireArmedWatchdog = false;
+  state.supervisionIssue = null;
   state.process = child;
   monitorServerInput(state, child);
 
@@ -895,7 +1098,7 @@ function adoptValidatedLifecycleProcess(request) {
   }, 120000);
   startMetricsReporting(state);
   emitServerStatus(state);
-  Promise.all([processHandle.supervisionReady, adoptionSupervision.ready]).then(() => {
+  const announceAdoptedStart = () => {
     if (state.process !== child || !processHandle.isLive()) return;
     eventBus.emit('server-started', {
       instanceId: state.instanceId,
@@ -906,8 +1109,11 @@ function adoptValidatedLifecycleProcess(request) {
       loader: state.loader,
       runtime: state.runtime
     });
-  }, () => {
-    try { child.kill('SIGKILL'); } catch { /* exact adopted child only */ }
+  };
+  Promise.all([processHandle.supervisionReady, adoptionSupervision.ready]).then(announceAdoptedStart, (error) => {
+    // The adopted server keeps running; the missing watchdog is reported instead.
+    if (state.process === child) warnSupervisionDegraded(state, error);
+    announceAdoptedStart();
   });
   const result = Object.freeze({ adopted: true, instanceId: state.instanceId, pid: child.pid });
   lifecycleAdoptions.set(request.eventId, {
@@ -946,8 +1152,9 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
 
   let startLease;
   try {
-    startLease = await getServerMutationCoordinator().acquireStart(
-      { instanceId, serverPath: targetPath },
+    const coordinator = getServerMutationCoordinator();
+    startLease = await coordinator.acquireStart(
+      startGateSelector(coordinator, instanceId, targetPath),
       {
         operation: 'server-start',
         operationId: `server-start-${crypto.randomUUID()}`,
@@ -975,6 +1182,8 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
     };
   }
 
+  // Set once the config is read: a modpack server's runtime failures get modpack guidance.
+  let modpackManaged = false;
   const startServerWithinLease = async () => {
     if (!fs.existsSync(targetPath)) {
       startLease.release();
@@ -987,6 +1196,7 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
 
     const defaults = buildConfigDefaultsFromStore();
     const config = readServerConfig(targetPath, defaults) || defaults;
+    modpackManaged = config.modpackManaged === true;
     const managedRuntime = managedRuntimeFromConfig(config);
     const minecraftVersion = managedRuntime?.minecraftVersion || config.version ||
       detectMinecraftVersion(targetPath) || '1.20.1';
@@ -1011,6 +1221,8 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
     state.fatalMarkers = [];
     state.runtime = null;
     state.startupOutcome = null;
+    state.requireArmedWatchdog = false;
+    state.supervisionIssue = null;
 
     emitServerStatus(state);
     emitServerLog(state, `[INFO] Preparing ${loader} server startup...`);
@@ -1018,6 +1230,10 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
     let child = null;
     let processHandle = null;
     try {
+      // A modpack server must not run without the app watchdog; refuse before Java starts.
+      if (managedRuntime && getSupervisionAvailability().available === false) {
+        throw watchdogUnavailableError();
+      }
       syncServerPort(targetPath, state.port, config.networkAccess || 'pack-default');
 
       const javaRequirements = await ensureJavaReadyForServer(targetPath, minecraftVersion);
@@ -1027,9 +1243,11 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
         error.code = 'RUNTIME_INCOMPLETE';
         throw error;
       }
+      // An ordinary server keeps v26.6.1's launch decisions: any version label it
+      // carries (snapshots, pre-releases) under the legacy runtime contract.
       const runtimeTuple = managedRuntime || {
         minecraftVersion,
-        loaderFamily: loader,
+        loaderFamily: legacyLaunchFamily(loader),
         loaderVersion: loaderVersion || minecraftVersion,
         javaMajor: javaRequirements.requiredJavaVersion,
         os: 'win32',
@@ -1049,13 +1267,13 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
           operationId: serverIdentifier,
           publishEvents: true,
           onLine() {},
-          ...(runtimeValidation ? { runtimeValidation } : {})
+          // A watchdog fault never stops a server the user started. A modpack
+          // server instead waits for an armed watchdog before it is running.
+          supervision: 'best-effort',
+          ...(runtimeValidation ? { runtimeValidation } : { runtimeContract: 'legacy' })
         });
       } catch (error) {
-        if (error?.code === 'HEALTH_CHECK_FAILED') {
-          throw new Error('Server process failed to launch', { cause: error });
-        }
-        throw error;
+        throw launchFailure(error);
       }
       child = processHandle.child;
       const processCloseBarrier = trackProcessCloseBarrier(
@@ -1087,10 +1305,12 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
       state.process = child;
       monitorServerInput(state, child);
       state.startMs = Date.now();
-      state.loader = launchPlan.loader;
+      // An ordinary server keeps its configured label (a paper server launches as a plain jar).
+      state.loader = managedRuntime ? launchPlan.loader : loader;
       state.readyMarkers = [...launchPlan.readyMarkers];
       state.fatalMarkers = [...launchPlan.fatalMarkers];
       state.runtime = launchPlan.runtime;
+      state.requireArmedWatchdog = Boolean(managedRuntime) && isServerProcessSupervisionRequired();
       child.serverInfo = {
         id: serverIdentifier,
         instanceId: state.instanceId,
@@ -1160,7 +1380,7 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
       child.stderr.on('data', (chunk) => {
         const text = chunk.toString();
         maybeSendCloudSyncWarning(state, text);
-        if (state.status === 'starting') {
+        if (state.status === 'starting' && state.startupOutcome === null) {
           for (const line of text.split(/\r?\n/).filter(Boolean)) {
             const fatalMarker = state.fatalMarkers.find(marker => line.includes(marker));
             if (fatalMarker) {
@@ -1197,6 +1417,14 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
         }
       }, 120000);
 
+      if (managedRuntime) {
+        // Still starting, but the renderer learns that a process exists (Kill stays usable).
+        emitServerStatus(state);
+      } else {
+        // v26.6.1 parity: an ordinary server is running as soon as it is spawned.
+        publishServerRunning(state, child);
+      }
+
       return {
         success: true,
         instanceId: state.instanceId,
@@ -1226,14 +1454,14 @@ async function startMinecraftServer(targetPathOrOptions, port, maxRam) {
           });
         }
       }
-      return reportStartFailure(state, startLease, targetPath, error, { releaseLease });
+      return reportStartFailure(state, startLease, targetPath, startFailureFor(error, modpackManaged), { releaseLease });
     }
   };
 
   try {
     return await runWithServerMutationLease(startLease, startServerWithinLease);
   } catch (error) {
-    return reportStartFailure(state, startLease, targetPath, error);
+    return reportStartFailure(state, startLease, targetPath, startFailureFor(error, modpackManaged));
   }
 }
 
@@ -1243,12 +1471,7 @@ function stopMinecraftServer(selector = {}) {
     return false;
   }
 
-  state.shutdownRequest = 'stop';
-  state.status = 'stopping';
-  clearStateTimers(state);
-  emitServerStatus(state);
-
-  return writeServerInput(state, 'stop\n', { allowDuringShutdown: true });
+  return requestGracefulStop(state);
 }
 
 function killMinecraftServer(selector = {}) {
@@ -1375,6 +1598,14 @@ async function handleServerStartRequest(payload = {}) {
 
   return result;
 }
+
+eventBus.on(SUPERVISION_DEGRADED_EVENT, (event) => {
+  try {
+    handleSupervisionDegraded(event);
+  } catch {
+    // Reporting a watchdog problem can never change the running server.
+  }
+});
 
 eventBus.on('request-server-start', (payload) => {
   handleServerStartRequest(payload).catch((error) => {
@@ -1506,7 +1737,9 @@ async function shutdownMinecraftServer(selector = {}, options = {}) {
       targetPath: state.targetPath,
       stopped: false,
       forced: false,
-      alreadyStopped: !state.process
+      alreadyStopped: !state.process,
+      // Whether 'stop' reached the server; a delivered stop may still be saving the world.
+      gracefulRequested: false
     };
 
     if (!state.process) {
@@ -1523,6 +1756,7 @@ async function shutdownMinecraftServer(selector = {}, options = {}) {
 
     const child = state.process;
     const gracefulRequested = stopMinecraftServer({ instanceId: state.instanceId });
+    result.gracefulRequested = gracefulRequested;
 
     let stopped = false;
     if (gracefulRequested) {

@@ -164,12 +164,17 @@
   }
   const ACTIVE_SERVER_STATUSES = new Set(['Starting', 'Running', 'Stopping']);
   const TRANSITIONAL_SERVER_STATUSES = new Set(['Starting', 'Stopping']);
+  // Whether the backend reports a Minecraft process for this server. A modpack server
+  // stays 'Starting' until its crash protection arms, which can take minutes.
+  let serverProcessLive = false;
   $: status = $serverState.status;
   $: isServerRunning = status === 'Running';
   $: isServerStarting = status === 'Starting';
   $: isServerStopping = status === 'Stopping';
   $: isServerBusy = TRANSITIONAL_SERVER_STATUSES.has(status);
   $: isServerActive = ACTIVE_SERVER_STATUSES.has(status);
+  $: canKillServer = status === 'Running' || status === 'Stopping' ||
+    ((status === 'Starting' || status === 'Error') && serverProcessLive);
   $: playerNames = $playerState.onlinePlayers;
 
   let statusCheckInterval;
@@ -493,6 +498,12 @@
     }
   }
 
+  function applyServerProcessLive(value) {
+    if (value && typeof value === 'object' && typeof value.isRunning === 'boolean') {
+      serverProcessLive = value.isRunning;
+    }
+  }
+
   function applyServerStatus(nextStatus, options = {}) {
     // Every event/local transition supersedes pending reads, but only backend status confirms ownership.
     serverStatusSequence += 1;
@@ -503,6 +514,11 @@
       return;
     }
     if (options.backendConfirmed === true) managementMinecraftStatusScope = currentRecoveryScopeKey();
+    if (normalizedStatus === 'Stopped') {
+      serverProcessLive = false;
+    } else if (options.backendConfirmed === true) {
+      applyServerProcessLive(nextStatus);
+    }
 
     serverState.update(state => ({
       ...state,
@@ -861,6 +877,7 @@
         const normalizedStatus = normalizeServerStatus(statusResult);
         if (normalizedStatus) {
           applyServerStatus(normalizedStatus, { clearPlayers: normalizedStatus === 'Stopped', backendConfirmed: true });
+          applyServerProcessLive(statusResult);
         }
         
         if (normalizedStatus === 'Running' && statusResult.playersInfo?.names) {
@@ -1838,7 +1855,7 @@
       <button 
         class="btn-compact kill-button" 
         on:click={killServer}
-        disabled={status !== 'Running' && status !== 'Stopping'}
+        disabled={!canKillServer}
       >
         Kill
       </button>
