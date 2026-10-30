@@ -699,7 +699,8 @@ test('uninstall removes only unchanged managed files while retaining the instanc
       possibleNonRunnable: true,
       instanceRetained: true,
       worldsRetained: true
-    }
+    },
+    removePathKeys: ['mods/pack.jar']
   });
 
   assert.equal(fs.existsSync(context.serverPath), true);
@@ -794,7 +795,8 @@ test('uninstall aborts a final revalidation race before removing any unchanged m
       possibleNonRunnable: true,
       instanceRetained: true,
       worldsRetained: true
-    }
+    },
+    removePathKeys: ['mods/additional-managed.jar', 'mods/pack.jar']
   }), error => error.code === 'PLAN_STALE');
 
   assert.equal(fs.existsSync(path.join(context.serverPath, 'mods', 'additional-managed.jar')), true);
@@ -831,7 +833,8 @@ test('uninstall rejects a reparse substitution without touching its external tar
       possibleNonRunnable: true,
       instanceRetained: true,
       worldsRetained: true
-    }
+    },
+    removePathKeys: ['mods/pack.jar']
   }), error => error.code === 'PLAN_STALE');
 
   assert.equal(fs.readFileSync(externalPack, 'utf8'), 'pack bytes');

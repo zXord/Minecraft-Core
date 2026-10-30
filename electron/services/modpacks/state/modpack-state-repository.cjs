@@ -8,7 +8,7 @@ const { proveEntriesAbsent } = require('../instance-ownership.cjs');
 const { ARCHIVE_LIMITS } = require('../limits.cjs');
 const { normalizeRuntimeTuple } = require('../contracts.cjs');
 const { matchAssetPattern } = require('../providers/github-asset-pattern.cjs');
-const { normalizeOwnershipManifest } = require('../planning/ownership-planner.cjs');
+const { normalizeOwnershipManifest, pathIsProtected } = require('../planning/ownership-planner.cjs');
 const { isSafeWindowsBasename } = require('../windows-basename.cjs');
 const { verifyManagedEntry } = require('./managed-entry-verifier.cjs');
 
@@ -48,12 +48,29 @@ function stateClone(value, field) {
   return clone(value, field, { maxCollection: MAX_STATE_JSON_VALUES });
 }
 
+// Earlier builds recorded files every review protects as replaceable content:
+// server.properties, JVM argument files and loader launch scripts written while
+// the runtime was prepared, and operator, whitelist, ban and JVM argument files
+// a pack seeded. Reviews, verification, repair and uninstall all read them as
+// the protected files they are.
+function protectedPathEntry(entry) {
+  if (!['pack', 'runtime'].includes(entry.origin) ||
+      !pathIsProtected(entry.pathKey, entry.role, entry.managementPolicy, [], [], entry.origin)) return entry;
+  if (entry.origin === 'runtime') {
+    return { ...entry, origin: 'user', managementPolicy: 'protected', role: entry.role === 'world' ? 'world' : 'other' };
+  }
+  return entry.managementPolicy === 'replaceable-managed' ? { ...entry, managementPolicy: 'preserve-after-seed' } : entry;
+}
+
 function normalizeStateManifest(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       !Array.isArray(value.entries) || value.entries.length > MAX_STATE_MANIFEST_ENTRIES) {
     invalid('state.manifest');
   }
-  return normalizeOwnershipManifest(value);
+  const manifest = normalizeOwnershipManifest(value);
+  const entries = manifest.entries.map(protectedPathEntry);
+  if (entries.every((entry, index) => entry === manifest.entries[index])) return manifest;
+  return deepFreeze({ ...manifest, entries });
 }
 
 function serializeStateManifest(value) {
@@ -850,11 +867,14 @@ class ModpackStateRepository {
     const serverPath = this.#server(serverPathValue);
     const current = this.read(serverPath);
     if (!current || current.state.modpackManaged !== true || !current.manifest) invalid('state');
-    const operation = clone(operationValue, 'operation');
+    // The reviewed removal set can name every manifest entry.
+    const operation = clone(operationValue, 'operation', {
+      maxCollection: MAX_STATE_NON_MANIFEST_VALUES + MAX_STATE_MANIFEST_ENTRIES
+    });
     exactObject(operation, [
-      'operationId', 'timestamp', 'contentRevision', 'confirmation', 'restorePointId', 'restorePointSha256',
-      'restorePointTotalBytes'
-    ], 'operation', ['operationId', 'timestamp', 'contentRevision', 'confirmation']);
+      'operationId', 'timestamp', 'contentRevision', 'confirmation', 'removePathKeys', 'restorePointId',
+      'restorePointSha256', 'restorePointTotalBytes'
+    ], 'operation', ['operationId', 'timestamp', 'contentRevision', 'confirmation', 'removePathKeys']);
     const operationId = storageIdentifier(operation.operationId, 'operation.operationId');
     const uninstalledAt = timestamp(operation.timestamp, 'operation.timestamp');
     const contentRevision = revision(operation.contentRevision, 'operation.contentRevision');
@@ -880,22 +900,29 @@ class ModpackStateRepository {
     normalizeStringArray(confirmation.preservedCategories, 'operation.confirmation.preservedCategories');
     if (typeof confirmation.possibleNonRunnable !== 'boolean' || confirmation.instanceRetained !== true ||
         confirmation.worldsRetained !== true) invalid('operation.confirmation');
+    // Exactly the paths reviewed for removal, one for each confirmed removal.
+    const removePathKeys = operation.removePathKeys;
+    if (!Array.isArray(removePathKeys) || removePathKeys.length > MAX_STATE_MANIFEST_ENTRIES ||
+        String(removePathKeys.length) !== unchangedManagedRemovalCount ||
+        removePathKeys.some(key => typeof key !== 'string' || key.length === 0) ||
+        new Set(removePathKeys).size !== removePathKeys.length) invalid('operation.removePathKeys');
 
     const paths = this.#ensureLayout(serverPath);
     if (this.#exists(path.join(paths.history, `${operationId}.json`))) {
       throw new ModpackError('TARGET_EXISTS', 'The target already exists');
     }
     const historySequence = this.#nextHistorySequence(paths);
-    const removableEntries = [];
+    const reviewed = new Set(removePathKeys);
+    const removableEntries = current.manifest.entries.filter(entry => reviewed.has(entry.pathKey));
+    if (removableEntries.length !== reviewed.size || removableEntries.some(entry =>
+      !this.#isUninstallableManagedEntry(entry) || this.#verifyManifestEntry(serverPath, entry) !== 'matched')) {
+      throw new ModpackError('PLAN_STALE', 'The reviewed uninstall plan is stale');
+    }
     let preservedModifiedManagedFiles = 0;
     for (const entry of current.manifest.entries) {
-      if (!this.#isUninstallableManagedEntry(entry)) continue;
+      if (reviewed.has(entry.pathKey) || !this.#isUninstallableManagedEntry(entry)) continue;
       const status = this.#verifyManifestEntry(serverPath, entry);
-      if (status === 'matched') removableEntries.push(entry);
-      else if (status === 'modified' || status === 'unsafe') preservedModifiedManagedFiles += 1;
-    }
-    if (String(removableEntries.length) !== unchangedManagedRemovalCount) {
-      throw new ModpackError('PLAN_STALE', 'The reviewed uninstall plan is stale');
+      if (status === 'modified' || status === 'unsafe') preservedModifiedManagedFiles += 1;
     }
 
     for (const entry of removableEntries) {

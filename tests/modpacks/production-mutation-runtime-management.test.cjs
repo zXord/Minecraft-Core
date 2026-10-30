@@ -173,9 +173,12 @@ function managementFixture(t, kind, {
     serverPath: targetPath, archivePath: path.join(targetPath, 'backups', 'restore-point-selected.zip'),
     metadataPath: path.join(targetPath, 'backups', 'restore-point-selected.json'), pinId: 'job-prior'
   };
+  const reviewedRemovals = kind === 'uninstall'
+    ? [{ path: 'live.txt', pathKey: 'live.txt', action: 'remove', reason: 'incoming-removed', role: 'other', protected: false }]
+    : [];
   const ownership = {
-    type: 'ownership-plan', schemaVersion: 1, actions: [], added: [], changed: [], removed: [], preserved: [],
-    conflicts: [], orphaned: [], userAddons: [], blocked: [],
+    type: 'ownership-plan', schemaVersion: 1, actions: reviewedRemovals, added: [], changed: [], removed: reviewedRemovals,
+    preserved: [], conflicts: [], orphaned: [], userAddons: [], blocked: [],
     confirmation: {
       unchangedManagedRemovalCount: kind === 'uninstall' ? '1' : '0', preservedCategories: [],
       possibleNonRunnable: kind === 'uninstall', instanceRetained: true, worldsRetained: true
@@ -693,6 +696,7 @@ test('uninstall persists the exact reviewed confirmation as inactive state and d
   });
 
   assert.equal(context.writtenStates[0].uninstall.confirmation.unchangedManagedRemovalCount, '1');
+  assert.deepEqual(context.writtenStates[0].uninstall.removePathKeys, ['live.txt']);
   assert.deepEqual(context.builtOperationKinds, ['uninstall']);
   assert.equal(context.writtenStates[0].uninstall.restorePointId, 'restore-safety');
   assert.equal(context.writtenStates[0].uninstall.restorePointSha256, 'e'.repeat(64));

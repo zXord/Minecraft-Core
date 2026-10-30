@@ -519,6 +519,7 @@ module.exports = {
   getAppIssuedOwnershipDecisions,
   isAppIssuedOwnershipPlan,
   normalizeOwnershipManifest,
+  pathIsProtected,
   planCrossProviderIdentity,
   planOwnership
 };

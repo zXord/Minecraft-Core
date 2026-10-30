@@ -156,7 +156,8 @@ test('candidate helpers write a summary only into folders that already carry lif
       possibleNonRunnable: false,
       instanceRetained: true,
       worldsRetained: true
-    }
+    },
+    removePathKeys: []
   });
 
   const filesOnly = environment.candidateOf('candidate-files-only');

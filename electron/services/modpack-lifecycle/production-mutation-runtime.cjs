@@ -27,7 +27,7 @@ const { ModpackError, deepFreeze } = require('../modpacks/errors.cjs');
 const { computePreflightReserve, parseNonNegativeBytes } = require('../modpacks/limits.cjs');
 const { ReleaseTrackingReconciler } = require('../modpacks/notifications/release-tracking-reconciler.cjs');
 const { classifyRecoveryTerminalClosure, coversLaunch } = require('./new-server-launch-closure.cjs');
-const { canonicalPath, planOwnership } = require('../modpacks/planning/ownership-planner.cjs');
+const { canonicalPath, pathIsProtected, planOwnership } = require('../modpacks/planning/ownership-planner.cjs');
 const {
   reconcileQuiescentOwnership
 } = require('../modpacks/planning/quiescent-plan-revalidation.cjs');
@@ -622,6 +622,16 @@ function runtimeOwnership(relativePath, runtimePathKeys = null) {
   return { origin: 'runtime', managementPolicy: 'replaceable-managed', role };
 }
 
+function userOwnership(measured) {
+  return {
+    ...measured,
+    origin: 'user',
+    managementPolicy: 'protected',
+    role: measured.role === 'world' ? 'world' : 'other',
+    priorBaseline: null
+  };
+}
+
 function isManifestExcluded(pathKey) {
   const first = pathKey.split('/')[0];
   return pathKey === 'eula.txt' || EXCLUDED_MANIFEST_ROOTS.has(first);
@@ -645,11 +655,22 @@ function candidateManifestFromVerifiedScan({
     const incomingEntry = incoming.get(measured.pathKey);
     const oldEntry = old.get(measured.pathKey);
     const action = actions.get(measured.pathKey);
-    if (runtime) {
+    if (runtime && pathIsProtected(measured.pathKey, runtime.role, runtime.managementPolicy, [])) {
+      // Runtime preparation also writes files every review protects:
+      // server.properties from the reviewed network choices, JVM argument files
+      // and loader launch scripts. They stay the user's protected files, never
+      // runtime content that a later operation may replace or remove.
+      entries.push(userOwnership(measured));
+    } else if (runtime) {
       entries.push({ ...measured, ...runtime, priorBaseline: null });
     } else if (incomingEntry && !['preserve-modified', 'preserve-orphan'].includes(action?.action)) {
+      // A pack may seed files every review protects, such as operator, whitelist
+      // and JVM argument files. After seeding they are the server owner's.
+      const seeded = incomingEntry.managementPolicy === 'replaceable-managed' &&
+        pathIsProtected(measured.pathKey, incomingEntry.role, incomingEntry.managementPolicy, [], [], incomingEntry.origin);
       entries.push({
         ...incomingEntry,
+        ...(seeded ? { managementPolicy: 'preserve-after-seed' } : {}),
         path: measured.path,
         pathKey: measured.pathKey,
         installedHash: measured.installedHash,
@@ -669,13 +690,7 @@ function candidateManifestFromVerifiedScan({
         priorBaseline: preservedByUser ? oldEntry.installedHash : oldEntry.priorBaseline
       });
     } else {
-      entries.push({
-        ...measured,
-        origin: 'user',
-        managementPolicy: 'protected',
-        role: measured.role === 'world' ? 'world' : 'other',
-        priorBaseline: null
-      });
+      entries.push(userOwnership(measured));
     }
   }
   entries.sort((left, right) => left.pathKey.localeCompare(right.pathKey, 'en-US'));
@@ -1581,6 +1596,10 @@ class ProductionMutationRuntime {
           timestamp: nowDate(this.clock).toISOString(),
           contentRevision: candidateState.contentRevision,
           confirmation: context.executionOwnership.confirmation,
+          // The repository removes exactly the files reviewed for removal.
+          removePathKeys: context.executionOwnership.actions
+            .filter(action => action.action === 'remove')
+            .map(action => action.pathKey),
           restorePointId: context.restorePoint.id,
           restorePointSha256: context.restorePoint.sha256,
           ...(typeof context.restorePoint.totalBytes === 'string'
@@ -2616,7 +2635,7 @@ class ProductionMutationRuntime {
   async #materializeNewCandidate({ candidatePath, context, choices, lease, signal, onProgress }) {
     await this.#copyReviewedTemplate(candidatePath, context, signal, { onProgress });
     await this.#prepareCandidateRuntime({
-      candidatePath, context, choices, lease, signal, onProgress, oldManifest: null
+      candidatePath, context, choices, lease, signal, onProgress, oldManifest: null, templateOnly: true
     });
   }
 
@@ -2840,16 +2859,22 @@ class ProductionMutationRuntime {
     }
   }
 
-  async #prepareCandidateRuntime({ candidatePath, context, choices, lease, signal, onProgress, oldManifest }) {
+  async #prepareCandidateRuntime({
+    candidatePath, context, choices, lease, signal, onProgress, oldManifest, templateOnly = false
+  }) {
     if (choices.acceptEula === true) {
       const eulaPath = path.join(candidatePath, 'eula.txt');
       await context.durableFs.writeFileAtomicAsync(eulaPath, Buffer.from('eula=true\n', 'utf8'));
       lease.markDirty();
     }
     let beforePaths;
-    if (oldManifest === null) {
+    if (templateOnly) {
+      // A new server's candidate holds exactly the reviewed template files.
       beforePaths = new Map(context.executionRecord.incomingManifest.entries.map(entry => [entry.pathKey, entry]));
     } else {
+      // An existing server's candidate is a copy of the live folder, including the
+      // server's own files when the pack is installed on it without a manifest.
+      // Only what the runtime steps below write becomes runtime content.
       await reportCandidateProgress(onProgress, 43, 'Hashing candidate content before runtime changes');
       const beforeRuntime = await scanManifest(
         candidatePath,

@@ -492,8 +492,9 @@ test('detach and uninstall reject an unpaired safety restore reference before ch
     confirmation: {
       unchangedManagedRemovalCount: '0', preservedCategories: [], possibleNonRunnable: false,
       instanceRetained: true, worldsRetained: true
-    }
-  }), error => error.code === 'INVALID_REQUEST');
+    },
+    removePathKeys: []
+  }), error => error.code === 'INVALID_REQUEST' && error.details?.field === 'operation.restorePoint');
   assert.equal(repository.read(serverPath).state.modpackManaged, true);
   assert.deepEqual(repository.listHistory(serverPath).items, []);
 });
