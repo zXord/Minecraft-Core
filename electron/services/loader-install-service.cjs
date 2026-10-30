@@ -75,6 +75,8 @@ const QUILT_SERVER_MAIN = 'org.quiltmc.loader.impl.launch.knot.KnotServer';
 // server they do not recognise. NeoForge servers therefore get a root jar whose missing main class
 // names the problem, so a downgraded app fails to start them instead of running vanilla on the world.
 const NEOFORGE_DOWNGRADE_GUARD_MAIN_CLASS = 'MinecraftCore.UpdateRequired.This_NeoForge_server_needs_a_newer_Minecraft_Core';
+// The guard jar is a few hundred bytes; recognising it never reads more than this.
+const NEOFORGE_DOWNGRADE_GUARD_READ_LIMIT = 64 * 1024;
 const MOJANG_META_HOST = 'piston-meta.mojang.com';
 const MOJANG_META_ORIGIN = `https://${MOJANG_META_HOST}`;
 const MOJANG_DATA_HOST = 'piston-data.mojang.com';
@@ -1376,6 +1378,38 @@ function writeNeoForgeDowngradeGuardJar(root, minecraftVersion) {
   }
   writeNewControlledFile(root, rootServerJar, neoForgeDowngradeGuardJarBytes());
   return requireJar(root, rootServerJar);
+}
+
+// True only for the exact jar writeNeoForgeDowngradeGuardJar publishes: a regular file, not a link,
+// with the guard's size and bytes. It writes nothing and answers false for anything it cannot read.
+// A NeoForge server whose root jar is the guard but that has no runtime record is a current layout
+// that lost its record, never a server v26.6.1 labelled NeoForge.
+function isNeoForgeDowngradeGuardJar(filePath) {
+  let descriptor = null;
+  try {
+    const expected = neoForgeDowngradeGuardJarBytes();
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== expected.length ||
+        stat.size > NEOFORGE_DOWNGRADE_GUARD_READ_LIMIT) return false;
+    const noFollow = Number.isInteger(fs.constants.O_NOFOLLOW) ? fs.constants.O_NOFOLLOW : 0;
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+    const opened = fs.fstatSync(descriptor);
+    if (!opened.isFile() || opened.size !== expected.length) return false;
+    const actual = Buffer.alloc(expected.length);
+    let offset = 0;
+    while (offset < actual.length) {
+      const bytesRead = fs.readSync(descriptor, actual, offset, actual.length - offset, offset);
+      if (bytesRead === 0) return false;
+      offset += bytesRead;
+    }
+    return actual.equals(expected);
+  } catch {
+    return false;
+  } finally {
+    if (descriptor !== null) {
+      try { fs.closeSync(descriptor); } catch { /* opened read-only, so there is nothing to undo */ }
+    }
+  }
 }
 
 function hasOnlyKeys(value, allowed) {
@@ -3148,6 +3182,7 @@ module.exports = {
   getForgeRuntimeHealthIssues,
   hasPreparedRuntimeMetadata,
   inspectPreparedRuntime,
+  isNeoForgeDowngradeGuardJar,
   validatePreparedRuntime,
   __testUtils: {
     RUNTIME_USER_AGENT,

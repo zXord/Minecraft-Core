@@ -2,7 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const { resolveServerLoader, normalizeLoaderName } = require('../utils/server-loader.cjs');
 const { FABRIC_LAUNCH_JAR, getFabricRuntimeStatus } = require('../utils/fabric-runtime.cjs');
-const { hasPreparedRuntimeMetadata, validatePreparedRuntime } = require('./loader-install-service.cjs');
+const {
+  hasPreparedRuntimeMetadata,
+  isNeoForgeDowngradeGuardJar,
+  validatePreparedRuntime
+} = require('./loader-install-service.cjs');
 const { normalizeRuntimeTuple } = require('./modpacks/contracts.cjs');
 const { ModpackError } = require('./modpacks/errors.cjs');
 const { markCurrentServerMutationDirty } = require('./server-mutation-context.cjs');
@@ -132,6 +136,48 @@ function getVanillaLaunchJar(serverPath) {
   });
 
   return fallbackName ? path.join(serverPath, fallbackName) : null;
+}
+
+// v26.6.1's exact rule for every loader it had no launch path for, NeoForge and Quilt among them:
+// server.jar, otherwise the first server jar that is not an installer, Fabric or Forge jar. Unlike
+// getVanillaLaunchJar it does not skip Quilt jars, so quilt-server-launch.jar qualifies.
+function getLegacyPlainLaunchJar(serverPath) {
+  const directJar = path.join(serverPath, 'server.jar');
+  if (fs.existsSync(directJar)) {
+    return directJar;
+  }
+
+  const fallbackName = findFirstJar(serverPath, (file) => {
+    const lower = file.toLowerCase();
+    return lower.includes('server')
+      && !lower.includes('installer')
+      && !lower.includes('fabric')
+      && !lower.includes('forge');
+  });
+
+  return fallbackName ? path.join(serverPath, fallbackName) : null;
+}
+
+// v26.6.1 never wrote runtime metadata and ran a server labelled NeoForge or Quilt (its config
+// enrichment persisted loaders detected from file names) as a plain jar. Such a server keeps that
+// launch, with the -Xms1G every plain-jar launch passes today. Returns null, keeping the strict
+// recorded launch, when a runtime record is present (even a damaged one) or when a NeoForge server's
+// jar is the downgrade guard, which means a current layout lost its record.
+function resolveLegacyPlainLaunchPlan(serverPath, loader, maxRam, runtimeTuple) {
+  if (hasPreparedRuntimeMetadata(serverPath)) return null;
+  const launchJar = getLegacyPlainLaunchJar(serverPath);
+  if (!launchJar) {
+    throw codedLaunchError('SERVER_JAR_MISSING', 'No valid server jar was found in the selected server folder.');
+  }
+  if (loader === 'neoforge' && isNeoForgeDowngradeGuardJar(launchJar)) return null;
+  return commonPlan({
+    type: 'jar',
+    loader,
+    jar: launchJar,
+    args: [`-Xmx${maxRam}G`, '-Xms1G', '-jar', launchJar, 'nogui'],
+    cwd: serverPath,
+    runtime: runtimeTuple
+  });
 }
 
 function walkFiles(rootDir, maxDepth = 6, depth = 0, results = []) {
@@ -588,6 +634,8 @@ function resolveLaunchPlan(serverPath, options = {}, { runtimeTuple = null } = {
   }
 
   if (resolvedLoader === 'neoforge') {
+    const legacyPlan = resolveLegacyPlainLaunchPlan(serverPath, resolvedLoader, maxRam, runtimeTuple);
+    if (legacyPlan) return legacyPlan;
     if (!runtimeTuple) throw codedLaunchError('RUNTIME_INCOMPLETE', 'NeoForge runtime identity is missing.');
     const validation = validatePreparedRuntime(serverPath, runtimeTuple);
     const argsFile = path.join(serverPath, ...validation.loader.argsFile.split('/'));
@@ -603,6 +651,8 @@ function resolveLaunchPlan(serverPath, options = {}, { runtimeTuple = null } = {
   }
 
   if (resolvedLoader === 'quilt') {
+    const legacyPlan = resolveLegacyPlainLaunchPlan(serverPath, resolvedLoader, maxRam, runtimeTuple);
+    if (legacyPlan) return legacyPlan;
     if (!runtimeTuple) throw codedLaunchError('RUNTIME_INCOMPLETE', 'Quilt runtime identity is missing.');
     const validation = validatePreparedRuntime(serverPath, runtimeTuple);
     const launchJar = path.join(serverPath, ...validation.loader.launcherJar.split('/'));

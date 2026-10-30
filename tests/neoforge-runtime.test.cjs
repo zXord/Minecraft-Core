@@ -444,6 +444,10 @@ test('NeoForge can never fall through to Vanilla when its exact runtime is incom
   try {
     fs.writeFileSync(path.join(serverPath, 'server.jar'), jarBytes('vanilla-lookalike'));
     fs.writeFileSync(path.join(serverPath, 'neoforge-name-only.jar'), jarBytes('name-only'));
+    // An app-recorded runtime that is now incomplete. A folder with no record at all is one v26.6.1
+    // labelled NeoForge, which keeps its v26.6.1 plain-jar launch (see server-launcher tests).
+    fs.mkdirSync(path.join(serverPath, '.minecraft-core-state'));
+    fs.writeFileSync(path.join(serverPath, '.minecraft-core-state', 'runtime.json'), '{"formatVersion":1,"runtime":');
     assert.throws(
       () => resolveLaunchPlan(serverPath, { loader: 'neoforge', maxRam: 4 }, { runtimeTuple: tuple() }),
       error => error.code === 'RUNTIME_INCOMPLETE'

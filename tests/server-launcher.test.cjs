@@ -15,8 +15,10 @@ const {
   writeServerProperties
 } = require('../electron/services/server-launcher.cjs');
 const {
-  __testUtils: { publishForgeRuntimeMetadata }
+  isNeoForgeDowngradeGuardJar,
+  __testUtils: { neoForgeDowngradeGuardJarBytes, publishForgeRuntimeMetadata, quiltLauncherJarBytes }
 } = require('../electron/services/loader-install-service.cjs');
+const { v26_6_1LaunchDecision } = require('./fixtures/v26.6.1-launch-decision.cjs');
 const { ModpackError } = require('../electron/services/modpacks/errors.cjs');
 const { ServerMutationCoordinator } = require('../electron/services/server-mutation-coordinator.cjs');
 const {
@@ -140,6 +142,122 @@ function makeV26ForgeServer() {
 
 function v26ForgeLaunchArgs(maxRam = 4) {
   return ['@user_jvm_args.txt', `-Xmx${maxRam}G`, '-Xms1G', `@${path.join(...V26_FORGE_ARGS.split('/'))}`, 'nogui'];
+}
+
+// Servers v26.6.1 labelled NeoForge or Quilt. v26.6.1 could install neither loader: its config
+// enrichment persisted the loader it detected from file names (the NeoForge installer jar, the Quilt
+// launcher), it ran such servers like every label other than Fabric and Forge, and it never wrote
+// .minecraft-core-state. The other files are what the official installers leave in the folder.
+const V26_PLAIN_LOADERS = Object.freeze({
+  neoforge: Object.freeze({ minecraftVersion: '1.21.1', loaderVersion: '21.1.77', javaMajor: 21 }),
+  quilt: Object.freeze({ minecraftVersion: '1.20.1', loaderVersion: null, javaMajor: 17 })
+});
+const QUILT_LOADER_LIBRARY = 'libraries/org/quiltmc/quilt-loader/0.26.4/quilt-loader-0.26.4.jar';
+
+function makeV26PlainLoaderServer(t, loader, { serverJar = true } = {}) {
+  const { minecraftVersion, loaderVersion } = V26_PLAIN_LOADERS[loader];
+  const serverPath = fs.mkdtempSync(path.join(os.tmpdir(), `mc-core-${loader}-v26-`));
+  t.after(() => fs.rmSync(serverPath, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(serverPath, '.minecraft-core.json'), JSON.stringify({
+    version: minecraftVersion,
+    loader,
+    loaderVersion,
+    fabric: null,
+    port: 25565,
+    maxRam: 4
+  }, null, 2));
+  if (loader === 'neoforge') {
+    const argsFile = `libraries/net/neoforged/neoforge/${loaderVersion}/win_args.txt`;
+    const argsPath = path.join(serverPath, ...argsFile.split('/'));
+    fs.mkdirSync(path.dirname(argsPath), { recursive: true });
+    fs.writeFileSync(argsPath, `--launchTarget forgeserver\n--fml.neoForgeVersion ${loaderVersion}\n--fml.mcVersion ${minecraftVersion}\n`);
+    fs.writeFileSync(path.join(serverPath, 'user_jvm_args.txt'), '# Xmx and Xms set the maximum and minimum RAM usage.\n');
+    fs.writeFileSync(path.join(serverPath, 'run.bat'), `java @user_jvm_args.txt @${argsFile} %*\r\n`);
+    writeMinimalJar(path.join(serverPath, `neoforge-${loaderVersion}-installer.jar`));
+  } else {
+    writeMinimalJar(path.join(serverPath, 'quilt-server-launch.jar'), [
+      'Manifest-Version: 1.0',
+      'Main-Class: org.quiltmc.loader.impl.launch.server.QuiltServerLauncher',
+      '',
+      ''
+    ]);
+    fs.writeFileSync(path.join(serverPath, 'quilt-server-launcher.properties'), 'serverJar=server.jar\n');
+    writeMinimalJar(path.join(serverPath, ...QUILT_LOADER_LIBRARY.split('/')));
+  }
+  if (serverJar) writeMinimalJar(path.join(serverPath, 'server.jar'));
+  return serverPath;
+}
+
+// The unmanaged tuple server-manager builds for such a server; a missing loader version falls back
+// to the game version.
+function v26PlainLoaderTuple(loader) {
+  const { minecraftVersion, loaderVersion, javaMajor } = V26_PLAIN_LOADERS[loader];
+  return makeRuntimeTuple(loader, loaderVersion || minecraftVersion, minecraftVersion, javaMajor);
+}
+
+function plainJarLaunchArgs(jar, maxRam = 4) {
+  return [`-Xmx${maxRam}G`, '-Xms1G', '-jar', jar, 'nogui'];
+}
+
+function writeRuntimeRecord(serverPath, runtime, loader, relativePaths) {
+  const statePath = path.join(serverPath, '.minecraft-core-state');
+  fs.mkdirSync(statePath, { recursive: true });
+  fs.writeFileSync(path.join(statePath, 'runtime.json'), JSON.stringify({
+    formatVersion: 1,
+    runtime,
+    loader,
+    artifacts: relativePaths
+      .map(relativePath => runtimeArtifact(serverPath, relativePath))
+      .sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'en'))
+  }));
+}
+
+// A NeoForge runtime as the current installer records it. New layouts carry the downgrade guard as
+// the root server.jar; layouts published by pre-release builds kept a vanilla root jar.
+function writeRecordedNeoForgeRuntime(serverPath, { rootServerJar = 'guard' } = {}) {
+  const runtime = makeRuntimeTuple('neoforge', '21.1.77', '1.21.1', 21);
+  const argsFile = 'libraries/net/neoforged/neoforge/21.1.77/win_args.txt';
+  const universalJar = 'libraries/net/neoforged/neoforge/21.1.77/neoforge-21.1.77-universal.jar';
+  const minecraftServerJar = 'libraries/net/minecraft/server/1.21.1/server-1.21.1.jar';
+  const argsPath = path.join(serverPath, ...argsFile.split('/'));
+  fs.mkdirSync(path.dirname(argsPath), { recursive: true });
+  fs.writeFileSync(argsPath, '--launchTarget forgeserver\n--fml.neoForgeVersion 21.1.77\n--fml.mcVersion 1.21.1\n');
+  writeMinimalJar(path.join(serverPath, ...universalJar.split('/')));
+  writeMinimalJar(path.join(serverPath, ...minecraftServerJar.split('/')));
+  if (rootServerJar === 'guard') {
+    fs.writeFileSync(path.join(serverPath, 'server.jar'), neoForgeDowngradeGuardJarBytes());
+  } else {
+    writeMinimalJar(path.join(serverPath, 'server.jar'));
+  }
+  fs.writeFileSync(path.join(serverPath, 'user_jvm_args.txt'), '# user arguments\n');
+  writeRuntimeRecord(serverPath, runtime, { family: 'neoforge', argsFile, universalJar },
+    [argsFile, universalJar, 'server.jar', minecraftServerJar]);
+  return { runtime, argsFile };
+}
+
+// A Quilt runtime as the current installer records it: the app-built launcher, its properties naming
+// the vanilla jar under libraries, and a root server.jar that is a copy of the launcher.
+function writeRecordedQuiltRuntime(serverPath) {
+  const runtime = makeRuntimeTuple('quilt', '0.26.4', '1.20.1', 17);
+  const minecraftServerJar = 'libraries/net/minecraft/server/1.20.1/server-1.20.1.jar';
+  const libraries = [{
+    coordinate: 'org.quiltmc:quilt-loader:0.26.4',
+    repository: 'https://maven.quiltmc.org/repository/release/',
+    relativePath: QUILT_LOADER_LIBRARY
+  }];
+  writeMinimalJar(path.join(serverPath, ...QUILT_LOADER_LIBRARY.split('/')));
+  writeMinimalJar(path.join(serverPath, ...minecraftServerJar.split('/')));
+  const launcherBytes = quiltLauncherJarBytes(libraries);
+  fs.writeFileSync(path.join(serverPath, 'quilt-server-launch.jar'), launcherBytes);
+  fs.writeFileSync(path.join(serverPath, 'server.jar'), launcherBytes);
+  fs.writeFileSync(path.join(serverPath, 'quilt-server-launcher.properties'), `serverJar=${minecraftServerJar}\n`);
+  writeRuntimeRecord(serverPath, runtime, {
+    family: 'quilt',
+    launcherJar: 'quilt-server-launch.jar',
+    properties: 'quilt-server-launcher.properties',
+    libraries
+  }, ['quilt-server-launch.jar', 'quilt-server-launcher.properties', 'server.jar', minecraftServerJar, QUILT_LOADER_LIBRARY]);
+  return { runtime };
 }
 
 function startLeaseFixture(root, operationId, initialRevision = 9) {
@@ -1146,6 +1264,220 @@ test('Forge launch uses recorded runtime metadata only when it exists and still 
       serverPath
     );
   }
+});
+
+test('v26.6.1 NeoForge and Quilt servers without runtime metadata launch the plain jar v26.6.1 launched', t => {
+  for (const loader of ['neoforge', 'quilt']) {
+    const serverPath = makeV26PlainLoaderServer(t, loader);
+    const serverJar = path.join(serverPath, 'server.jar');
+    const v26 = v26_6_1LaunchDecision(serverPath);
+    assert.equal(v26.jar, serverJar, loader);
+
+    for (const runtimeTuple of [null, v26PlainLoaderTuple(loader)]) {
+      const plan = resolveLaunchPlan(serverPath, { loader, maxRam: 4 }, { runtimeTuple });
+      assert.equal(plan.type, 'jar', loader);
+      assert.equal(plan.loader, loader);
+      assert.equal(plan.jar, serverJar);
+      assert.deepEqual(plan.args, plainJarLaunchArgs(serverJar));
+      // The jar and arguments v26.6.1 used; -Xms1G is what every plain-jar launch adds today.
+      assert.deepEqual(plan.args.filter(arg => arg !== '-Xms1G'), v26.args);
+      assert.equal(plan.cwd, serverPath);
+      assert.deepEqual(plan.runtime, runtimeTuple);
+      assert.ok(plan.readyMarkers.some(marker => marker.includes('Done (')));
+    }
+    // The loader named only by the server config, as v26.6.1 resolved it.
+    assert.equal(resolveLaunchPlan(serverPath, { maxRam: 4 }).jar, serverJar, loader);
+    assert.equal(fs.existsSync(path.join(serverPath, '.minecraft-core-state')), false, loader);
+  }
+});
+
+test('a v26.6.1 NeoForge or Quilt server starts through the real runner with its unmanaged tuple', async t => {
+  for (const loader of ['neoforge', 'quilt']) {
+    const serverPath = makeV26PlainLoaderServer(t, loader);
+    const serverJar = path.join(serverPath, 'server.jar');
+    const serverJarBytes = fs.readFileSync(serverJar);
+    const child = new FakeChild(4620);
+    const spawnCalls = [];
+    const runner = createServerProcessRunner({
+      eventBus: new EventEmitter(),
+      getListeningEndpoints: async () => [],
+      randomUUID: () => 'b09956c1-1daa-4fb9-a8fe-bf6d401c04bc',
+      spawnProcess(file, args, options) {
+        spawnCalls.push({ file, args, options });
+        return child;
+      }
+    });
+
+    // The request server-manager sends for a server that is not modpack managed.
+    const handle = runner.launchServerProcess({
+      serverPath,
+      instanceId: `legacy-${loader}-server`,
+      runtime: v26PlainLoaderTuple(loader),
+      javaPath: 'C:\\Java\\bin\\java.exe',
+      maxRam: 4,
+      operationId: `legacy-${loader}-start`,
+      publishEvents: false,
+      onLine() {},
+      supervision: 'best-effort',
+      runtimeContract: 'legacy'
+    });
+
+    assert.equal(spawnCalls.length, 1, loader);
+    assert.deepEqual(spawnCalls[0].args, [
+      `-Dminecraft.core.server.id=legacy-${loader}-start`,
+      '-Dminecraft.core.server.launch=b09956c1-1daa-4fb9-a8fe-bf6d401c04bc',
+      ...plainJarLaunchArgs(serverJar)
+    ], loader);
+    assert.equal(spawnCalls[0].options.cwd, serverPath);
+    assert.equal(handle.launchPlan.loader, loader);
+    child.finish(0, null);
+    await handle.closed;
+    assert.deepEqual(fs.readFileSync(serverJar), serverJarBytes, loader);
+    assert.equal(fs.existsSync(path.join(serverPath, '.minecraft-core-state')), false, loader);
+  }
+});
+
+test('without server.jar the v26.6.1 rule runs the Quilt launcher and finds no NeoForge server jar', t => {
+  const quilt = makeV26PlainLoaderServer(t, 'quilt', { serverJar: false });
+  const launcher = path.join(quilt, 'quilt-server-launch.jar');
+  assert.equal(v26_6_1LaunchDecision(quilt).jar, launcher);
+  for (const runtimeTuple of [null, v26PlainLoaderTuple('quilt')]) {
+    const plan = resolveLaunchPlan(quilt, { loader: 'quilt', maxRam: 4 }, { runtimeTuple });
+    assert.equal(plan.type, 'jar');
+    assert.equal(plan.loader, 'quilt');
+    assert.equal(plan.jar, launcher);
+    assert.deepEqual(plan.args, plainJarLaunchArgs(launcher));
+  }
+
+  // Only the NeoForge installer jar is left at the root, as the official installer leaves it.
+  const neoForge = makeV26PlainLoaderServer(t, 'neoforge', { serverJar: false });
+  const serverJarMissing = error => error.code === 'SERVER_JAR_MISSING' &&
+    error.message === 'No valid server jar was found in the selected server folder.';
+  assert.throws(() => v26_6_1LaunchDecision(neoForge), serverJarMissing);
+  for (const runtimeTuple of [null, v26PlainLoaderTuple('neoforge')]) {
+    assert.throws(
+      () => resolveLaunchPlan(neoForge, { loader: 'neoforge', maxRam: 4 }, { runtimeTuple }),
+      serverJarMissing
+    );
+  }
+});
+
+test('a NeoForge guard jar that lost its runtime record and every present runtime record keep the strict launch', t => {
+  // A current NeoForge layout whose .minecraft-core-state was lost: its root jar is the guard.
+  const lostRecord = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-neoforge-lost-record-'));
+  t.after(() => fs.rmSync(lostRecord, { recursive: true, force: true }));
+  const { runtime } = writeRecordedNeoForgeRuntime(lostRecord);
+  fs.rmSync(path.join(lostRecord, '.minecraft-core-state'), { recursive: true });
+  for (const runtimeTuple of [null, runtime]) {
+    assert.throws(
+      () => resolveLaunchPlan(lostRecord, { loader: 'neoforge', maxRam: 4 }, { runtimeTuple }),
+      error => error.code === 'RUNTIME_INCOMPLETE'
+    );
+  }
+
+  for (const loader of ['neoforge', 'quilt']) {
+    const corrupt = makeV26PlainLoaderServer(t, loader);
+    fs.mkdirSync(path.join(corrupt, '.minecraft-core-state'));
+    fs.writeFileSync(path.join(corrupt, '.minecraft-core-state', 'runtime.json'), '{"formatVersion":1,"runtime":');
+    const directoryShaped = makeV26PlainLoaderServer(t, loader);
+    fs.mkdirSync(path.join(directoryShaped, '.minecraft-core-state', 'runtime.json'), { recursive: true });
+    for (const serverPath of [corrupt, directoryShaped]) {
+      for (const runtimeTuple of [null, v26PlainLoaderTuple(loader)]) {
+        assert.throws(
+          () => resolveLaunchPlan(serverPath, { loader, maxRam: 4 }, { runtimeTuple }),
+          error => error.code === 'RUNTIME_INCOMPLETE',
+          `${loader} ${serverPath}`
+        );
+      }
+    }
+  }
+});
+
+test('recorded NeoForge and Quilt runtimes keep their recorded launch beside a root server.jar', t => {
+  // A pre-release NeoForge layout: the record, not the root jar, selects the recorded launch.
+  const neoForge = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-neoforge-recorded-'));
+  t.after(() => fs.rmSync(neoForge, { recursive: true, force: true }));
+  const neoForgeRecord = writeRecordedNeoForgeRuntime(neoForge, { rootServerJar: 'vanilla' });
+  const neoForgePlan = resolveLaunchPlan(neoForge, { loader: 'neoforge', maxRam: 6 }, { runtimeTuple: neoForgeRecord.runtime });
+  assert.equal(neoForgePlan.type, 'neoforge');
+  assert.equal(neoForgePlan.loader, 'neoforge');
+  assert.equal(neoForgePlan.jar, null);
+  assert.deepEqual(neoForgePlan.args, [
+    '@user_jvm_args.txt',
+    '-Xmx6G',
+    '-Xms1G',
+    `@${path.join(...neoForgeRecord.argsFile.split('/'))}`,
+    'nogui'
+  ]);
+  assert.deepEqual(neoForgePlan.runtime, neoForgeRecord.runtime);
+
+  const quilt = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-quilt-recorded-'));
+  t.after(() => fs.rmSync(quilt, { recursive: true, force: true }));
+  const quiltRecord = writeRecordedQuiltRuntime(quilt);
+  const quiltPlan = resolveLaunchPlan(quilt, { loader: 'quilt', maxRam: 5 }, { runtimeTuple: quiltRecord.runtime });
+  const launcher = path.join(quilt, 'quilt-server-launch.jar');
+  assert.equal(quiltPlan.type, 'jar');
+  assert.equal(quiltPlan.loader, 'quilt');
+  assert.equal(quiltPlan.jar, launcher);
+  assert.deepEqual(quiltPlan.args, ['-Xmx5G', '-Xms1G', '-jar', launcher, 'nogui']);
+  assert.deepEqual(quiltPlan.runtime, quiltRecord.runtime);
+
+  // A recorded runtime that does not match the request still fails closed.
+  assert.throws(
+    () => resolveLaunchPlan(quilt, { loader: 'quilt', maxRam: 5 }, {
+      runtimeTuple: makeRuntimeTuple('quilt', '0.26.5', '1.20.1', 17)
+    }),
+    error => error.code === 'RUNTIME_INCOMPLETE'
+  );
+});
+
+test('isNeoForgeDowngradeGuardJar accepts only the exact regular guard file, reads at most 64 KiB and writes nothing', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-core-neoforge-guard-check-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const guardBytes = neoForgeDowngradeGuardJarBytes();
+  const guard = path.join(root, 'server.jar');
+  fs.writeFileSync(guard, guardBytes);
+  const changedBytes = Buffer.from(guardBytes);
+  changedBytes[changedBytes.length - 1] ^= 0xff;
+  fs.writeFileSync(path.join(root, 'same-size.jar'), changedBytes);
+  fs.writeFileSync(path.join(root, 'longer.jar'), Buffer.concat([guardBytes, Buffer.from('x')]));
+  fs.writeFileSync(path.join(root, 'large.jar'), Buffer.concat([guardBytes, Buffer.alloc(256 * 1024)]));
+  writeMinimalJar(path.join(root, 'vanilla.jar'));
+  fs.mkdirSync(path.join(root, 'directory.jar'));
+  let link = path.join(root, 'link.jar');
+  try {
+    fs.symlinkSync(guard, link, 'file');
+  } catch {
+    // Creating a symbolic link needs Developer Mode or elevation on Windows.
+    link = null;
+  }
+  const entriesBefore = fs.readdirSync(root).sort();
+  const guardBefore = fs.statSync(guard, { bigint: true });
+  const opens = t.mock.method(fs, 'openSync');
+  const reads = t.mock.method(fs, 'readSync');
+
+  assert.equal(isNeoForgeDowngradeGuardJar(guard), true);
+  for (const name of ['same-size.jar', 'longer.jar', 'large.jar', 'vanilla.jar', 'directory.jar', 'missing.jar']) {
+    assert.equal(isNeoForgeDowngradeGuardJar(path.join(root, name)), false, name);
+  }
+  if (link) assert.equal(isNeoForgeDowngradeGuardJar(link), false, 'symbolic link');
+
+  const writeFlags = fs.constants.O_WRONLY | fs.constants.O_RDWR | fs.constants.O_CREAT |
+    fs.constants.O_TRUNC | fs.constants.O_APPEND;
+  for (const call of opens.mock.calls) {
+    const flags = call.arguments[1];
+    assert.ok(typeof flags === 'number' ? (flags & writeFlags) === 0 : flags === 'r', String(flags));
+  }
+  // Only same-sized candidates are opened, and never more than the guard's own length is read.
+  const requestedBytes = reads.mock.calls.reduce((total, call) => total + call.arguments[3], 0);
+  assert.ok(reads.mock.calls.length > 0);
+  assert.ok(requestedBytes <= 64 * 1024, String(requestedBytes));
+  assert.ok(reads.mock.calls.every(call => call.arguments[3] <= guardBytes.length));
+  opens.mock.restore();
+  reads.mock.restore();
+  assert.deepEqual(fs.readdirSync(root).sort(), entriesBefore);
+  assert.equal(fs.statSync(guard, { bigint: true }).mtimeNs, guardBefore.mtimeNs);
+  assert.deepEqual(fs.readFileSync(guard), guardBytes);
 });
 
 test('an unchanged server.properties write is skipped and leaves the start lease clean', async t => {

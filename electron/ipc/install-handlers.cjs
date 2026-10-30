@@ -15,7 +15,9 @@ const {
   getLoaderVersions,
   normalizeLoader: normalizeLoaderName,
   getForgeRuntimeHealthIssues,
+  hasPreparedRuntimeMetadata,
   inspectPreparedRuntime,
+  isNeoForgeDowngradeGuardJar,
   validatePreparedRuntime
 } = require('../services/loader-install-service.cjs');
 
@@ -141,6 +143,14 @@ async function getLoaderHealthIssues(targetPath, loader, loaderVersion = null, m
   }
 
   if (loader === 'neoforge' || loader === 'quilt') {
+    // v26.6.1 checked nothing for these loaders, and the servers it labelled with them (from file
+    // names) have no runtime record. As there, only server.jar and Java are checked, so Repair never
+    // installs a loader over them. A runtime record, or a NeoForge downgrade guard jar whose record
+    // was lost, is still checked against the exact runtime.
+    if (!hasPreparedRuntimeMetadata(targetPath) &&
+        !(loader === 'neoforge' && isNeoForgeDowngradeGuardJar(path.join(targetPath, 'server.jar')))) {
+      return [];
+    }
     if (!minecraftVersion || !loaderVersion) return [`${loader === 'neoforge' ? 'NeoForge' : 'Quilt'} runtime identity`];
     try {
       const manager = new ServerJavaManager(targetPath);
