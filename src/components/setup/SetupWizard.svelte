@@ -1,8 +1,9 @@
 <!-- @ts-ignore -->
 <script>
   /// <reference path="../../electron.d.ts" />
-  import { createEventDispatcher, onMount, onDestroy } from "svelte";
+  import { createEventDispatcher, onMount, onDestroy, tick } from "svelte";
   import logger from "../../utils/logger.js";
+  import { loaderInstallFailure } from "../../utils/server/loaderInstallResult.js";
 
   // Event dispatcher to communicate with parent component
   const dispatch = createEventDispatcher();
@@ -40,6 +41,8 @@
   let installProgress = 0;
   let installSpeed = "0 MB/s";
   let installLogs = [];
+  let installError = ""; // Why the last Install stopped, shown next to its button
+  let installErrorRegion;
   let step = "chooseFolder"; // chooseFolder → chooseVersion → done
 
   // Functions
@@ -281,6 +284,7 @@
 
     try {
       installing = true;
+      installError = "";
       installLogs = [];
       installProgress = 0;
       installSpeed = "Starting...";
@@ -373,13 +377,19 @@
         },
       });
 
-      await window.electron.invoke("download-and-install-loader", {
+      const loaderResult = await window.electron.invoke("download-and-install-loader", {
         path,
         mcVersion: selectedMC,
         loader: selectedLoader,
         loaderVersion: selectedFabric,
         fabricVersion: selectedFabric,
       });
+      // A failed install resolves { success: false } instead of rejecting. Setup stops here, so the
+      // folder is never completed and registered as a server without its loader.
+      const loaderFailure = loaderInstallFailure(loaderResult, selectedLoader);
+      if (loaderFailure) {
+        throw loaderFailure;
+      }
 
       // Download Java for the server
       installLogs = [...installLogs, "Checking Java requirements..."];
@@ -467,8 +477,8 @@
       dispatchSetupComplete();
     } catch (err) {
       installing = false;
-      const errorMsg = `Error: ${err.message || "Unknown error during installation"}`;
-      installLogs = [...installLogs, errorMsg];
+      installError = err.message || "Unknown error during installation";
+      installLogs = [...installLogs, `Error: ${installError}`];
 
       logger.error("Server installation failed", {
         category: "ui",
@@ -483,7 +493,17 @@
           loaderVersion: selectedFabric,
         },
       });
+      await revealInstallFailure(installError);
     }
+  }
+
+  // The Install button ends the version form. Why an Install stopped is shown right below it, scrolled
+  // into view and focused, so the user is not left looking at a button that silently reset.
+  async function revealInstallFailure(failure) {
+    await tick();
+    if (installError !== failure || !installErrorRegion) return;
+    installErrorRegion.scrollIntoView?.({ block: "nearest" });
+    installErrorRegion.focus({ preventScroll: true });
   }
 
   function setupInstallationListeners() {
@@ -731,16 +751,33 @@
         >
           {installing ? "Installing..." : `Install ${selectedLoader === "vanilla" ? "Server" : `${selectedLoader} Server`}`}
         </button>
+
+        {#if installError}
+          <section
+            class="install-failure"
+            bind:this={installErrorRegion}
+            tabindex="-1"
+            role="alert"
+          >
+            <strong>Setup did not finish</strong>
+            <p>{installError}</p>
+            <p>
+              The server was not added. Press Install to try again.
+            </p>
+          </section>
+        {/if}
       {/if}
 
-      {#if installing}
+      {#if installing || installError}
         <div class="installation-progress">
-          <div class="progress-bar">
-            <div class="progress-fill" style="width: {installProgress}%"></div>
-          </div>
-          <p class="progress-text">
-            Progress: {installProgress}% ({installSpeed})
-          </p>
+          {#if installing}
+            <div class="progress-bar">
+              <div class="progress-fill" style="width: {installProgress}%"></div>
+            </div>
+            <p class="progress-text">
+              Progress: {installProgress}% ({installSpeed})
+            </p>
+          {/if}
 
           <div class="install-logs">
             <h3>Installation Logs</h3>
@@ -831,6 +868,21 @@
     color: #ef4444;
     font-size: 0.875rem;
     margin-bottom: 1rem;
+  }
+
+  .install-failure {
+    width: 100%;
+    margin-bottom: 1rem;
+    padding: 0.75rem 1rem;
+    border-left: 4px solid #ef4444;
+    border-radius: 4px;
+    background-color: rgba(239, 68, 68, 0.12);
+    color: white;
+    text-align: left;
+  }
+
+  .install-failure p {
+    margin: 0.5rem 0 0;
   }
 
   .installation-progress {

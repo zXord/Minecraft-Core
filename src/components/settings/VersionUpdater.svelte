@@ -1,5 +1,5 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   
   import { SvelteSet } from 'svelte/reactivity';
   import { get } from 'svelte/store';
@@ -14,6 +14,7 @@
   import ConfirmationDialog from '../common/ConfirmationDialog.svelte';
   import { modAvailabilityWatchStore } from '../../stores/modAvailabilityWatchStore.js';
   import { navigate } from '../../router.js';
+  import { loaderInstallFailure } from '../../utils/server/loaderInstallResult.js';
 
   export let serverPath = '';
   export let modpackManaged = false;
@@ -52,6 +53,8 @@
   let currentStep = 0;
   let completedUpdates = []; // Track successful mod updates
   let updateSummary = null; // Complete summary of all changes
+  let updateError = ''; // Why the last update stopped, shown next to its button
+  let updateErrorRegion;
   let showWatchPanel = false;
   let serverPathLocal = '';
   let showWatchSettings = false;
@@ -596,6 +599,7 @@
     showUpdateConfirmation = false;
     const shouldCreateRestorePoint = createRestorePointBeforeUpdate;
     updating = true;
+    updateError = '';
     updateProgress = 0;
     currentTask = 'Starting update...';
     
@@ -654,13 +658,17 @@
       currentStep++;
       currentTask = selectedLoader === 'vanilla' ? 'Preparing Vanilla server...' : `Installing ${selectedLoader} loader...`;
       updateProgress = Math.round((currentStep / totalSteps) * 100);
-      await safeInvoke('download-and-install-loader', {
+      const loaderResult = await safeInvoke('download-and-install-loader', {
         path: resolvedPath,
         mcVersion: selectedMC,
         loader: selectedLoader,
         loaderVersion: selectedFabric,
         fabricVersion: selectedFabric
       });
+      // A failed install resolves { success: false } instead of rejecting. The update stops here, as for a
+      // rejection, so Java, mods and the server settings are left alone and no success is reported.
+      const loaderFailure = loaderInstallFailure(loaderResult, selectedLoader);
+      if (loaderFailure) throw loaderFailure;
       
       // Step 4: Check and download Java if needed
       currentStep++;
@@ -799,8 +807,24 @@
     } catch (err) {
       currentTask = `Update failed: ${err.message}`;
       updateProgress = 0;
+      updateError = err.message || 'The update could not be completed.';
     }
     updating = false;
+    if (updateError) await revealUpdateFailure(updateError);
+  }
+
+  // The progress panel closes when an update ends. Why an update stopped is shown right below Update Server
+  // Version instead, scrolled into view and focused.
+  async function revealUpdateFailure(failure) {
+    await tick();
+    if (updateError !== failure || !updateErrorRegion) return;
+    // The updater shares the Settings page with other cards: leave focus where it is when the
+    // user has moved on to one of them. role="alert" still announces the failure.
+    const active = typeof document === 'undefined' ? null : document.activeElement;
+    const updater = updateErrorRegion.closest?.('.version-updater');
+    if (active && active !== document.body && updater && !updater.contains(active)) return;
+    updateErrorRegion.scrollIntoView?.({ block: 'nearest' });
+    updateErrorRegion.focus({ preventScroll: true });
   }
 </script>
 
@@ -1148,6 +1172,13 @@
   >
     {updating ? 'Updating...' : 'Update Server Version'}
   </button>
+  {#if updateError}
+    <section class="update-failure" bind:this={updateErrorRegion} tabindex="-1" role="alert">
+      <strong>Update did not finish</strong>
+      <p>{updateError}</p>
+      <p>Some server files may already have changed. Run the update again before you start the server.</p>
+    </section>
+  {/if}
   
   <!-- Update Progress -->
   {#if updating && (updateProgress > 0 || currentTask)}
@@ -1675,6 +1706,19 @@
   .server-running-warning {
     color: #ff9800;
     margin-top: 0.5rem;
+  }
+  .update-failure {
+    margin: 0.75rem 0;
+    padding: 0.75rem 1rem;
+    border-left: 4px solid #fc8181;
+    border-radius: 6px;
+    background-color: rgba(252, 129, 129, 0.1);
+    color: #fc8181;
+    text-align: left;
+  }
+  .update-failure p {
+    margin: 0.35rem 0 0;
+    font-size: 0.9rem;
   }
   
   /* Completed Updates Styles */
