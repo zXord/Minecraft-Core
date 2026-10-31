@@ -163,7 +163,7 @@ Invariant, pinned by `tests/legacy-writer-invariant.test.cjs`: no lifecycle or r
 - `read-players` normalizes legacy banned-IP records only in memory and never rewrites the list or player map.
 - `list-mods`, installed-mod metadata, disabled/ignored state, shader/resource-pack listing, client assets, availability watches, and availability history do not create directories or refresh manifests.
 - legacy expected-mod state is normalized in memory; corruption is not deleted during a load.
-- modpack source inspection and both install and management preflight channels only create opaque, expiring plans outside server roots; server content changes begin only after `modpacks:start-operation` validates the reviewed fingerprint.
+- modpack source inspection and both install and management preflight channels only create opaque, expiring plans outside server roots; server content changes begin only after `modpacks:start-operation` validates the reviewed fingerprint. A preflight may read the folder of a running server: it leaves out only passive files the server writes or locks while they are read, and refuses when Start would hold a recorded world file exact. Start stops the server and takes the strict snapshot again before anything changes.
 - modpack state for display, the policy and companion reads goes through the state observer, which answers `null` for a folder whose state is proven absent without the parent-scoped strict repository; the ownership predicate and the live-folder probe never write.
 
 ## Narrow ancillary exceptions
