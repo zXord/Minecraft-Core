@@ -78,12 +78,23 @@ Upgrade, pre-fix build opening that 26.6.1 owner data:
 
 ### Open items found in review, not fixed in this wave
 
-- Owner decision Q6 (cache the ArchiveWorker verification per process) was not carried by any batch; strict writes on modpack-managed servers still re-hash the worker each time.
-- Deleting a client with "keep files" whose folder is the exact folder of a running registered server gives "the server must be stopped"; 26.6.1 allowed it (rename works).
-- Two client folders that share one client ID (a copied folder) cannot be renamed or deleted; 26.6.1 could.
-- Backup list and delete on a server folder that is missing (for example an unplugged drive) fail; 26.6.1 listed nothing and reported success.
+- Owner decision Q6 (cache the ArchiveWorker verification per process) was not carried by any batch; strict writes on modpack-managed servers still re-hash the worker each time (about 0.6 s per check on the QA PC).
 - After a keep-both choice, deleting or editing the `.pack` copy makes Verify report a damaged managed file and Repair fail until an update, uninstall or detach; keep-both works only for files in the server's top folder.
-- A failed NeoForge or Quilt loader install in the 26.11.1 wizard is reported as healthy and starts vanilla, as in 26.6.1 (the wizard never checked the install result).
+- A keep-files client delete still needs the server stopped when that folder's coordinator identity is the client's own ID (the client was used before a server was registered in the same folder, in the same session); this covers every copy a delete removes, and the message names the running server. Profiles that already have both registered behave as 26.6.1.
+- Copied client folders that share one client ID can be renamed and deleted again through the policy, but launch, sync, toggles and sessions still refuse them (unchanged). In the UI, two registrations sharing one client ID leave the sidebar empty, as in 26.6.1 (`get-instances` gives both the folder's client ID and the sidebar is keyed by ID); nothing is lost on disk.
+- A registered server whose folder is missing counts as using the default ports 25565/8080 in the cross-instance port check, so it can block auto-start of a default-port server, as in 26.6.1.
+- Quitting with servers running stops them with a hard kill, as 26.6.1 did (`taskkill /F`).
+- Modrinth requests carry no User-Agent. Modrinth answers today, but asks clients to identify themselves.
+
+### Fixed on 31 October (late fix round)
+
+- Keep-files client delete beside a running server, and rename/delete of copied client folders that share one client ID, work as in 26.6.1.
+- Backups on a server whose folder is missing (unplugged drive) list nothing and delete reports success, as in 26.6.1; nothing creates the folder.
+- The setup wizard and the Version Updater stop and show the reason when the loader install reports failure (any loader; also a 26.6.1 bug for Fabric and Forge).
+- A friend's Required Mods table showed only the count for lists of 80 or fewer (Svelte 5 `$:` ordering in `ClientModList.svelte`, also in 26.6.1).
+- Modrinth browsing failed for everyone while one search result had more than 32 gallery images; display galleries now keep their first 32 (search) or 128 (project) images.
+- Popular packs whose version history is larger than 2 MiB (Prominence II, Re-Console, Fabulously Optimized) or longer than 1,000 versions (Optimizationn) could not be opened. The history request alone may now be up to 16 MiB and 5,000 versions; a longer history (OneClient, 26 MiB) shows "This modpack has too many versions to list here" with a pointer to Local archive.
+- Minecraft version lists in Modrinth metadata may hold up to 2,048 entries (was 256), so one long list can no longer fail every search page.
 
 ## Scope update — 13 October 11:58
 

@@ -41,6 +41,8 @@ When AppData is redirected to a network share, Minecraft Core opens with a banne
 - Deleting a client with its files, when a registered server sits inside that client folder, needs that server stopped first; it is then deleted as in 26.6.1.
 - A new server can again be created inside, or in the same folder as, a plain client folder. Matching client-pack installs refuse such nested layouts with an explanation.
 - Port conflicts between servers are checked as in 26.6.1.
+- A friend's **Required Mods** list shows its mods again. 26.6.1 showed only the count ("2 mods") for lists of 80 mods or fewer.
+- If the loader install (Fabric, Forge, NeoForge or Quilt) fails during server setup or a version update, Minecraft Core now stops and shows the reason next to the button, instead of finishing as if it had worked.
 
 ## Going back to 26.6.1 after using modpacks
 
@@ -55,6 +57,7 @@ These are not 26.6.1 regressions.
 
 - If a modpack Start failed for a reason other than an expired review, the wizard can stay paused until it is reopened.
 - A destination folder that is deleted and recreated before an app restart stays reserved until the restart.
+- A Modrinth pack with more than 5,000 versions, or a version history over 16 MiB, cannot be browsed; the app says so and points to **Local archive** with the pack's `.mrpack` file.
 - Per-machine installs may get a stray per-user Start Menu shortcut the first time a Windows notification is shown. This is cosmetic; uninstaller cleanup is planned.
 
 ## Owner decisions behind this release (30 October 2026)
