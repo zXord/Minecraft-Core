@@ -28,7 +28,6 @@
 
   // Track which mods are currently being toggled
   let togglingMods = new SvelteSet();
-  let renderedMods = [];
   let renderLimit = 0;
   let renderFrame = null;
   let lastRenderedModsRef = null;
@@ -87,6 +86,25 @@
     renderFrame = requestAnimationFrame(pump);
   }
 
+  // Showing the list draws its rows again; hiding it stops drawing them.
+  function setSectionExpanded(expanded) {
+    sectionExpanded = expanded;
+    if (sectionExpanded) {
+      scheduleProgressiveRender();
+    } else {
+      cancelScheduledRender();
+      renderLimit = 0;
+    }
+  }
+
+  // The template slices the rows, passing mods and renderLimit in so they are
+  // redrawn whenever either changes. A `$: renderedMods` statement ran before
+  // the mods change below had set renderLimit and was then skipped for the
+  // rest of that update, so lists of up to 80 mods showed no rows.
+  function getRenderedMods(sourceMods, limit) {
+    return Array.isArray(sourceMods) ? sourceMods.slice(0, limit) : [];
+  }
+
   $: missingModKeys = new Set(
     (
       type === "required"
@@ -134,17 +152,9 @@
   $: requiredTotalDownloadSummaryCount =
     requiredMissingSummaryCount + requiredOutdatedSummaryCount;
 
-  $: renderedMods = Array.isArray(mods) ? mods.slice(0, renderLimit) : [];
-
   $: if (startCollapsed !== lastAppliedStartCollapsed) {
     lastAppliedStartCollapsed = startCollapsed;
-    sectionExpanded = !startCollapsed;
-    if (!sectionExpanded) {
-      cancelScheduledRender();
-      renderLimit = 0;
-    } else {
-      scheduleProgressiveRender();
-    }
+    setSectionExpanded(!startCollapsed);
   }
 
   $: if (
@@ -334,7 +344,7 @@
                 {/if}
                 <button
                   class="section-toggle-btn"
-                  on:click={() => (sectionExpanded = !sectionExpanded)}
+                  on:click={() => setSectionExpanded(!sectionExpanded)}
                   aria-expanded={sectionExpanded}
                 >
                   {sectionExpanded ? "Hide List" : "Show List"}
@@ -377,7 +387,7 @@
       </thead>
       {#if sectionExpanded}
         <tbody>
-          {#each renderedMods as mod (mod.fileName)}
+          {#each getRenderedMods(mods, renderLimit) as mod (mod.fileName)}
             {@const modStatus = getModStatus(mod)}
             <tr class:disabled={modStatus === "disabled"}>
               <!-- Mod Name -->
