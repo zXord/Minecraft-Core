@@ -207,3 +207,29 @@ test('error construction rejects unapproved codes and unsafe public messages', (
   assert.throws(() => new ModpackError('DATABASE_DOWN', 'Database down'), /Unknown modpack failure code/);
   assert.throws(() => new ModpackError('HASH_MISMATCH', 'Read C:\\secret'), /safe message/i);
 });
+
+test('a stale review exposes only the closed reason code for server files a running server was using', () => {
+  const { validateModpackIpcResult } = require('../../electron/services/modpacks/ipc-schemas.cjs');
+  const message = 'Modpack or server files changed or were locked while this review read them. If the server is running, stop it, then review again. Nothing was changed on the server.';
+  const result = new ModpackError('PLAN_STALE', message, {
+    details: { reasonCode: 'server-files-in-use', field: 'serverSnapshot', path: 'C:\\secret\\server' },
+    retryable: true,
+    cause: new Error("EBUSY: resource busy or locked, read 'C:\\secret\\server\\config\\pack.json'")
+  }).toPublicResult();
+
+  assert.deepEqual(PUBLIC_ERROR_DETAILS_BY_CODE.PLAN_STALE, { reasonCode: ['server-files-in-use'] });
+  assert.deepEqual(result, {
+    ok: false,
+    error: { code: 'PLAN_STALE', message, details: { reasonCode: 'server-files-in-use' }, retryable: true }
+  });
+  assert.deepEqual(validateModpackIpcResult('modpacks:preflight-management', result), result);
+  assert.deepEqual(validateModpackIpcResult('modpacks:preflight', result), result);
+  // Every other stale review keeps closed empty details.
+  assert.deepEqual(new ModpackError('PLAN_STALE', 'The reviewed server or archive changed', {
+    details: { reasonCode: 'content-revision', field: 'contentRevision' }
+  }).toPublicResult().error.details, {});
+  assert.equal(isValidPublicErrorResult({
+    ok: false,
+    error: { code: 'PLAN_STALE', message, details: { field: 'serverSnapshot' }, retryable: true }
+  }), false);
+});

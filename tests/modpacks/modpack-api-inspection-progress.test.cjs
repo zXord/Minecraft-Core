@@ -137,3 +137,17 @@ test('plan-stale review detection recognizes only the explicit closed failure co
   assert.equal(isPlanStaleError(new ModpackApiError({ code: 'COMMIT_FAILED', message: 'Failed' })), false);
   assert.equal(isPlanStaleError(null), false);
 });
+
+test('a stale review keeps its backend reason only when the failure carries a closed reason code', async () => {
+  const { planStaleReason, ModpackApiError } = await loadApi({});
+
+  assert.equal(planStaleReason(new ModpackApiError({
+    code: 'PLAN_STALE', message: 'Files were in use', details: { reasonCode: 'server-files-in-use' }, retryable: true
+  })), 'server-files-in-use');
+  assert.equal(planStaleReason(new ModpackApiError({ code: 'PLAN_STALE', message: 'Expired' })), null);
+  assert.equal(planStaleReason({ code: 'PLAN_STALE', details: { reasonCode: '' } }), null);
+  assert.equal(planStaleReason(new ModpackApiError({
+    code: 'COMMIT_FAILED', message: 'Failed', details: { reasonCode: 'server-files-in-use' }
+  })), null);
+  assert.equal(planStaleReason(null), null);
+});

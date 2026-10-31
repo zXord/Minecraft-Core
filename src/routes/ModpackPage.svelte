@@ -1,7 +1,7 @@
 <script>
   import { isValidPublicJob } from '../utils/modpacks/launchResultValidation.js';
   import { onDestroy, onMount, tick } from 'svelte';
-  import { isPlanStaleError, ModpackApiError, modpackApi } from '../utils/modpacks/modpackApi.js';
+  import { isPlanStaleError, ModpackApiError, modpackApi, planStaleReason } from '../utils/modpacks/modpackApi.js';
   import { createServerRequestScope } from '../utils/modpacks/serverRequestScope.js';
   import { mergePublicJob } from '../utils/modpacks/publicJobMerge.js';
   import { projectVerificationAttempt, verificationSessionReferences } from '../utils/modpacks/verificationSession.js';
@@ -869,7 +869,9 @@
       flow = 'review';
     } catch (caught) {
       if (!currentServerRequest(requestToken)) return;
-      error = isPlanStaleError(caught)
+      // A stale review with a closed reason keeps the main process's message,
+      // which says what to do; any other stale review asks for a fresh one.
+      error = isPlanStaleError(caught) && !planStaleReason(caught)
         ? new ModpackApiError({
           code: 'PLAN_STALE',
           message: 'The server changed while this preflight was being built. Run the action again to generate and review a fresh plan. Nothing was changed on the server.',

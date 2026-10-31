@@ -1429,6 +1429,15 @@ test('detach planning fails closed when the coordinator revision changes during 
   }), error => error?.code === 'PLAN_STALE');
 });
 
+test('management planning refuses an instance whose running state is not a boolean', async t => {
+  const fixture = managementFixture(t);
+  await assert.rejects(fixture.adapter.createManagementPlan({
+    request: { instanceId: 'server-one', operationKind: 'uninstall', selectionRef: null },
+    currentState: fixture.currentState,
+    instance: { instanceId: 'server-one', serverPath: fixture.serverPath, priorRunning: 'yes' }
+  }), error => error?.code === 'INVALID_REQUEST');
+});
+
 test('managed uninstall removes only unchanged managed files and preserves modified, user, and world content', async t => {
   const fixture = managementFixture(t);
   const result = await fixture.adapter.createManagementPlan({

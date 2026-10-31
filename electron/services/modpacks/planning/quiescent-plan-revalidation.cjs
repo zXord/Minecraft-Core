@@ -4,7 +4,14 @@ const path = require('node:path');
 
 const { ModpackError } = require('../errors.cjs');
 
-const REBASEABLE_ACTIONS = new Set(['preserve-modified', 'preserve-orphan', 'preserve-user-addon']);
+// Decisions that leave a passive path as the user has it. A review of a running
+// server leaves out a file the server holds locked or is rewriting (its world's
+// session.lock, a world save), so an earlier lifecycle's record of that file as
+// the user's is reviewed as `absent`, and the stopped server shows it again.
+// Every pair of these is preservation-only. A repair also decides `unchanged`
+// for recorded user files, but it names them all in its desired manifest, which
+// keeps them exact.
+const REBASEABLE_ACTIONS = new Set(['absent', 'preserve-modified', 'preserve-orphan', 'preserve-user-addon']);
 const SENSITIVE_ROLES = new Set(['mod', 'runtime', 'library', 'server', 'application']);
 const SENSITIVE_ROOTS = new Set([
   '.fabric', '.quilt', 'java', 'kubejs', 'libraries', 'mods', 'plugins', 'scripts', 'versions'
@@ -152,4 +159,40 @@ function reconcileQuiescentOwnership({
   return currentOwnership;
 }
 
-module.exports = { reconcileQuiescentOwnership };
+/**
+ * The passive-path half of the rule above, for a review that reads a running
+ * server before any decision exists: true for a path outside every managed or
+ * incoming path, sensitive root, executable and world datapack. Every lifecycle
+ * decision preserves such a path, so the review may leave out a file there that
+ * the server is writing or holds locked; the commit reads it after the stop.
+ * eula.txt is always decided `ignore-eula`, which no rebase accepts.
+ */
+function createPassivePathFilter({ oldManifest = null, incomingManifest = null, worldDirectories } = {}) {
+  const knownWorldDirectories = normalizeWorldDirectories(worldDirectories);
+  const managedPaths = [
+    ...manifestPathKeys(oldManifest, { ignorePreservedUserEntries: true }),
+    ...manifestPathKeys(incomingManifest)
+  ];
+  const recorded = new Map((oldManifest?.entries || []).map(entry => [entry.pathKey, entry]));
+  return pathKey => pathKey !== 'eula.txt' && !sensitivePath(pathKey, knownWorldDirectories, recorded.get(pathKey)) &&
+    !managedPaths.some(candidate => pathsOverlap(pathKey, candidate));
+}
+
+/**
+ * The recorded paths in a world folder that the rule above holds exact: every
+ * recorded path that is not the user's (a world the pack seeded), and every
+ * path the incoming manifest names (a repair names them all). Minecraft saves
+ * its world as it stops, so a running server's stop changes them.
+ */
+function exactWorldPathKeys({ oldManifest = null, incomingManifest = null, worldDirectories } = {}) {
+  const knownWorldDirectories = [...normalizeWorldDirectories(worldDirectories)];
+  const exactPaths = new Set([
+    ...manifestPathKeys(oldManifest, { ignorePreservedUserEntries: true }),
+    ...manifestPathKeys(incomingManifest)
+  ].map(pathKey => pathKey.replaceAll('\\', '/').toLocaleLowerCase('en-US')));
+  return [...exactPaths]
+    .filter(pathKey => knownWorldDirectories.some(world => pathsOverlap(pathKey, world)))
+    .sort((left, right) => left.localeCompare(right, 'en-US'));
+}
+
+module.exports = { createPassivePathFilter, exactWorldPathKeys, reconcileQuiescentOwnership };

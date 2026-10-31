@@ -911,7 +911,9 @@ function createModpackServiceGraph(deps = {}) {
     notificationStore: { enumerable: true, get: () => modpackServices?.notificationStore || null },
     releaseMonitor: { enumerable: true, get: () => modpackServices?.releaseMonitor || null },
     releaseTrackingStore: { enumerable: true, get: () => modpackServices?.releaseTrackingStore || null },
-    outcomeActionService: { enumerable: true, get: () => modpackServices?.outcomeActionService || null }
+    outcomeActionService: { enumerable: true, get: () => modpackServices?.outcomeActionService || null },
+    // The app log, where the modpack IPC records why a review was refused.
+    logger: { enumerable: true, get: () => logger }
   });
   Object.freeze(modpacks);
   const startupInput = deps.startup || {};

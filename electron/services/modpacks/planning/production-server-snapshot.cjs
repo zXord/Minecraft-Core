@@ -5,15 +5,45 @@ const path = require('node:path');
 
 const { ModpackError, deepFreeze } = require('../errors.cjs');
 const { canonicalPath } = require('./ownership-planner.cjs');
+const { createPassivePathFilter } = require('./quiescent-plan-revalidation.cjs');
 const { MAX_SERVER_PROPERTIES_BYTES } = require('../../server-health-constants.cjs');
 const { readEffectiveServerProperty } = require('../../../utils/server-network-properties.cjs');
 
 const EXCLUDED_ROOTS = new Set(['.minecraft-core-state', 'backups', 'crash-reports', 'logs']);
 const HASH_CHUNK_BYTES = 1024 * 1024;
+// What a running server does to a file a review reads: Minecraft holds its
+// world's session.lock locked (EBUSY), a file deleted while it is open cannot
+// be opened (EPERM, see assertNotDenied), and a temporary save file can be gone
+// before it is read.
+const IN_USE_CODES = new Set(['EBUSY', 'ENOENT', 'EPERM']);
+const SERVER_FILES_IN_USE_MESSAGE = 'Modpack or server files changed or were locked while this review read them. ' +
+  'If the server is running, stop it, then review again. Nothing was changed on the server.';
+// Failures that mean a path changed, appeared, vanished or was locked while it
+// was read, unlike an unsafe path (a link, a reparse point, a hard link).
+const CHANGED_FAILURES = new WeakSet();
 
 function invalid(cause) {
   if (cause instanceof ModpackError) return cause;
   return new ModpackError('PLAN_STALE', 'The server changed while its modpack plan was prepared', { cause });
+}
+
+function changed(cause) {
+  if (cause instanceof ModpackError) return cause;
+  const error = invalid(cause);
+  CHANGED_FAILURES.add(error);
+  return error;
+}
+
+function observationFailure(cause) {
+  return IN_USE_CODES.has(cause?.code) ? changed(cause) : invalid(cause);
+}
+
+function serverFilesInUse(cause) {
+  return new ModpackError('PLAN_STALE', SERVER_FILES_IN_USE_MESSAGE, {
+    cause,
+    details: { reasonCode: 'server-files-in-use' },
+    retryable: true
+  });
 }
 
 function cancelled(cause) {
@@ -55,16 +85,40 @@ function directoryMemberNames(children) {
   return names.sort((left, right) => left.localeCompare(right, 'en-US'));
 }
 
-async function inspectReparse(reparseInspector, candidate, signal) {
+function changedMemberNames(before, after) {
+  const beforeNames = new Set(before);
+  const afterNames = new Set(after);
+  return [...before.filter(name => !afterNames.has(name)), ...after.filter(name => !beforeNames.has(name))];
+}
+
+function pathKeyOf(relative) {
+  return relative.replaceAll('\\', '/').toLocaleLowerCase('en-US');
+}
+
+// `vanishedFs`, given only for a review, tells a probe that failed because the
+// path is gone or being deleted apart from any other probe failure.
+async function inspectReparse(reparseInspector, candidate, signal, vanishedFs = null) {
   throwIfCancelled(signal);
+  let reparsePoint;
   try {
-    if (await reparseInspector.isReparsePoint(candidate, { signal }) !== false) throw invalid();
+    reparsePoint = await reparseInspector.isReparsePoint(candidate, { signal });
   } catch (error) {
     if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'ABORT_ERR' ||
         error?.code === 'CANCELLED') throw cancelled(error);
+    if (vanishedFs && await vanished(vanishedFs, candidate)) throw changed(error);
     throw invalid(error);
   }
+  if (reparsePoint !== false) throw invalid();
   throwIfCancelled(signal);
+}
+
+async function vanished(fsPromises, candidate) {
+  try {
+    await fsPromises.lstat(candidate, { bigint: true });
+    return false;
+  } catch (error) {
+    return error?.code === 'ENOENT' || error?.code === 'EPERM';
+  }
 }
 
 async function hashFile(fsPromises, filePath, expected, {
@@ -81,8 +135,8 @@ async function hashFile(fsPromises, filePath, expected, {
     handle = await fsPromises.open(filePath, fs.constants.O_RDONLY | noFollow);
     throwIfCancelled(signal);
     const opened = await handle.stat({ bigint: true });
-    if (!opened.isFile() || opened.isSymbolicLink() || BigInt(opened.nlink) !== 1n ||
-        !sameFile(expected, opened)) throw invalid();
+    if (opened.isSymbolicLink() || (opened.isFile() && BigInt(opened.nlink) !== 1n)) throw invalid();
+    if (!opened.isFile() || !sameFile(expected, opened)) throw changed();
     if (captureBytes && (!Number.isSafeInteger(captureLimitBytes) || captureLimitBytes < 0 ||
         opened.size > BigInt(captureLimitBytes))) throw invalid();
     const digest = crypto.createHash('sha256');
@@ -105,10 +159,9 @@ async function hashFile(fsPromises, filePath, expected, {
     const afterHandle = await handle.stat({ bigint: true });
     const afterPath = await fsPromises.lstat(filePath, { bigint: true });
     throwIfCancelled(signal);
-    if (totalRead !== opened.size || !afterPath.isFile() || afterPath.isSymbolicLink() ||
-        BigInt(afterPath.nlink) !== 1n || !sameFile(opened, afterHandle) || !sameFile(opened, afterPath)) {
-      throw invalid();
-    }
+    if (afterPath.isSymbolicLink() || (afterPath.isFile() && BigInt(afterPath.nlink) !== 1n)) throw invalid();
+    if (totalRead !== opened.size || !afterPath.isFile() || !sameFile(opened, afterHandle) ||
+        !sameFile(opened, afterPath)) throw changed();
     result = {
       sha256: digest.digest('hex'),
       ...(captured ? { bytes: Buffer.concat(captured, Number(totalRead)) } : {})
@@ -123,9 +176,17 @@ async function hashFile(fsPromises, filePath, expected, {
   if (failure) {
     if (signal?.aborted || failure?.name === 'AbortError' || failure?.code === 'ABORT_ERR' ||
         failure?.code === 'CANCELLED') throw cancelled(failure);
-    throw invalid(failure);
+    if (handle === undefined) await assertNotDenied(fsPromises, filePath, failure);
+    throw observationFailure(failure);
   }
   return result;
+}
+
+// Windows answers EPERM both for a path being deleted and for one this user may
+// not read. Only the first can no longer be looked up; the second stays
+// unreadable once the server has stopped, so it is not in use.
+async function assertNotDenied(fsPromises, candidate, failure) {
+  if (failure?.code === 'EPERM' && !(await vanished(fsPromises, candidate))) throw invalid(failure);
 }
 
 function identity(stat) {
@@ -186,9 +247,20 @@ function createProductionServerSnapshot({
     serverKind,
     serverPath,
     unmanagedAdoption = false,
+    // A lifecycle review reads a server that may be running. It leaves out a
+    // passive path the server writes or holds locked while it is read; Start
+    // stops the server and takes this snapshot again, without `review`, before
+    // it changes anything. A review never leaves out a path that
+    // `incomingManifest` names: the reviewed source's files, or for a repair
+    // every recorded file.
+    review = false,
+    incomingManifest = null,
     signal
   } = {}) {
-    if (!validSignal(signal)) throw invalid();
+    if (!validSignal(signal) || typeof review !== 'boolean' || (incomingManifest !== null &&
+        (!incomingManifest || typeof incomingManifest !== 'object' || !Array.isArray(incomingManifest.entries)))) {
+      throw invalid();
+    }
     throwIfCancelled(signal);
     if (serverKind === 'new') {
       return deepFreeze({
@@ -216,93 +288,193 @@ function createProductionServerSnapshot({
       let liveHistoryBytes = 0n;
       const directoryObservations = [];
       const fileObservations = [];
+      // Review only: each path left out, with the failure that left it out.
+      const leftOut = new Map();
+      const vanishedFs = review ? fsPromises : null;
+      let passiveRule = null;
+
+      // A review may leave out only a path Start can rebase once the server
+      // stopped (createPassivePathFilter), outside the application's own state,
+      // and never a world folder or a folder that holds one, since a world holds
+      // its datapacks. World folders come from server.properties, so whatever
+      // was left out before it was read is checked again at the end.
+      function passiveInReview(pathKey) {
+        if (pathKey === '.minecraft-core.json' || pathKey === '.minecraft-core-state' ||
+            pathKey.startsWith('.minecraft-core-state/')) return false;
+        if (!passiveRule || passiveRule.propertiesBytes !== propertiesBytes) {
+          const worlds = worldDirectories(propertiesBytes).map(world => world.toLocaleLowerCase('en-US'));
+          passiveRule = {
+            propertiesBytes,
+            worlds,
+            passive: createPassivePathFilter({ oldManifest: currentState?.manifest ?? null, incomingManifest, worldDirectories: worlds })
+          };
+        }
+        return passiveRule.passive(pathKey) &&
+          !passiveRule.worlds.some(world => world === pathKey || world.startsWith(`${pathKey}/`));
+      }
+
+      function leftOutFailure(pathKey) {
+        if (leftOut.size === 0) return null;
+        let prefix = '';
+        for (const segment of pathKey.split('/')) {
+          prefix = prefix ? `${prefix}/${segment}` : segment;
+          if (leftOut.has(prefix)) return leftOut.get(prefix);
+        }
+        return null;
+      }
+
+      // Every failure to observe a path passes through here. Outside a review,
+      // and for an unsafe path or the server folder itself, it fails the
+      // snapshot. A review leaves out a passive path that changed or was locked
+      // and refuses, with its own reason, any other path that did.
+      function leaveOut(pathKey, error) {
+        if (!(error instanceof ModpackError) && (signal?.aborted || error?.name === 'AbortError' ||
+            error?.code === 'ABORT_ERR' || error?.code === 'CANCELLED')) throw cancelled(error);
+        const failure = observationFailure(error);
+        if (!review || pathKey === '' || !CHANGED_FAILURES.has(failure)) throw failure;
+        if (!passiveInReview(pathKey)) throw serverFilesInUse(failure);
+        if (!leftOut.has(pathKey)) leftOut.set(pathKey, failure);
+      }
+
       async function visit(directory, relative = '') {
         throwIfCancelled(signal);
         const directoryBefore = await fsPromises.lstat(directory, { bigint: true });
         throwIfCancelled(signal);
-        if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink()) throw invalid();
-        const children = await fsPromises.readdir(directory, { withFileTypes: true });
+        if (directoryBefore.isSymbolicLink()) throw invalid();
+        if (!directoryBefore.isDirectory()) throw changed();
+        let children;
+        try {
+          children = await fsPromises.readdir(directory, { withFileTypes: true });
+        } catch (error) {
+          await assertNotDenied(fsPromises, directory, error);
+          throw error;
+        }
         throwIfCancelled(signal);
         const memberNames = directoryMemberNames(children);
         children.sort((left, right) => left.name.localeCompare(right.name, 'en-US'));
-        directoryObservations.push({ directory, expected: directoryBefore, memberNames });
+        directoryObservations.push({ directory, relative, expected: directoryBefore, memberNames });
         for (const child of children) {
           throwIfCancelled(signal);
           const childRelative = relative ? `${relative}/${child.name}` : child.name;
-          const normalized = childRelative.replaceAll('\\', '/');
-          const key = normalized.toLocaleLowerCase('en-US');
-          const absolute = path.join(directory, child.name);
-          const stat = await fsPromises.lstat(absolute, { bigint: true });
-          if (stat.isSymbolicLink()) throw invalid();
-          await inspectReparse(reparseInspector, absolute, signal);
-          const excluded = key === '.minecraft-core.json' || EXCLUDED_ROOTS.has(key.split('/')[0]);
-          if (stat.isDirectory()) {
-            if (!excluded) {
-              liveEntries.push({ path: normalized, pathKey: key, type: 'directory', sha256: null, size: '0', origin: 'user' });
-              pathPreconditions.push({ path: normalized, pathKey: key, exists: true, type: 'directory', size: '0', sha256: null,
-                ...identity(stat) });
-            }
-            await visit(absolute, childRelative);
-            const after = await fsPromises.lstat(absolute, { bigint: true });
-            if (!after.isDirectory() || after.isSymbolicLink() || !sameObject(stat, after)) throw invalid();
-          } else if (stat.isFile() && BigInt(stat.nlink) === 1n) {
-            fileObservations.push({ filePath: absolute, expected: stat });
-            const size = BigInt(stat.size);
-            const rootKey = key.split('/')[0];
-            completeLiveBytes += size;
-            if (rootKey === 'backups') {
-              retainedBackupBytes += size;
-            } else {
-              // RestorePointService archives every top-level server item except
-              // `backups`, including application state, logs, and crash reports.
-              restorePointSourceBytes += size;
-            }
-            if (key.startsWith('.minecraft-core-state/history/')) {
-              // A fresh rollback candidate does not clone the live tree. It
-              // explicitly carries forward only the live history and backups.
-              liveHistoryBytes += size;
-            }
-            if (!excluded) {
-              const measured = await hashFile(fsPromises, absolute, stat, {
-                captureBytes: key === 'server.properties',
-                captureLimitBytes: key === 'server.properties' ? MAX_SERVER_PROPERTIES_BYTES : null,
-                signal
-              });
-              if (key === 'server.properties') propertiesBytes = measured.bytes;
-              liveEntries.push({ path: normalized, pathKey: key, type: 'file', sha256: measured.sha256, size: String(stat.size), origin: 'user' });
-              pathPreconditions.push({ path: normalized, pathKey: key, exists: true, type: 'file', size: String(stat.size), sha256: measured.sha256,
-                ...identity(stat) });
-            }
-          } else {
-            throw invalid();
+          try {
+            await visitChild(path.join(directory, child.name), childRelative);
+          } catch (error) {
+            leaveOut(pathKeyOf(childRelative), error);
           }
         }
         const directoryAfter = await fsPromises.lstat(directory, { bigint: true });
-        if (!directoryAfter.isDirectory() || directoryAfter.isSymbolicLink() ||
-            !sameObject(directoryBefore, directoryAfter)) throw invalid();
+        if (directoryAfter.isSymbolicLink()) throw invalid();
+        if (!directoryAfter.isDirectory() || !sameObject(directoryBefore, directoryAfter)) throw changed();
       }
-      await visit(serverPath);
+
+      async function visitChild(absolute, childRelative) {
+        const normalized = childRelative.replaceAll('\\', '/');
+        const key = pathKeyOf(childRelative);
+        const stat = await fsPromises.lstat(absolute, { bigint: true });
+        if (stat.isSymbolicLink()) throw invalid();
+        await inspectReparse(reparseInspector, absolute, signal, vanishedFs);
+        const excluded = key === '.minecraft-core.json' || EXCLUDED_ROOTS.has(key.split('/')[0]);
+        if (stat.isDirectory()) {
+          if (!excluded) {
+            liveEntries.push({ path: normalized, pathKey: key, type: 'directory', sha256: null, size: '0', origin: 'user' });
+            pathPreconditions.push({ path: normalized, pathKey: key, exists: true, type: 'directory', size: '0', sha256: null,
+              ...identity(stat) });
+          }
+          await visit(absolute, childRelative);
+          const after = await fsPromises.lstat(absolute, { bigint: true });
+          if (after.isSymbolicLink()) throw invalid();
+          if (!after.isDirectory() || !sameObject(stat, after)) throw changed();
+        } else if (stat.isFile() && BigInt(stat.nlink) === 1n) {
+          fileObservations.push({ filePath: absolute, pathKey: key, expected: stat });
+          const size = BigInt(stat.size);
+          const rootKey = key.split('/')[0];
+          completeLiveBytes += size;
+          if (rootKey === 'backups') {
+            retainedBackupBytes += size;
+          } else {
+            // RestorePointService archives every top-level server item except
+            // `backups`, including application state, logs, and crash reports.
+            restorePointSourceBytes += size;
+          }
+          if (key.startsWith('.minecraft-core-state/history/')) {
+            // A fresh rollback candidate does not clone the live tree. It
+            // explicitly carries forward only the live history and backups.
+            liveHistoryBytes += size;
+          }
+          if (!excluded) {
+            const measured = await hashFile(fsPromises, absolute, stat, {
+              captureBytes: key === 'server.properties',
+              captureLimitBytes: key === 'server.properties' ? MAX_SERVER_PROPERTIES_BYTES : null,
+              signal
+            });
+            if (key === 'server.properties') propertiesBytes = measured.bytes;
+            liveEntries.push({ path: normalized, pathKey: key, type: 'file', sha256: measured.sha256, size: String(stat.size), origin: 'user' });
+            pathPreconditions.push({ path: normalized, pathKey: key, exists: true, type: 'file', size: String(stat.size), sha256: measured.sha256,
+              ...identity(stat) });
+          }
+        } else {
+          throw invalid();
+        }
+      }
+
+      try {
+        await visit(serverPath);
+      } catch (error) {
+        leaveOut('', error);
+      }
       for (const observation of directoryObservations) {
         throwIfCancelled(signal);
-        const current = await fsPromises.lstat(observation.directory, { bigint: true });
-        throwIfCancelled(signal);
-        if (!current.isDirectory() || current.isSymbolicLink() || !sameObject(observation.expected, current)) throw invalid();
-        await inspectReparse(reparseInspector, observation.directory, signal);
-        const currentChildren = await fsPromises.readdir(observation.directory, { withFileTypes: true });
-        throwIfCancelled(signal);
-        if (JSON.stringify(directoryMemberNames(currentChildren)) !== JSON.stringify(observation.memberNames)) throw invalid();
+        const directoryKey = pathKeyOf(observation.relative);
+        if (leftOutFailure(directoryKey)) continue;
+        let currentNames;
+        try {
+          const current = await fsPromises.lstat(observation.directory, { bigint: true });
+          throwIfCancelled(signal);
+          if (current.isSymbolicLink()) throw invalid();
+          if (!current.isDirectory() || !sameObject(observation.expected, current)) throw changed();
+          await inspectReparse(reparseInspector, observation.directory, signal, vanishedFs);
+          const currentChildren = await fsPromises.readdir(observation.directory, { withFileTypes: true });
+          throwIfCancelled(signal);
+          currentNames = directoryMemberNames(currentChildren);
+        } catch (error) {
+          leaveOut(directoryKey, error);
+          continue;
+        }
+        for (const name of changedMemberNames(observation.memberNames, currentNames)) {
+          leaveOut(pathKeyOf(observation.relative ? `${observation.relative}/${name}` : name), changed());
+        }
       }
       for (const observation of fileObservations) {
         throwIfCancelled(signal);
-        const current = await fsPromises.lstat(observation.filePath, { bigint: true });
-        throwIfCancelled(signal);
-        if (!current.isFile() || current.isSymbolicLink() || BigInt(current.nlink) !== 1n ||
-            !sameFile(observation.expected, current)) throw invalid();
-        await inspectReparse(reparseInspector, observation.filePath, signal);
+        if (leftOutFailure(observation.pathKey)) continue;
+        try {
+          const current = await fsPromises.lstat(observation.filePath, { bigint: true });
+          throwIfCancelled(signal);
+          if (current.isSymbolicLink() || (current.isFile() && BigInt(current.nlink) !== 1n)) throw invalid();
+          if (!current.isFile() || !sameFile(observation.expected, current)) throw changed();
+          await inspectReparse(reparseInspector, observation.filePath, signal, vanishedFs);
+        } catch (error) {
+          leaveOut(observation.pathKey, error);
+        }
       }
       const rootAfter = await fsPromises.lstat(serverPath, { bigint: true });
       if (!rootAfter.isDirectory() || rootAfter.isSymbolicLink() || !sameObject(rootStat, rootAfter)) throw invalid();
       await inspectReparse(reparseInspector, serverPath, signal);
+      let entries = liveEntries;
+      let preconditions = pathPreconditions;
+      if (leftOut.size > 0) {
+        // Check again with the world folders server.properties names, then
+        // drop every entry at or below a path left out; each must be passive.
+        for (const [pathKey, failure] of leftOut) {
+          if (!passiveInReview(pathKey)) throw serverFilesInUse(failure);
+        }
+        for (const entry of liveEntries) {
+          const failure = leftOutFailure(entry.pathKey);
+          if (failure && !passiveInReview(entry.pathKey)) throw serverFilesInUse(failure);
+        }
+        entries = liveEntries.filter(entry => !leftOutFailure(entry.pathKey));
+        preconditions = pathPreconditions.filter(condition => !leftOutFailure(condition.pathKey));
+      }
       let writeable = true;
       try {
         await fsPromises.access(serverPath, fs.constants.R_OK | fs.constants.W_OK);
@@ -326,9 +498,9 @@ function createProductionServerSnapshot({
           kind: 'existing',
           worldDirectories: worldDirectories(propertiesBytes),
           protectedPaths: [],
-          entries: liveEntries
+          entries
         },
-        pathPreconditions,
+        pathPreconditions: preconditions,
         candidateBytes: candidateBytes.toString(),
         restorePointBytes: restorePointSourceBytes.toString(),
         // Commit preserves the live directory by renaming it into the rollback

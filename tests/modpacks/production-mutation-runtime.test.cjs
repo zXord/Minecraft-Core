@@ -6,6 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { fixtureAuthority, fixtureDurableFs, fixtureRegistry, fixtureRecovery,
   recordFixtureCandidate, fixtureRestorePreparation } = require('./runtime-authority-fixture.cjs');
+const { LIST_LINE, levelAutosave, runningServerFs } = require('./running-server-fs-fixture.cjs');
 
 const {
   ProductionMutationRuntime,
@@ -1404,6 +1405,178 @@ test('existing update revalidation accepts post-review saves for a world recorde
   );
   assert.equal(fs.readFileSync(path.join(serverPath, 'mods', 'pack.jar'), 'utf8'), 'managed-hack');
   });
+});
+
+// An update reviewed while the server ran: the review could not read the world
+// lock the server held, nor the level.dat it autosaved during the review. Both
+// were recorded by an earlier lifecycle as the user's files. Start stops the
+// server (`afterStop` is what happens before revalidation) and revalidates
+// against the stopped server with the exact commit-time snapshot.
+async function revalidateUpdateReviewedWhileRunning(t, { afterStop = () => {}, onReviewed = () => {} } = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-running-update-runtime-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const serverPath = path.join(root, 'server');
+  const templatePath = path.join(root, 'template');
+  const at = relative => path.join(serverPath, ...relative.split('/'));
+  const userFiles = { 'world/level.dat': 'reviewed-world', 'world/session.lock': '☃' };
+  fs.mkdirSync(path.join(templatePath, 'mods'), { recursive: true });
+  fs.writeFileSync(path.join(templatePath, 'mods', 'pack.jar'), 'managed-pack');
+  for (const [relative, bytes] of Object.entries({ 'mods/pack.jar': 'managed-pack', 'logs/latest.log': 'Done\n', ...userFiles })) {
+    fs.mkdirSync(path.dirname(at(relative)), { recursive: true });
+    fs.writeFileSync(at(relative), bytes);
+  }
+  const reparseInspector = { async isReparsePoint() { return false; } };
+  const incomingManifest = (await scanManifest(templatePath, 'installation-update', { reparseInspector })).manifest;
+  const runtimeTuple = {
+    minecraftVersion: '1.21.1', loaderFamily: 'fabric', loaderVersion: '0.16.10',
+    javaMajor: 21, os: 'win32', architecture: 'x64'
+  };
+  const currentState = {
+    state: {
+      schemaVersion: 1, modpackManaged: true,
+      source: {
+        provider: 'github', repositoryId: '123', releaseId: '455', githubOwner: 'Owner', githubRepo: 'Pack',
+        version: 'v0.9.0', title: 'Pack', selectedAssetIds: ['788'], artifactSetDigest: '8'.repeat(64)
+      },
+      runtime: runtimeTuple, selectedOptionalFiles: [], installedAt: '2026-08-01T00:00:00.000Z', contentRevision: 3
+    },
+    manifest: {
+      ...incomingManifest,
+      installationId: 'installation-current',
+      entries: [
+        ...incomingManifest.entries,
+        ...Object.entries(userFiles).map(([pathKey, bytes]) => ({
+          path: pathKey, pathKey, origin: 'user', managementPolicy: 'protected', role: 'world',
+          installedHash: crypto.createHash('sha256').update(bytes).digest('hex'),
+          size: String(Buffer.byteLength(bytes)), priorBaseline: null
+        }))
+      ].sort((left, right) => left.pathKey.localeCompare(right.pathKey, 'en-US'))
+    }
+  };
+  const stateRepository = {
+    read() { return currentState; },
+    async writeCandidateAsync() { throw new Error('candidate persistence is not part of revalidation'); },
+    async appendHistoryAsync() { throw new Error('history persistence is not part of revalidation'); },
+    listHistory() { return { items: [], nextCursor: null }; }
+  };
+  const autosave = levelAutosave(at('world'), 'saved-while-running');
+  const reviewedSnapshot = await createProductionServerSnapshot({
+    fsApi: fs,
+    fsPromises: runningServerFs({
+      locked: [at('world/session.lock')],
+      after: {
+        [`lstat ${at('logs/latest.log')}`]: () => fs.promises.appendFile(at('logs/latest.log'), LIST_LINE),
+        [`lstat ${at('world/level.dat')}`]: () => { autosave.begin(); autosave.finish(); }
+      }
+    }),
+    reparseInspector,
+    stateRepository
+  })({
+    currentState, operationKind: 'upgrade', runtime: runtimeTuple, serverKind: 'existing', serverPath,
+    review: true, incomingManifest
+  });
+  const reviewedOwnership = planOwnership({
+    oldManifest: currentState.manifest,
+    liveSnapshot: reviewedSnapshot.liveSnapshot,
+    incomingManifest,
+    conflictChoices: { paths: {}, categories: {} }
+  });
+  onReviewed(reviewedOwnership);
+  afterStop(at);
+
+  const recoveryRegistry = fixtureRegistry(root);
+  const authority = fixtureAuthority({ instanceId: 'server-one', serverPath, jobId: 'job-update', baseRevision: 3, registry: recoveryRegistry });
+  const recoveryServices = {
+    registry: recoveryRegistry,
+    runtimeWriterAuthority: controlledRuntimeAuthority(),
+    runtimePolicy: {
+      async suspend() { return { held: true }; }, async ensureStopped() { return { stopped: true }; },
+      async adoptValidatedHandoff() { return { adopted: true }; }, async restoreAutoRestart() { return { restored: true }; }
+    }
+  };
+  recoveryServices.recoveryService = fixtureRecovery({ authority, registry: recoveryRegistry,
+    durableFs: fixtureDurableFs(root), runtimePolicy: recoveryServices.runtimePolicy, reparseInspector });
+  const executionRecord = {
+    execution: { templateOutputId: 'output-update' },
+    incomingManifest,
+    inspectionResult: { classification: { kind: 'prepared-server-pack' } },
+    reservation: null,
+    serverKind: 'existing',
+    source: {
+      provider: 'github', repositoryId: '123', releaseId: '456', githubOwner: 'Owner', githubRepo: 'Pack',
+      version: 'v1.0.0', title: 'Pack', selectedAssetIds: ['789']
+    },
+    serverPath
+  };
+  const runtime = new ProductionMutationRuntime({
+    coordinator: authority.coordinator,
+    availableBytes: async () => '999999999999',
+    destinationReservations: { resolve() { return null; }, consume() { return true; }, release() { return true; } },
+    durableFsFactory: () => fixtureDurableFs(root),
+    fsApi: fs,
+    healthValidator: { async validateCandidate() {}, async validateLive() { return { evidence: { ok: true } }; } },
+    instanceResolver: { async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: true }; } },
+    planningAdapter: { getExecutionRecord() { return executionRecord; } },
+    planValidator() {},
+    prepareRuntime: async () => ({ prepared: true }),
+    recoveryServices,
+    releaseTrackingStore: { async list() { return []; }, async remove() { return false; }, async upsert() {} },
+    reparseInspector,
+    snapshotServer: createProductionServerSnapshot({ fsApi: fs, reparseInspector, stateRepository }),
+    stateRepository,
+    store: { get: key => key === 'instances' ? [] : null, set() {} },
+    userDataPath: root,
+    workspaceRegistry: { resolveOwnedWorkspace({ id, kind }) { return { id, kind, path: templatePath }; } }
+  });
+  const plan = {
+    fingerprint: 'a'.repeat(64),
+    operation: { kind: 'upgrade', serverKind: 'existing', instanceId: 'server-one', expectedContentRevision: 3 },
+    source: { provider: 'github', repositoryId: '123', releaseId: '456', githubOwner: 'Owner', githubRepo: 'Pack', version: 'v1.0.0' },
+    artifact: { setDigest: 'b'.repeat(64) },
+    runtime: runtimeTuple,
+    inspection: { fingerprint: 'c'.repeat(64) },
+    ownership: reviewedOwnership,
+    selections: { optionalFileIds: [], conflictChoices: { paths: {}, categories: {} } },
+    preconditions: {
+      paths: reviewedSnapshot.pathPreconditions,
+      artifactPartsFingerprint: 'd'.repeat(64), inspectionFingerprint: 'e'.repeat(64),
+      ownershipFingerprint: 'f'.repeat(64), selectionsFingerprint: '1'.repeat(64),
+      restorePointsFingerprint: '2'.repeat(64), assetPatternFingerprint: '3'.repeat(64),
+      acceptedMappingFingerprint: '4'.repeat(64), operationFingerprint: '5'.repeat(64), minimumAvailableBytes: '1'
+    }
+  };
+  const resolved = { instanceId: 'server-one', serverPath, priorRunning: true };
+  return authority.run(async lease => {
+    await runtime.revalidate({
+      jobId: 'job-update', plan, choices: { acceptEula: false, startAfterInstall: true, restorePointId: null }, resolved, lease
+    });
+    return { reviewedSnapshot, reviewedOwnership, executionOwnership: runtime.contexts.get('job-update').executionOwnership };
+  });
+}
+
+test('existing update revalidation accepts a review taken while the server ran and held its world lock', async t => {
+  const result = await revalidateUpdateReviewedWhileRunning(t, {
+    afterStop: at => fs.writeFileSync(at('world/level.dat'), 'saved-during-stop')
+  });
+  const decision = (ownership, pathKey) => ownership.actions.find(action => action.pathKey === pathKey)?.action;
+
+  const reviewedKeys = result.reviewedSnapshot.pathPreconditions.map(condition => condition.pathKey);
+  assert.equal(reviewedKeys.includes('world/session.lock'), false);
+  assert.equal(reviewedKeys.includes('world/level.dat'), false);
+  assert.equal(decision(result.reviewedOwnership, 'world/session.lock'), 'absent');
+  assert.equal(decision(result.executionOwnership, 'world/session.lock'), 'preserve-orphan');
+  assert.equal(decision(result.executionOwnership, 'world/level.dat'), 'preserve-orphan');
+  assert.equal(decision(result.executionOwnership, 'mods/pack.jar'), decision(result.reviewedOwnership, 'mods/pack.jar'));
+});
+
+test('existing update revalidation still refuses a pack file changed after a review taken while the server ran', async t => {
+  let reviewed = null;
+  await assert.rejects(revalidateUpdateReviewedWhileRunning(t, {
+    onReviewed: ownership => { reviewed = ownership; },
+    afterStop: at => fs.writeFileSync(at('mods/pack.jar'), 'managed-hack')
+  }), error => error?.code === 'PLAN_STALE');
+  // The review itself succeeded; the commit-time check refused the changed pack file.
+  assert.equal(reviewed?.actions.find(action => action.pathKey === 'mods/pack.jar')?.action, 'unchanged');
 });
 
 test('outcome persistence yields between independent durable metadata publications', async t => {

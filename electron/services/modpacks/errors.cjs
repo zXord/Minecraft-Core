@@ -42,7 +42,10 @@ const DETAIL_FIELDS = Object.freeze({
   SERVER_PATH_TOO_LONG: { field: 'field' },
   DOWNGRADE_REQUIRED: {},
   SWITCH_REQUIRED: {},
-  PLAN_STALE: {},
+  // A review that a running server's files keep from matching what Start finds
+  // once it has stopped the server: files changed or locked while the review
+  // read them, or recorded world files the server saves as it stops.
+  PLAN_STALE: { reasonCode: ['server-files-in-use'] },
   SERVER_RUNNING: { serverId: 'id' },
   OPERATION_IN_PROGRESS: { operationId: 'id' },
   CANCELLED: {},

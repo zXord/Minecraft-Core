@@ -16,6 +16,7 @@ const { isSafeWindowsBasename } = require('../windows-basename.cjs');
 const { canonicalPath, planOwnership } = require('./ownership-planner.cjs');
 const { computePreflightPlanFingerprint } = require('./plan-fingerprint.cjs');
 const { buildPreflightPlan } = require('./preflight-planner.cjs');
+const { exactWorldPathKeys } = require('./quiescent-plan-revalidation.cjs');
 
 const OPERATION_MAP = Object.freeze({
   'install-new': 'install',
@@ -94,6 +95,24 @@ function selectedPortCheckFailed(cause) {
     'The selected Minecraft server port could not be checked. Retry the review.',
     { cause, details: { field: 'selections.serverPort' }, retryable: true }
   );
+}
+
+function worldFilesInUse() {
+  return new ModpackError(
+    'PLAN_STALE',
+    'Minecraft Core tracks files in this server\'s world folder, and the running server saves them as it stops. Stop the server, then review again. Nothing was changed on the server.',
+    { details: { reasonCode: 'server-files-in-use' }, retryable: true }
+  );
+}
+
+// Start stops a running server before it changes anything, and the server
+// saves its world as it stops. A review of a running server whose commit holds
+// a recorded world file exact (one the pack seeded, or in a repair any recorded
+// one) is refused now: Start could only stop the server and then refuse.
+function assertReviewableWhileRunning({ priorRunning, oldManifest, incomingManifest, worldDirectories }) {
+  if (priorRunning === true && exactWorldPathKeys({ oldManifest, incomingManifest, worldDirectories }).length > 0) {
+    throw worldFilesInUse();
+  }
 }
 
 function unsupportedFolderShape() {
@@ -789,6 +808,10 @@ class ProductionPlanningAdapter {
     let snapshot = null;
     if (operationKind === 'repair' && managed) {
       reportProgress({ phase: 'scanning-server' });
+      // Reviews read a server that may be running; Start stops it and checks
+      // the folder again exactly before it changes anything. A repair's desired
+      // manifest names every recorded entry, the user's included, and Start
+      // holds each of them exact, so the review must read every one.
       snapshot = await this.snapshotServer({
         currentState,
         expectedContentRevision,
@@ -796,9 +819,17 @@ class ProductionPlanningAdapter {
         runtime: currentState.state.runtime,
         serverKind,
         serverPath,
-        unmanagedAdoption: adoptingUnmanaged
+        unmanagedAdoption: adoptingUnmanaged,
+        review: true,
+        incomingManifest: currentState.manifest
       });
       if (!snapshot || !snapshot.liveSnapshot || !Array.isArray(snapshot.pathPreconditions)) throw invalid();
+      assertReviewableWhileRunning({
+        priorRunning: resolved.priorRunning,
+        oldManifest: currentState.manifest,
+        incomingManifest: currentState.manifest,
+        worldDirectories: snapshot.liveSnapshot.worldDirectories
+      });
     }
     reportProgress({ phase: 'preparing-candidate' });
     const prepared = await this.preparePlanInputs({
@@ -871,9 +902,19 @@ class ProductionPlanningAdapter {
       runtime,
       serverKind,
       serverPath,
-      unmanagedAdoption: adoptingUnmanaged
+      unmanagedAdoption: adoptingUnmanaged,
+      review: true,
+      incomingManifest: prepared.incomingManifest
     });
     if (!snapshot || !snapshot.liveSnapshot || !Array.isArray(snapshot.pathPreconditions)) throw invalid();
+    if (serverKind === 'existing') {
+      assertReviewableWhileRunning({
+        priorRunning: resolved.priorRunning,
+        oldManifest: currentState?.manifest ?? null,
+        incomingManifest: prepared.incomingManifest,
+        worldDirectories: snapshot.liveSnapshot.worldDirectories
+      });
+    }
     reportProgress({ phase: 'calculating-changes' });
     const ownershipInput = {
       oldManifest: managed ? currentState.manifest : null,
@@ -1004,6 +1045,7 @@ class ProductionPlanningAdapter {
   async createManagementPlan({ request, currentState, instance, onProgress } = {}) {
     if (!request || !currentState?.state || !instance || !this.workspaceRegistry ||
         request.instanceId !== instance.instanceId || typeof instance.serverPath !== 'string' ||
+        (instance.priorRunning !== undefined && typeof instance.priorRunning !== 'boolean') ||
         !Number.isSafeInteger(currentState.state.contentRevision) || currentState.state.contentRevision < 0) throw invalid();
     if (request.operationKind === 'repair') {
       throw new ModpackError(
@@ -1024,16 +1066,29 @@ class ProductionPlanningAdapter {
       ? currentState.state.runtime ?? null
       : currentState.state.runtime;
     reportProgress({ phase: 'scanning-server' });
+    // The server may be running; Start stops it and checks the folder again.
     const snapshot = await this.snapshotServer({
       currentState,
       expectedContentRevision,
       operationKind: request.operationKind,
       runtime,
       serverKind: 'existing',
-      serverPath
+      serverPath,
+      review: true
     });
     if (!snapshot?.liveSnapshot || !Array.isArray(snapshot.pathPreconditions) || snapshot.writeable === false ||
         !Array.isArray(snapshot.restorePoints)) throw stale();
+    // Detach keeps the folder as Start finds it after the stop, and a rollback
+    // first saves it in a verified restore point; only an uninstall holds
+    // recorded files exact.
+    if (request.operationKind === 'uninstall') {
+      assertReviewableWhileRunning({
+        priorRunning: instance.priorRunning,
+        oldManifest: currentState.manifest,
+        incomingManifest: null,
+        worldDirectories: snapshot.liveSnapshot.worldDirectories
+      });
+    }
 
     let selectedPublicRestorePoint = null;
     let selectedRestorePoint = null;

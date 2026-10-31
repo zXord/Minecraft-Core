@@ -2,6 +2,8 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const {
+  createPassivePathFilter,
+  exactWorldPathKeys,
   reconcileQuiescentOwnership
 } = require('../../electron/services/modpacks/planning/quiescent-plan-revalidation.cjs');
 
@@ -249,4 +251,145 @@ test('managed paths stay strict even when their decision is unchanged, and prese
     reviewedPathPreconditions: [condition('kubejs/server_scripts/rules.js')],
     currentPathPreconditions: [condition('kubejs/server_scripts/rules.js', HASH_B)]
   }), error => error?.code === 'PLAN_STALE');
+});
+
+test('user data a running-server review could not read is rebased once the stopped server preserves it', () => {
+  // A review of a running server leaves out the world lock the server holds and
+  // a level.dat it is saving. An earlier lifecycle recorded both as the user's
+  // files, so the review decides `absent`; after the stop both are present again.
+  const reviewed = ownership([
+    action('world/level.dat', 'absent', 'world'),
+    action('world/session.lock', 'absent', 'world')
+  ]);
+  const current = ownership([
+    action('world/level.dat', 'preserve-orphan', 'world'),
+    action('world/session.lock', 'preserve-orphan', 'world')
+  ]);
+
+  assert.equal(reconcileQuiescentOwnership({
+    reviewedOwnership: reviewed,
+    currentOwnership: current,
+    reviewedPathPreconditions: [],
+    currentPathPreconditions: [condition('world/level.dat', HASH_B), condition('world/session.lock')],
+    oldManifest: manifest(['world/level.dat', 'world/session.lock'], 'user')
+  }), current);
+});
+
+test('a repair keeps every recorded path exact, the user world included', () => {
+  // A repair's desired manifest names every installed entry, so a recorded world
+  // file its review could not read, or read before a save, is never rebased.
+  const recorded = manifest(['world/region/r.0.0.mca', 'world/session.lock'], 'user');
+  for (const [pathKey, reviewedAction, currentAction] of [
+    ['world/session.lock', 'absent', 'unchanged'],
+    ['world/region/r.0.0.mca', 'unchanged', 'preserve-modified']
+  ]) {
+    assert.throws(() => reconcileQuiescentOwnership({
+      reviewedOwnership: ownership([action(pathKey, reviewedAction, 'world')]),
+      currentOwnership: ownership([action(pathKey, currentAction, 'world')]),
+      reviewedPathPreconditions: reviewedAction === 'absent' ? [] : [condition(pathKey)],
+      currentPathPreconditions: [condition(pathKey, HASH_B)],
+      oldManifest: recorded,
+      incomingManifest: recorded
+    }), error => error?.code === 'PLAN_STALE', pathKey);
+  }
+});
+
+test('an unchanged decision is never rebased, since only a repair makes one for user data', () => {
+  assert.throws(() => reconcileQuiescentOwnership({
+    reviewedOwnership: ownership([action('world/region/r.0.0.mca', 'unchanged', 'world')]),
+    currentOwnership: ownership([action('world/region/r.0.0.mca', 'preserve-modified', 'world')]),
+    reviewedPathPreconditions: [condition('world/region/r.0.0.mca')],
+    currentPathPreconditions: [condition('world/region/r.0.0.mca', HASH_B)],
+    oldManifest: manifest(['world/region/r.0.0.mca'], 'user')
+  }), error => error?.code === 'PLAN_STALE');
+});
+
+test('an unread path never rebases into a removal, a managed decision or a datapack', () => {
+  assert.throws(() => reconcileQuiescentOwnership({
+    reviewedOwnership: ownership([action('mods/pack.jar', 'absent', 'mod')]),
+    currentOwnership: ownership([action('mods/pack.jar', 'remove', 'mod')]),
+    reviewedPathPreconditions: [],
+    currentPathPreconditions: [condition('mods/pack.jar')],
+    oldManifest: manifest(['mods/pack.jar'])
+  }), error => error?.code === 'PLAN_STALE');
+
+  assert.throws(() => reconcileQuiescentOwnership({
+    reviewedOwnership: ownership([action('config/pack.toml', 'absent', 'configuration')]),
+    currentOwnership: ownership([action('config/pack.toml', 'unchanged', 'configuration')]),
+    reviewedPathPreconditions: [],
+    currentPathPreconditions: [condition('config/pack.toml')],
+    incomingManifest: manifest(['config/pack.toml'])
+  }), error => error?.code === 'PLAN_STALE');
+
+  assert.throws(() => reconcileQuiescentOwnership({
+    reviewedOwnership: ownership([action('world/datapacks/tools.zip', 'absent', 'world')]),
+    currentOwnership: ownership([action('world/datapacks/tools.zip', 'preserve-orphan', 'world')]),
+    reviewedPathPreconditions: [],
+    currentPathPreconditions: [condition('world/datapacks/tools.zip')],
+    oldManifest: manifest(['world/datapacks/tools.zip'], 'user')
+  }), error => error?.code === 'PLAN_STALE');
+
+  assert.throws(() => reconcileQuiescentOwnership({
+    reviewedOwnership: ownership([action('world/level.dat', 'absent', 'world')]),
+    currentOwnership: ownership([action('world/level.dat', 'replace', 'world')]),
+    reviewedPathPreconditions: [],
+    currentPathPreconditions: [condition('world/level.dat')],
+    oldManifest: manifest(['world/level.dat'], 'user')
+  }), error => error?.code === 'PLAN_STALE');
+});
+
+test('the passive-path filter a running-server review uses is the rebase rule before any decision exists', () => {
+  const passive = createPassivePathFilter({
+    oldManifest: {
+      schemaVersion: 1,
+      installationId: 'installed-one',
+      entries: [
+        { path: 'config/pack.json', pathKey: 'config/pack.json', origin: 'pack', role: 'configuration' },
+        { path: 'world/level.dat', pathKey: 'world/level.dat', origin: 'user', role: 'world' },
+        // A recorded runtime role stays strict wherever an earlier lifecycle kept it.
+        { path: 'shared/loader.bin', pathKey: 'shared/loader.bin', origin: 'user', role: 'runtime' }
+      ]
+    },
+    incomingManifest: manifest(['config/next.json']),
+    worldDirectories: ['adventure', 'world', 'world_nether', 'world_the_end']
+  });
+
+  for (const pathKey of [
+    'world/level.dat', 'world/session.lock', 'world/region/r.0.0.mca', 'world/dimensions/datapacks/x/region/r.0.0.mca',
+    'logs/latest.log', 'crash-reports/crash.txt', 'usercache.json', 'config/runtime-cache.json', 'adventure/level.dat'
+  ]) assert.equal(passive(pathKey), true, pathKey);
+  for (const pathKey of [
+    'config', 'config/pack.json', 'config/next.json', 'shared/loader.bin', 'mods/user.jar', 'libraries/x/y.jar',
+    '.fabric/remapped.jar', 'server.properties', 'start.bat', 'world/datapacks', 'world/datapacks/tools.zip',
+    'adventure/datapacks/tools.zip', 'kubejs/server_scripts/rules.js', 'eula.txt'
+  ]) assert.equal(passive(pathKey), false, pathKey);
+});
+
+test('the recorded world files a commit holds exact are the pack ones and every incoming one, never the user ones', () => {
+  const worldDirectories = ['adventure', 'world', 'world_nether', 'world_the_end'];
+  const installed = {
+    schemaVersion: 1,
+    installationId: 'installed-one',
+    entries: [
+      { path: 'Adventure/region/r.0.0.mca', pathKey: 'adventure/region/r.0.0.mca', origin: 'pack' },
+      { path: 'config/pack.json', pathKey: 'config/pack.json', origin: 'pack' },
+      { path: 'world/level.dat', pathKey: 'world/level.dat', origin: 'pack' },
+      { path: 'world/session.lock', pathKey: 'world/session.lock', origin: 'user' },
+      { path: 'world_backup/level.dat', pathKey: 'world_backup/level.dat', origin: 'pack' }
+    ]
+  };
+  const userWorld = manifest(['world/level.dat', 'world/session.lock'], 'user');
+
+  // An uninstall holds the files the pack seeded in its worlds exact.
+  assert.deepEqual(exactWorldPathKeys({ oldManifest: installed, worldDirectories }),
+    ['adventure/region/r.0.0.mca', 'world/level.dat']);
+  // A repair names every installed entry, the user world included.
+  assert.deepEqual(exactWorldPathKeys({ oldManifest: installed, incomingManifest: installed, worldDirectories }),
+    ['adventure/region/r.0.0.mca', 'world/level.dat', 'world/session.lock']);
+  // An update holds exact a world file the release ships, whoever recorded it before.
+  assert.deepEqual(exactWorldPathKeys({
+    oldManifest: userWorld, incomingManifest: manifest(['config/next.json', 'world_nether/DIM-1/level.dat']), worldDirectories
+  }), ['world_nether/dim-1/level.dat']);
+  assert.deepEqual(exactWorldPathKeys({ oldManifest: userWorld, incomingManifest: manifest(['config/next.json']), worldDirectories }), []);
+  assert.deepEqual(exactWorldPathKeys({ worldDirectories }), []);
 });

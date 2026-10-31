@@ -235,3 +235,51 @@ test('management preflight IPC reports validated backend progress and strips ren
   ]);
   assert.ok(sent.every(([, event]) => event.requestId === 'preflight-management-renderer-one'));
 });
+
+test('a review refused as stale leaves its closed codes in the app log, never a path or a message', async () => {
+  const { ModpackError } = require('../../electron/services/modpacks/errors.cjs');
+  const lockPath = String.raw`C:\Servers\Adrenaline\world\session.lock`;
+  const busy = Object.assign(new Error(`EBUSY: resource busy or locked, read '${lockPath}'`), {
+    code: 'EBUSY', syscall: 'read', path: lockPath
+  });
+  const inUse = new ModpackError('PLAN_STALE', 'Modpack or server files changed or were locked while this review read them. ' +
+    'If the server is running, stop it, then review again. Nothing was changed on the server.', {
+    cause: new ModpackError('PLAN_STALE', 'The server changed while its modpack plan was prepared', { cause: busy }),
+    details: { reasonCode: 'server-files-in-use' },
+    retryable: true
+  });
+  const logged = [];
+  const logger = { warn: (message, options) => logged.push([message, options]) };
+  const refuse = async () => { throw inUse; };
+  const handlers = createModpackHandlers({ ...dependencies(refuse, refuse), logger });
+  const sender = { id: 3, send() {} };
+
+  const source = await handlers['modpacks:preflight']({ sender }, { ...REQUEST, requestId: 'preflight-stale' });
+  const management = await handlers['modpacks:preflight-management']({ sender }, {
+    serverId: 'server-one', operationKind: 'uninstall', selectionRef: null, requestId: 'preflight-management-stale'
+  });
+
+  for (const result of [source, management]) {
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.error.details, { reasonCode: 'server-files-in-use' });
+  }
+  const entry = operation => ['A modpack review was refused as stale', {
+    category: 'core',
+    data: { operation, code: 'PLAN_STALE', reasonCode: 'server-files-in-use', causeCode: 'EBUSY' }
+  }];
+  assert.deepEqual(logged, [entry('preflight'), entry('preflight-management')]);
+  assert.doesNotMatch(JSON.stringify(logged), /Servers|Adrenaline|session\.lock|stop it/u);
+
+  // Any other refusal leaves the log alone, and a missing logger changes nothing.
+  logged.length = 0;
+  const other = createModpackHandlers({
+    ...dependencies(async () => { throw new ModpackError('DOWNGRADE_REQUIRED', 'Retry this operation as a downgrade.'); }),
+    logger
+  });
+  assert.equal((await other['modpacks:preflight']({ sender }, { ...REQUEST, requestId: 'preflight-downgrade' })).ok, false);
+  assert.deepEqual(logged, []);
+  const unlogged = await createModpackHandlers(dependencies(refuse))['modpacks:preflight']({ sender }, {
+    ...REQUEST, requestId: 'preflight-unlogged'
+  });
+  assert.deepEqual(unlogged.error.details, { reasonCode: 'server-files-in-use' });
+});

@@ -14,6 +14,7 @@ const { createProductionServerSnapshot } = require('../../electron/services/modp
 const { planOwnership } = require('../../electron/services/modpacks/planning/ownership-planner.cjs');
 const quiescent = require('../../electron/services/modpacks/planning/quiescent-plan-revalidation.cjs');
 const { ServerMutationCoordinator } = require('../../electron/services/server-mutation-coordinator.cjs');
+const { runningServerFs } = require('./running-server-fs-fixture.cjs');
 
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const inspector = { async isReparsePoint() { return false; } };
@@ -36,7 +37,11 @@ function runtimeWithObservedReconciler(receivedManifests) {
   return loaded.exports.ProductionMutationRuntime;
 }
 
-async function fixture(t, kind = 'prepared-server-pack') {
+// `running`: the review reads the folder while the server runs and holds its
+// world lock, as a server Minecraft Core started (`appStarted`) or one it did
+// not. `recordedWorld`: an earlier update or adoption recorded the world, its
+// lock included, as the user's files.
+async function fixture(t, kind = 'prepared-server-pack', { recordedWorld = false, running = false, appStarted = running } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-repair-desired-contract-'));
   const serverPath = path.join(root, 'server');
   const archivePath = path.join(root, 'archive');
@@ -60,6 +65,8 @@ async function fixture(t, kind = 'prepared-server-pack') {
   write(serverPath, 'server.jar', runtimeBytes);
   write(serverPath, 'scripts/user.js', 'untracked executable addon');
   write(serverPath, 'world/notes.txt', 'untracked passive world data');
+  const worldFiles = { 'world/level.dat': 'level', 'world/session.lock': '☃' };
+  if (running || recordedWorld) for (const [relative, bytes] of Object.entries(worldFiles)) write(serverPath, relative, bytes);
   write(serverPath, '.minecraft-core.json', JSON.stringify({ contentRevision: 4 }));
   write(serverPath, 'config/corrupt.toml', 'corrupt before review');
   const runtimeTuple = kind === 'mrpack-server'
@@ -85,7 +92,9 @@ async function fixture(t, kind = 'prepared-server-pack') {
       source: { ...source, artifactSetDigest: verified.artifactSet.setDigest } },
     manifest: { schemaVersion: 1, installationId: 'installation-current', entries: [
       ...[...packFiles].map(([relative, bytes]) => ownedEntry(relative, bytes, 'pack', relative.startsWith('mods/') ? 'mod' : 'configuration')),
-      ownedEntry('server.jar', runtimeBytes, 'runtime', 'server')
+      ownedEntry('server.jar', runtimeBytes, 'runtime', 'server'),
+      ...(recordedWorld ? Object.entries(worldFiles).map(([relative, bytes]) =>
+        ({ ...ownedEntry(relative, bytes, 'user', 'world'), managementPolicy: 'protected' })) : [])
     ] }
   };
   const archiveEntries = [];
@@ -145,10 +154,16 @@ async function fixture(t, kind = 'prepared-server-pack') {
     async writeCandidateAsync() { assert.fail('revalidation must not persist a candidate'); },
     async appendHistoryAsync() { assert.fail('revalidation must not commit history'); }
   };
-  const instanceResolver = { async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: false }; } };
+  const instanceResolver = { async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: appStarted }; } };
   const snapshotServer = createProductionServerSnapshot({ fsApi: fs, reparseInspector: inspector, stateRepository });
   const adapter = new ProductionPlanningAdapter({
-    instanceResolver, stateRepository, reparseInspector: inspector, snapshotServer,
+    instanceResolver, stateRepository, reparseInspector: inspector,
+    snapshotServer: running
+      ? createProductionServerSnapshot({
+          fsApi: fs, reparseInspector: inspector, stateRepository,
+          fsPromises: runningServerFs({ locked: [path.join(serverPath, 'world', 'session.lock')] })
+        })
+      : snapshotServer,
     availableBytes: async () => '1000000000000', validateServerPorts: async () => ({ valid: true, errors: [] }),
     preparePlanInputs: context => preparer.preparePlanInputs(context)
   });
@@ -172,10 +187,12 @@ async function fixture(t, kind = 'prepared-server-pack') {
   const executionRecord = adapter.getExecutionRecord(plan);
   // Normal lifecycle claim transfers the already-reviewed workspace owner.
   for (const output of outputs.values()) output.ownerId = 'job-repair';
-  const snapshot = await snapshotServer({ currentState, operationKind: 'repair', runtime: runtimeTuple, serverKind: 'existing', serverPath });
-  assert.notDeepEqual(snapshot.pathPreconditions, plan.preconditions.paths, 'fixture must enter reordered-path reconciliation');
-  assert.deepEqual([...snapshot.pathPreconditions].sort((a, b) => a.pathKey.localeCompare(b.pathKey, 'en-US')), plan.preconditions.paths,
-    'the baseline discrepancy must be ordering only');
+  if (!running) {
+    const snapshot = await snapshotServer({ currentState, operationKind: 'repair', runtime: runtimeTuple, serverKind: 'existing', serverPath });
+    assert.notDeepEqual(snapshot.pathPreconditions, plan.preconditions.paths, 'fixture must enter reordered-path reconciliation');
+    assert.deepEqual([...snapshot.pathPreconditions].sort((a, b) => a.pathKey.localeCompare(b.pathKey, 'en-US')), plan.preconditions.paths,
+      'the baseline discrepancy must be ordering only');
+  }
   const ownershipManifests = [];
   const reconcilerManifests = [];
   const Runtime = runtimeWithObservedReconciler(reconcilerManifests);
@@ -205,7 +222,7 @@ async function fixture(t, kind = 'prepared-server-pack') {
       runtimePolicy: { async suspend() {}, async ensureStopped() {}, async adoptValidatedHandoff() {}, async restoreAutoRestart() {} }
     }
   });
-  const resolved = { instanceId: 'server-one', serverPath, priorRunning: false };
+  const resolved = { instanceId: 'server-one', serverPath, priorRunning: appStarted };
   const lease = { kind: 'mutation', instanceId: 'server-one', serverPath, baseRevision: 4,
     markDirty() { assert.fail('revalidation must not dirty the server'); }, assertOwnedPath(value) { return value; } };
   return {
@@ -274,6 +291,47 @@ test('Repair reconciles allowed untracked passive world changes with the full de
   const actions = c.runtime.contexts.get('job-repair').executionOwnership.actions;
   assert.equal(actions.find(a => a.path === 'world/new-note.txt').action, 'preserve-user-addon');
 });
+
+function filesInUse(error) {
+  assert.equal(error?.code, 'PLAN_STALE');
+  assert.deepEqual(error.toPublicResult().error.details, { reasonCode: 'server-files-in-use' });
+  return true;
+}
+
+test('Repair reviewed while the server runs is refused up front once an earlier lifecycle recorded its world', async t => {
+  // The repair's desired manifest binds every recorded file, so Start would hold
+  // the world exact, and the server's stop saves it.
+  await assert.rejects(fixture(t, 'prepared-server-pack', { recordedWorld: true, running: true }), filesInUse);
+});
+
+test('Repair review holds a recorded world lock exact even for a server Minecraft Core did not start', async t => {
+  // The review reads what the commit holds exact: the held lock is never left out.
+  await assert.rejects(fixture(t, 'prepared-server-pack', { recordedWorld: true, running: true, appStarted: false }), filesInUse);
+});
+
+test('control: Repair of a server whose world is recorded, reviewed while stopped, revalidates', async t => {
+  const c = await fixture(t, 'prepared-server-pack', { recordedWorld: true });
+  await c.run();
+  assertFullOwnershipContract(c);
+  const actions = Object.fromEntries(c.runtime.contexts.get('job-repair').executionOwnership.actions.map(a => [a.path, a.action]));
+  assert.equal(actions['world/session.lock'], 'unchanged');
+});
+
+for (const kind of ['prepared-server-pack', 'mrpack-server']) {
+  test(`actual ${kind} Repair reviewed while the server ran revalidates after the stop where no lifecycle recorded the world`, async t => {
+    const c = await fixture(t, kind, { running: true });
+    assert.equal(c.plan.preconditions.paths.some(condition => condition.pathKey === 'world/session.lock'), false,
+      'the review left out the lock the running server held');
+    // Start stops the server, which saves its world once more and releases the lock.
+    c.write('world/level.dat', 'saved on stop');
+    await c.run();
+    assertFullOwnershipContract(c);
+    const actions = Object.fromEntries(c.runtime.contexts.get('job-repair').executionOwnership.actions.map(a => [a.path, a.action]));
+    assert.equal(actions['config/corrupt.toml'], 'replace');
+    assert.equal(actions['world/session.lock'], 'preserve-user-addon');
+    assert.equal(actions['world/level.dat'], 'preserve-user-addon');
+  });
+}
 
 async function stageFixture(c, { materialize = false } = {}) {
   const context = c.runtime.contexts.get('job-repair');

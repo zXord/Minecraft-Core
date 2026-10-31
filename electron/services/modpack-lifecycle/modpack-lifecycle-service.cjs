@@ -1959,7 +1959,7 @@ class ModpackLifecycleService {
   async #resolveStateInstance(instanceId) {
     if (!this.instanceResolver || typeof this.instanceResolver.resolveInstance !== 'function') throw invalid();
     const resolved = assertResolvedInstance(await this.instanceResolver.resolveInstance(instanceId), instanceId);
-    return { instanceId, serverPath: resolved.serverPath };
+    return { instanceId, serverPath: resolved.serverPath, priorRunning: resolved.priorRunning };
   }
 
   async #emitStateChanged(instanceId) {

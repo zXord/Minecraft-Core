@@ -611,6 +611,39 @@ test('guided review separates unavailable managed setup from the safe files-only
   }
 });
 
+test('a source review refused for a running server keeps the inspected selection and says what to do', async () => {
+  const { render } = await import('svelte/server');
+  const Component = await loadServerComponent('src/components/setup/ArchiveGuidedReview.svelte');
+  const inspection = {
+    inspectionId: 'inspection-update',
+    rootCandidates: [],
+    classification: {
+      kind: 'mrpack-server', confidence: 'exact', blocked: false,
+      runtime: { minecraftVersion: '1.21.1', loaderFamily: 'fabric', loaderVersion: '0.16.10' }
+    }
+  };
+  const reviewAfter = error => render(Component, { props: { inspection, operationKind: 'update', error } }).body;
+  const message = 'Modpack or server files changed or were locked while this review read them. ' +
+    'If the server is running, stop it, then review again. Nothing was changed on the server.';
+
+  // The main process gives the closed reason: its message is shown, and the same
+  // selection can be reviewed again once the server is stopped.
+  const inUse = reviewAfter({ code: 'PLAN_STALE', message, details: { reasonCode: 'server-files-in-use' } });
+  assert.match(inUse, /<strong>Review could not continue<\/strong><p>Modpack or server files changed or were locked while this review read them\. If the server is running, stop it, then review again\. Nothing was changed on the server\.<\/p>/u);
+  assert.doesNotMatch(inUse, /Reviewed plan needs to be refreshed/u);
+  assert.match(inUse, /<button type="button" class="mp-button primary">Review planned changes<\/button>/u);
+
+  // Any other stale review still asks for a fresh selection.
+  for (const error of [
+    { code: 'PLAN_STALE', message: 'The reviewed server or archive changed' },
+    { code: 'PLAN_STALE', message, details: { reasonCode: 'unknown-reason' } }
+  ]) {
+    const stale = reviewAfter(error);
+    assert.match(stale, /<strong>Reviewed plan needs to be refreshed<\/strong>/u);
+    assert.match(stale, /<button type="button" class="mp-button primary" disabled[^>]*>Review planned changes<\/button>/u);
+  }
+});
+
 test('the app shell does not impose blue controls on every setup descendant', () => {
   const app = source('src/App.svelte');
 

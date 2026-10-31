@@ -231,7 +231,8 @@ function serviceForManagement({
   stateEventSink = null,
   managementPlanner = null,
   outcomeActionIssuer = null,
-  onPlanCreated = null
+  onPlanCreated = null,
+  priorRunning = false
 }) {
   const operationStore = new MemoryOperationStore();
   const calls = [];
@@ -316,7 +317,7 @@ function serviceForManagement({
     instanceResolver: {
       resolveInstance(instanceId) {
         if (instanceId !== 'server-one') throw new ModpackError('PLAN_STALE', 'Unknown instance');
-        return { instanceId, serverPath, priorRunning: false };
+        return { instanceId, serverPath, priorRunning };
       }
     },
     stateRepository,
@@ -978,7 +979,35 @@ test('detach planning is derived from current managed state without an inspectio
   assert.equal(adapterInput.currentState.state.contentRevision, 3);
   assert.equal(adapterInput.instance.instanceId, 'server-one');
   assert.equal(adapterInput.instance.serverPath, context.serverPath);
+  assert.equal(adapterInput.instance.priorRunning, false);
   assert.doesNotMatch(JSON.stringify(created), /(?:serverPath|path|url|cache|workspace|token|secret|password|inspection)/i);
+});
+
+test('management planning tells the planner whether Minecraft Core runs the server', async (t) => {
+  // A review of a running server refuses up front what Start, which stops the
+  // server first, could only refuse after the stop.
+  for (const priorRunning of [true, false]) {
+    const context = fixture(t);
+    let adapterInput = null;
+    const execution = serviceForManagement({
+      ...context,
+      operationKind: 'uninstall',
+      priorRunning,
+      managementPlanner: async input => {
+        adapterInput = input;
+        return {
+          plan: deepFreeze({
+            fingerprint: FINGERPRINT,
+            operation: { kind: 'uninstall', serverKind: 'existing', instanceId: 'server-one', expectedContentRevision: 3 }
+          }),
+          sanitizedView: { operationKind: 'uninstall' },
+          planningSessionId: 'management-running-session'
+        };
+      }
+    });
+    await execution.service.createManagementPlan({ instanceId: 'server-one', operationKind: 'uninstall' });
+    assert.deepEqual(adapterInput.instance, { instanceId: 'server-one', serverPath: context.serverPath, priorRunning });
+  }
 });
 
 test('management planning forwards safe progress and completes only after registering the reviewed plan', async (t) => {

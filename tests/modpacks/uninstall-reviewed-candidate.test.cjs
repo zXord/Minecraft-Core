@@ -7,6 +7,7 @@ const test = require('node:test');
 
 const { fixtureAuthority, fixtureDurableFs, fixtureRegistry, fixtureRecovery,
   fixtureRestorePreparation, recordFixtureCandidate } = require('./runtime-authority-fixture.cjs');
+const { LIST_LINE, levelAutosave, runningServerFs } = require('./running-server-fs-fixture.cjs');
 const {
   ProductionMutationRuntime,
   scanCandidateManifest
@@ -396,11 +397,13 @@ async function adoptedServer(t) {
 // repository. `legacy` rewrites its manifest the way earlier builds recorded it:
 // every file written during runtime preparation as replaceable runtime content,
 // and every file the pack seeded as replaceable pack content.
-async function managedServer(t, { legacy = false, packFiles = PACK_FILES } = {}) {
+async function managedServer(t, { legacy = false, packFiles = PACK_FILES, worldFiles = {} } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minecraft-core-reviewed-uninstall-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const serverPath = path.join(root, 'Server');
-  writeFiles(serverPath, { ...packFiles, ...LOADER_FILES, [JAVA_FILE]: 'trusted java', 'world/level.dat': 'world' });
+  writeFiles(serverPath, {
+    ...packFiles, ...LOADER_FILES, [JAVA_FILE]: 'trusted java', 'world/level.dat': 'world', ...worldFiles
+  });
   fs.writeFileSync(path.join(serverPath, 'server.properties'),
     applyServerNetworkProperties(null, { port: 25601, networkAccess: 'loopback' }));
   fs.writeFileSync(path.join(serverPath, '.minecraft-core.json'), JSON.stringify({ contentRevision: 0, port: 25601 }));
@@ -447,7 +450,12 @@ async function managedServer(t, { legacy = false, packFiles = PACK_FILES } = {})
 }
 
 // The 'Review uninstall' step: the real planning adapter, live snapshot and state.
-async function reviewUninstallWithAdapter({ serverPath, stateRepository }) {
+// `fsPromises` is what the review reads the server folder through; the server
+// Minecraft Core started runs while it does.
+async function reviewUninstallWithAdapter({ serverPath, stateRepository }, {
+  fsPromises = fs.promises,
+  running = fsPromises !== fs.promises
+} = {}) {
   const currentState = stateRepository.read(serverPath);
   const adapter = new ProductionPlanningAdapter({
     instanceResolver: { async resolveInstance(instanceId) { return { instanceId, serverPath, priorRunning: false }; } },
@@ -456,7 +464,7 @@ async function reviewUninstallWithAdapter({ serverPath, stateRepository }) {
     reparseInspector,
     validateServerPorts: async () => ({ valid: true, errors: [] }),
     preparePlanInputs: async () => { throw new Error('management planning must not prepare a source candidate'); },
-    snapshotServer: createProductionServerSnapshot({ fsApi: fs, reparseInspector, stateRepository }),
+    snapshotServer: createProductionServerSnapshot({ fsApi: fs, fsPromises, reparseInspector, stateRepository }),
     availableBytes: async () => '100000000000',
     workspaceRegistry: { createPlanningSession: () => 'planning-1', createStagingOutput: () => 'output-1', releaseOwner: () => 1 },
     resolveRestorePoint: async () => { throw new Error('not a rollback'); }
@@ -464,7 +472,7 @@ async function reviewUninstallWithAdapter({ serverPath, stateRepository }) {
   const result = await adapter.createManagementPlan({
     request: { instanceId: 'server-one', operationKind: 'uninstall', selectionRef: null },
     currentState,
-    instance: { instanceId: 'server-one', serverPath }
+    instance: { instanceId: 'server-one', serverPath, priorRunning: running }
   });
   return { adapter, plan: result.plan };
 }
@@ -476,13 +484,14 @@ async function reviewUninstall(fixture) {
 // 'Remove managed pack files' through the production runtime: revalidation of
 // the reviewed plan against the stopped server, the verified safety point, the
 // full candidate copy and the real state repository uninstall. `afterReview`
-// changes the server between the review and the run.
-async function uninstallThroughRuntime(fixture, { afterReview = () => {} } = {}) {
+// changes the server between the review and the run; `reviewFsPromises` is
+// what the review reads the server folder through.
+async function uninstallThroughRuntime(fixture, { afterReview = () => {}, reviewFsPromises } = {}) {
   const { root, serverPath, stateRepository } = fixture;
   const jobId = 'job-uninstall';
   const jobRoot = path.join(root, jobId);
   fs.mkdirSync(jobRoot);
-  const { adapter, plan } = await reviewUninstallWithAdapter(fixture);
+  const { adapter, plan } = await reviewUninstallWithAdapter(fixture, { fsPromises: reviewFsPromises });
   afterReview(serverPath);
   const uninstallRequests = [];
   const uninstallCandidate = stateRepository.uninstallCandidate.bind(stateRepository);
@@ -848,6 +857,88 @@ test('Remove managed pack files through the production runtime removes exactly t
   }
   assert.equal(fs.readFileSync(path.join(run.candidatePath, 'world', 'level.dat'), 'utf8'), 'saved on stop');
   assert.deepEqual(tree(fixture.serverPath), run.liveBefore, 'the live folder is untouched');
+});
+
+test('Remove managed pack files reviewed while the server ran removes exactly the reviewed files after it stopped', async t => {
+  // An earlier lifecycle recorded the world, its lock included, as the user's files.
+  const fixture = await managedServer(t, { worldFiles: { 'world/session.lock': '☃' } });
+  const { serverPath } = fixture;
+  const at = relative => path.join(serverPath, ...relative.split('/'));
+  writeFiles(serverPath, { 'logs/latest.log': 'Done\n', 'usercache.json': '[]' });
+  const autosave = levelAutosave(at('world'), 'saved while running');
+  const run = await uninstallThroughRuntime(fixture, {
+    // While the review reads the folder, the running server holds its world
+    // lock, logs the reply to the periodic "list" command and autosaves.
+    reviewFsPromises: runningServerFs({
+      locked: [at('world/session.lock')],
+      after: {
+        [`lstat ${at('logs/latest.log')}`]: () => fs.promises.appendFile(at('logs/latest.log'), LIST_LINE),
+        [`lstat ${at('world/level.dat')}`]: () => { autosave.begin(); autosave.finish(); }
+      }
+    }),
+    // Start stops the server first: it saves once more and releases its lock.
+    afterReview: () => writeFiles(serverPath, { 'world/level.dat': 'saved on stop', 'usercache.json': '[{"name":"Steve"}]' })
+  });
+
+  const reviewedPaths = run.plan.preconditions.pathPreconditions.map(condition => condition.pathKey);
+  assert.equal(reviewedPaths.includes('world/session.lock'), false);
+  assert.equal(reviewedPaths.includes('world/level.dat'), false);
+  assert.equal(run.uninstallRequests.length, 1);
+  const [request] = run.uninstallRequests;
+  assert.deepEqual([...request.removePathKeys].sort((left, right) => left.localeCompare(right, 'en-US')), REVIEWED_REMOVALS);
+  assert.deepEqual(request.confirmation, run.plan.ownership.confirmation);
+  const expected = { ...run.candidateBefore };
+  for (const key of REVIEWED_REMOVALS) delete expected[key];
+  assert.deepEqual(tree(run.candidatePath), expected, 'exactly the reviewed files are removed');
+  assert.equal(fs.readFileSync(path.join(run.candidatePath, 'world', 'session.lock'), 'utf8'), '☃');
+  assert.equal(fs.readFileSync(path.join(run.candidatePath, 'world', 'level.dat'), 'utf8'), 'saved on stop');
+  assert.equal(fs.readFileSync(path.join(run.candidatePath, 'usercache.json'), 'utf8'), '[{"name":"Steve"}]');
+  assert.deepEqual(tree(serverPath), run.liveBefore, 'the live folder is untouched');
+});
+
+// A pack that shipped its world's level.dat: installed once, then the server
+// owner's to keep, and recorded as the pack's seeded file.
+const PACK_WITH_WORLD = Object.freeze({ ...PACK_FILES, 'world/level.dat': 'world' });
+
+test('Review uninstall of a running server whose pack seeded its world is refused before Start stops the server', async t => {
+  const fixture = await managedServer(t, { packFiles: PACK_WITH_WORLD, worldFiles: { 'world/session.lock': '☃' } });
+  const { serverPath, stateRepository } = fixture;
+  const seeded = stateRepository.read(serverPath).manifest.entries.find(entry => entry.pathKey === 'world/level.dat');
+  assert.deepEqual([seeded.origin, seeded.managementPolicy], ['pack', 'preserve-after-seed']);
+  const before = tree(serverPath);
+
+  // Start holds the seeded level.dat exact and the server saves it as Start
+  // stops it, so the review refuses now, even with no save while it reads.
+  await assert.rejects(reviewUninstallWithAdapter(fixture, {
+    fsPromises: runningServerFs({ locked: [path.join(serverPath, 'world', 'session.lock')] })
+  }), error => {
+    assert.equal(error?.code, 'PLAN_STALE');
+    assert.deepEqual(error.toPublicResult().error.details, { reasonCode: 'server-files-in-use' });
+    assert.match(error.message, /Stop the server, then review again\. Nothing was changed on the server\.$/u);
+    return true;
+  });
+  assert.deepEqual(tree(serverPath), before, 'the review changed nothing');
+});
+
+test('Remove managed pack files keeps a pack-seeded world reviewed on the stopped server, and refuses it once saved after the review', async t => {
+  const quiet = await managedServer(t, { packFiles: PACK_WITH_WORLD });
+  const run = await uninstallThroughRuntime(quiet);
+  assert.equal(run.uninstallRequests.length, 1);
+  assert.deepEqual([...run.uninstallRequests[0].removePathKeys].sort((left, right) => left.localeCompare(right, 'en-US')),
+    REVIEWED_REMOVALS);
+  assert.equal(fs.readFileSync(path.join(run.candidatePath, 'world', 'level.dat'), 'utf8'), 'world');
+
+  // What Start meets after a review of the running server: its stop saved the
+  // seeded level.dat, which the commit holds exact. It refuses and changes nothing.
+  const saved = await managedServer(t, { packFiles: PACK_WITH_WORLD });
+  let afterStop = null;
+  await assert.rejects(uninstallThroughRuntime(saved, {
+    afterReview: serverPath => {
+      writeFiles(serverPath, { 'world/level.dat': 'saved on stop' });
+      afterStop = tree(serverPath);
+    }
+  }), error => error?.code === 'PLAN_STALE');
+  assert.deepEqual(tree(saved.serverPath), afterStop, 'nothing was changed on the server');
 });
 
 test('reviewed uninstall refuses a reviewed file that changed after review and removes nothing', async t => {

@@ -117,7 +117,8 @@ test('the review reports its destination and preflight outcome next to its butto
 test('an Install press that did not start is reported next to the Install button, scrolled into view and focused', () => {
   const review = source('src/components/setup/ArchiveGuidedReview.svelte');
   // Every reason for a fresh review relabels the Install button, not only a not-started read from the parent.
-  assert.match(review, /\$: reviewRequiresRefresh = launchNotStarted \|\| installNotStarted \|\| planStale \|\| isPlanStaleError\(error\);/u);
+  // A stale review with a closed reason (a running server's files) is not one: it says what to do.
+  assert.match(review, /\$: reviewRequiresRefresh = launchNotStarted \|\| installNotStarted \|\| planStale \|\|\s*\(isPlanStaleError\(error\) && !planStaleReason\(error\)\);/u);
   assert.match(review, /on:click=\{startReviewedPlan\}>\{reviewRequiresRefresh \? 'Fresh review required' : starting \? 'Starting…' : launchUnknown \? 'Checking Start outcome…' : 'Install this exact reviewed plan'\}<\/button><\/div>/u);
   assert.match(review, /\$: installRefreshShown = Boolean\(reviewedPlan\) && !conflictReview && \(launchNotStarted \|\| planStale \|\| installNotStarted\);/u);
 

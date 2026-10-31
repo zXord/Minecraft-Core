@@ -179,6 +179,16 @@ export function isPlanStaleError(error) {
   return Boolean(error && typeof error === 'object' && error.code === 'PLAN_STALE');
 }
 
+// Closed reasons the main process gives a stale review, whose own message says
+// what to do: 'server-files-in-use' means the running server's files keep the
+// review from matching what Start finds once it has stopped the server.
+const PLAN_STALE_REASONS = new Set(['server-files-in-use']);
+
+export function planStaleReason(error) {
+  const reason = isPlanStaleError(error) ? error.details?.reasonCode : null;
+  return PLAN_STALE_REASONS.has(reason) ? reason : null;
+}
+
 export const modpackApi = Object.freeze({
   searchCatalog: request => invoke(INVOKE.searchCatalog, request),
   getProject: projectId => invoke(INVOKE.getProject, { projectId }),

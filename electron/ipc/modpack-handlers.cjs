@@ -26,6 +26,27 @@ function modpackServicesUnavailable() {
   return new ModpackError('MODPACK_SERVICES_UNAVAILABLE', MODPACK_SERVICES_UNAVAILABLE_MESSAGE);
 }
 
+function closedCode(value) {
+  return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(value) ? value : null;
+}
+
+// A review refused as stale leaves only its closed codes in the app log, for
+// triage on the user's machine: the reason the main process gave and the file
+// system error behind it. Never a path or a message.
+function logStaleReview(logger, operation, error) {
+  if (!(error instanceof ModpackError) || error.code !== 'PLAN_STALE') return;
+  let cause = error.cause;
+  while (cause instanceof ModpackError) cause = cause.cause;
+  try {
+    logger?.warn?.('A modpack review was refused as stale', {
+      category: 'core',
+      data: { operation, code: error.code, reasonCode: closedCode(error.details?.reasonCode), causeCode: closedCode(cause?.code) }
+    });
+  } catch {
+    // Logging never changes a review's outcome.
+  }
+}
+
 // One handler per modpack channel: the request is validated, the operation (or
 // the fallback for a channel without one) runs, and the result or the public
 // failure is validated against the channel's schema.
@@ -315,7 +336,8 @@ function createModpackHandlers({
   notificationStore,
   releaseMonitor,
   releaseTrackingStore,
-  outcomeActionService
+  outcomeActionService,
+  logger = null
 } = {}) {
   const modrinth = requireMethods(providers?.modrinth, ['searchProjects', 'getProject', 'listVersions']);
   const github = requireMethods(providers?.github, ['listReleases', 'loadUploadedAssets']);
@@ -498,6 +520,9 @@ function createModpackHandlers({
         }
         if (owner && result?.planId) disposeCompletedInspection(owner);
         return result;
+      } catch (error) {
+        logStaleReview(logger, 'preflight', error);
+        throw error;
       } finally {
         progress?.close();
       }
@@ -513,6 +538,9 @@ function createModpackHandlers({
         }, {
           ...(progress ? { onProgress: progress.report } : {})
         });
+      } catch (error) {
+        logStaleReview(logger, 'preflight-management', error);
+        throw error;
       } finally {
         progress?.close();
       }

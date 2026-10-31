@@ -674,6 +674,12 @@ test('startup recovery composes and initializes the complete modpack IPC graph b
   await assert.rejects(graph.modpacks.acquireLegacyManagementContext(clientPath), { code: 'CANCELLED' });
 });
 
+test('the modpack IPC logs through the app logger the graph was given', () => {
+  const logger = { warn() {}, error() {} };
+  assert.equal(graphFixture({ logger }).graph.modpacks.logger, logger);
+  assert.equal(graphFixture().graph.modpacks.logger, null);
+});
+
 test('service graph disposes its connection core even when composition disposal fails', async () => {
   const failure = new Error('composition disposal failed');
   const { graph } = graphFixture({

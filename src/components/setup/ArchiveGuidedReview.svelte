@@ -1,6 +1,6 @@
 <script>
   import { createEventDispatcher, onDestroy, tick } from 'svelte';
-  import { isPlanStaleError } from '../../utils/modpacks/modpackApi.js';
+  import { isPlanStaleError, planStaleReason } from '../../utils/modpacks/modpackApi.js';
 
   const dispatch = createEventDispatcher();
   export let inspection;
@@ -113,7 +113,10 @@
   $: launchNotStarted = Boolean(reviewContext && launchOutcome?.reviewContext === reviewContext &&
     reviewContext.plan === reviewedPlan && launchOutcome?.status === 'not-started');
   $: launchUnknown = unresolvedLaunch && !launchNotStarted;
-  $: reviewRequiresRefresh = launchNotStarted || installNotStarted || planStale || isPlanStaleError(error);
+  // A stale review with a closed reason, such as a running server's files, keeps this selection: its message says
+  // what to do, and the same review can run again.
+  $: reviewRequiresRefresh = launchNotStarted || installNotStarted || planStale ||
+    (isPlanStaleError(error) && !planStaleReason(error));
   // What an Install press produced is shown right after the Install button. The top banner keeps only staleness the
   // parent reports, such as a stale preflight, so a single fresh-review action is offered.
   $: installRefreshShown = Boolean(reviewedPlan) && !conflictReview && (launchNotStarted || planStale || installNotStarted);

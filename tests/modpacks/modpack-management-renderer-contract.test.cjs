@@ -275,3 +275,13 @@ test('an expired management plan cannot execute again and preserves its exact ac
   assert.match(page, /inspectSelection\(requestedSelection, requestedOperationKind/);
   assert.match(page, /on:stale=\{refreshStaleReview\}/);
 });
+
+test('a management review shows the backend reason for a stale review and generic retry guidance otherwise', () => {
+  const page = source('src/routes/ModpackPage.svelte');
+  const build = functionSource(page, 'async function buildManagementPlan(');
+
+  assert.match(page, /import \{[^}]*\bplanStaleReason\b[^}]*\} from '\.\.\/utils\/modpacks\/modpackApi\.js';/u);
+  assert.match(build, /error = isPlanStaleError\(caught\) && !planStaleReason\(caught\)\s*\?\s*new ModpackApiError\(\{/u);
+  assert.match(build, /Run the action again to generate and review a fresh plan/u);
+  assert.match(build, /:\s*caught;/u);
+});
