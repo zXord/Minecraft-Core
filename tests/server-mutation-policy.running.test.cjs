@@ -268,13 +268,17 @@ test('two concurrent settings toggles both persist', async t => {
   const f = fixture(t);
   const update = f.policy.wrapHandler('update-settings', settings['update-settings']);
 
+  // Both saves change the port, so each one waits on the port check. Without
+  // the config lane the two read-modify-writes would interleave and one toggle
+  // would be lost; an unchanged port is not checked and would hide that.
   const results = await Promise.all([
-    update(EVENT, { serverPath: f.serverPath, instanceId: SERVER_ID, port: 25565, autoStartMinecraft: true }),
-    update(EVENT, { serverPath: f.serverPath, instanceId: SERVER_ID, port: 25565, autoStartManagement: true })
+    update(EVENT, { serverPath: f.serverPath, instanceId: SERVER_ID, port: 25566, autoStartMinecraft: true }),
+    update(EVENT, { serverPath: f.serverPath, instanceId: SERVER_ID, port: 25566, autoStartManagement: true })
   ]);
 
   assert.deepEqual(results.map(result => result.success), [true, true]);
   const config = JSON.parse(fs.readFileSync(path.join(f.serverPath, '.minecraft-core.json'), 'utf8'));
+  assert.equal(config.port, 25566);
   assert.equal(config.autoStartMinecraft, true);
   assert.equal(config.autoStartManagement, true);
 });

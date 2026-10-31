@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const Module = require('node:module');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { PassThrough } = require('node:stream');
@@ -19,8 +20,9 @@ const AdmZip = require('adm-zip');
 // server handlers, the real client-pack integration and process guard, and the
 // real server manager, whose start lease is held by a FakeChild Java process.
 // Only process-wide boundaries are stubbed: the app store, logging, secrets,
-// port probing, the management HTTPS server, Java discovery and the Java process
-// itself. A child_process spy records every spawn and refuses ArchiveWorker.exe.
+// port probing (real for the one case that holds real sockets), the management
+// HTTPS server, Java discovery and the Java process itself. A child_process spy
+// records every spawn and refuses ArchiveWorker.exe.
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const ROOT = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'v26-parity-')));
@@ -166,6 +168,8 @@ const electronStub = Object.freeze({
   shell: { openPath: async () => '' }
 });
 
+// Set to the real validator only while the case that holds real sockets runs.
+let livePortValidator = null;
 const STUBS = new Map([
   ['app-store.cjs', appStore],
   ['logger-handlers.cjs', { getLoggerHandlers: () => QUIET }],
@@ -177,8 +181,12 @@ const STUBS = new Map([
     unpackSecret: value => (typeof value === 'string' && value.startsWith('packed:') ? value.slice('packed:'.length) : value)
   }],
   ['servers-dat.cjs', { ensureServersDat: async () => ({ success: true }) }],
-  // Port conflicts are unchanged since v26.6.1 and out of this suite's scope.
-  ['port-validator.cjs', { validateServerPorts: async () => ({ valid: true, errors: [] }) }],
+  // Every port is free, except for the case that checks real sockets.
+  ['port-validator.cjs', {
+    validateServerPorts: async options => (livePortValidator
+      ? livePortValidator.validateServerPorts(options)
+      : { valid: true, errors: [] })
+  }],
   ['management-server.cjs', {
     getManagementServer,
     stopAndDisposeManagementServers: async () => ({ success: true }),
@@ -200,6 +208,9 @@ Module._load = function loadParityBoundaries(request, parent, isMain) {
   }
   return STUBS.get(name) || originalLoad.call(this, request, parent, isMain);
 };
+// The real validator, loaded past its stub; its own app store, logging and
+// child_process are the boundaries above.
+const realPortValidator = originalLoad.call(Module, require.resolve('../electron/utils/port-validator.cjs'), module, false);
 
 const { createProductionDurableFsFactory } = require('../electron/bootstrap/create-modpack-service-graph.cjs');
 const { stateRepositoryRouter } = require('../electron/bootstrap/create-production-modpack-composition.cjs');
@@ -208,7 +219,7 @@ const { createClientConnectionCore } = require('../electron/bootstrap/create-cli
 const { WindowsDurableFsClient } = require('../electron/utils/windows-durable-fs-client.cjs');
 const { createDurableFs } = require('../electron/utils/durable-fs.cjs');
 const { createInstanceConfigFsFactory, createLegacyInstanceConfigFs } = require('../electron/utils/instance-config-fs.cjs');
-const { configureServerConfigDurableFsFactory } = require('../electron/utils/config-manager.cjs');
+const { configureServerConfigDurableFsFactory, readServerConfig } = require('../electron/utils/config-manager.cjs');
 const { readContentRevision } = require('../electron/services/server-content-revision.cjs');
 const { inspectFolderEvidence } = require('../electron/services/modpacks/instance-ownership.cjs');
 const {
@@ -459,9 +470,9 @@ function watchStrictMachinery() {
   };
 }
 
-async function startServer(instance) {
+async function startServer(instance, port = 25565) {
   const before = javaProcesses.length;
-  const result = await invoke('start-server', { instanceId: instance.id, targetPath: instance.path, port: 25565, maxRam: 4 });
+  const result = await invoke('start-server', { instanceId: instance.id, targetPath: instance.path, port, maxRam: 4 });
   assert.equal(result.success, true, JSON.stringify(result));
   assert.equal(javaProcesses.length, before + 1, 'the start spawned Java once');
   assert.equal(serverManager.getServerState({ instanceId: instance.id }).status, 'running');
@@ -563,6 +574,94 @@ test('every NT-02 action on a running v26.6.1 server succeeds, persists and neve
   await startServer(server);
   await stopServer(server);
   strict.assertUnused([serverPath]);
+});
+
+function listenOnLoopback(port) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createServer();
+    socket.once('error', reject);
+    socket.listen(port, '127.0.0.1', () => resolve(socket));
+  });
+}
+
+function closeSocket(socket) {
+  return new Promise(resolve => (socket.listening ? socket.close(() => resolve()) : resolve()));
+}
+
+// Distinct loopback ports, each held by a real listening socket (the validator
+// probes 127.0.0.1) until released. A port below the management minimum of
+// 1025, or one a registered server already saves, is skipped.
+async function holdLoopbackPorts(count) {
+  const saved = new Set((appStore.get('instances') || []).filter(instance => instance?.type === 'server')
+    .flatMap(instance => {
+      const config = readServerConfig(instance.path) || {};
+      return [config.port, config.managementPort];
+    }));
+  const held = [];
+  const skipped = [];
+  while (held.length < count) {
+    const socket = await listenOnLoopback(0);
+    const { port } = socket.address();
+    if (port < 1025 || saved.has(port)) skipped.push(socket);
+    else held.push({ port, release: () => closeSocket(socket) });
+  }
+  await Promise.all(skipped.map(closeSocket));
+  return held;
+}
+
+test('NT-02 settings saves on a running server pass the real port check beside its own ports', async () => {
+  // FakeJava and the management stub listen on nothing, so real sockets stand in
+  // for the running server's Java process and, once started, its management server.
+  const [javaw, firstManagement, management, taken] = await holdLoopbackPorts(4);
+  await firstManagement.release();
+  await management.release();
+  let managementListener = null;
+  try {
+    const serverPath = makeServer('Ports Server', {
+      config: { port: javaw.port, managementPort: firstManagement.port, autoStartMinecraft: true, autoStartManagement: true }
+    });
+    const server = registerServer('ports-server', serverPath, 'Ports Server');
+    const strict = watchStrictMachinery();
+    const java = await startServer(server, javaw.port);
+
+    // ServerControls.updateSettings sends every field the Dashboard shows.
+    const shown = { port: javaw.port, maxRam: 4, managementPort: firstManagement.port, autoStartMinecraft: true, autoStartManagement: true };
+    const dashboardSave = values => invoke('update-settings', { instanceId: server.id, serverPath, ...values });
+    livePortValidator = realPortValidator;
+    try {
+      // Untick "Auto-start server" while Java holds the saved Minecraft port.
+      shown.autoStartMinecraft = false;
+      const unticked = await dashboardSave(shown);
+      assert.equal(unticked.success, true, JSON.stringify(unticked));
+      // A management port another process holds is refused, naming that port alone.
+      const refused = await dashboardSave({ ...shown, managementPort: taken.port });
+      const expected = await realPortValidator.validateServerPorts({ instanceId: server.id, serverPath, managementPort: taken.port });
+      assert.deepEqual(expected.errors.map(error => [error.type, error.scope, error.port]), [['management', 'external', taken.port]]);
+      assert.deepEqual(refused, { success: false, error: expected.errors[0].message, details: expected.errors });
+      // A free management port is saved and the management server starts there;
+      // its "Auto-start" box is then unticked while both saved ports are held.
+      shown.managementPort = management.port;
+      const moved = await dashboardSave(shown);
+      assert.equal(moved.success, true, JSON.stringify(moved));
+      assert.deepEqual(await invoke('start-management-server', { instanceId: server.id, serverPath, port: management.port }),
+        { success: true, port: management.port });
+      managementListener = await listenOnLoopback(management.port);
+      shown.autoStartManagement = false;
+      const managementUnticked = await dashboardSave(shown);
+      assert.equal(managementUnticked.success, true, JSON.stringify(managementUnticked));
+    } finally {
+      livePortValidator = null;
+    }
+
+    assert.equal(java.exitCode, null, 'the running server was never stopped');
+    await stopServer(server);
+    const config = readJson(path.join(serverPath, '.minecraft-core.json'));
+    assert.deepEqual([config.port, config.maxRam, config.managementPort, config.autoStartMinecraft, config.autoStartManagement],
+      [javaw.port, 4, management.port, false, false]);
+    strict.assertUnused([serverPath]);
+  } finally {
+    await Promise.all([javaw.release(), taken.release(), managementListener && closeSocket(managementListener)]);
+  }
 });
 
 test('the stopped-only writers still need the server stopped, and run once it is', async () => {

@@ -539,12 +539,21 @@ function createSettingsHandlers({ invalidateManagementSession = () => {} } = {})
           autoStartManagement: autoStartManagement !== undefined ? autoStartManagement : currentSettings.autoStartManagement
         };
 
-        if (resolvedServerPath && (port !== undefined || managementPort !== undefined)) {
+        // Only a port that this save changes is checked. While the server runs,
+        // its Java process holds the saved Minecraft port and Minecraft Core holds
+        // the running management port, so checking those again would refuse every
+        // save. A folder without a config file has nothing saved: all its ports are new.
+        const isNewPort = (next, saved) => isDefaultConfig || coerceNumber(next) !== coerceNumber(saved);
+        const checkMinecraftPort = isNewPort(updatedSettings.port, currentSettings.port);
+        const checkManagementPort = isNewPort(updatedSettings.managementPort, currentSettings.managementPort);
+
+        if (resolvedServerPath && (port !== undefined || managementPort !== undefined) &&
+            (checkMinecraftPort || checkManagementPort)) {
           const portValidation = await validateServerPorts({
             instanceId,
             serverPath: resolvedServerPath,
-            minecraftPort: updatedSettings.port,
-            managementPort: updatedSettings.managementPort
+            minecraftPort: checkMinecraftPort ? updatedSettings.port : null,
+            managementPort: checkManagementPort ? updatedSettings.managementPort : null
           });
 
           if (!portValidation.valid) {
