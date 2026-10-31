@@ -215,7 +215,24 @@ function getLatestBackupSidecarTime(zipPath, metaPath, metadata) {
   return timestamps.length > 0 ? Math.max(...timestamps) : Date.now();
 }
 
+// The backup lock refuses a server folder that is missing: deleted, moved, or on
+// an unplugged drive or offline share. v26.6.1 found no backups there: a list was
+// empty and a delete reported success, and neither created the folder. Cleanup and
+// delete answer that way before taking the lock, as for a folder without backups;
+// lifecycle restore points still take the lock and keep failing closed.
+function isServerFolderMissing(serverPath) {
+  if (typeof serverPath !== 'string' || !path.isAbsolute(serverPath) || serverPath.includes('\0')) return false;
+  try {
+    return !fs.statSync(serverPath).isDirectory();
+  } catch {
+    return true;
+  }
+}
+
 async function cleanupIncompleteBackups(serverPath, options = {}) {
+  if (isServerFolderMissing(serverPath)) {
+    return { success: true, deleted: 0, skipped: 0, failedDeletions: [], deletedBackups: [] };
+  }
   return withBackupMutationLock(serverPath, () => cleanupIncompleteBackupsUnlocked(serverPath, options));
 }
 
@@ -854,13 +871,23 @@ async function listBackupsWithMetadata(serverPath, options = {}) {
   });
 }
 
+function assertBackupDeletable(zipPath) {
+  if (getLifecycleRestorePointState(zipPath).pinned) {
+    throw new Error('This lifecycle restore point is pinned and cannot be deleted.');
+  }
+}
+
 async function deleteBackup({ serverPath, name }) {
   try {
+    if (isServerFolderMissing(serverPath)) {
+      // Nothing to delete: the name is checked first, as in v26.6.1.
+      assertBackupDeletable(getSafeBackupZipPath(serverPath, name));
+      return { success: true };
+    }
     return await withBackupMutationLock(serverPath, async () => {
       const zipPath = getSafeBackupZipPath(serverPath, name);
       const metaPath = getBackupMetaPath(zipPath);
-      const restorePoint = getLifecycleRestorePointState(zipPath);
-      if (restorePoint.pinned) throw new Error('This lifecycle restore point is pinned and cannot be deleted.');
+      assertBackupDeletable(zipPath);
       if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
       if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
       return { success: true };

@@ -7,6 +7,7 @@ const path = require('node:path');
 const Module = require('node:module');
 const AdmZip = require('adm-zip');
 const { createZip, normalizeCompressionLevel } = require('../electron/utils/backup-util.cjs');
+const { withBackupMutationLock } = require('../electron/services/backup-mutation-lock.cjs');
 
 async function withBackupService(fn) {
   const modulePath = path.resolve(__dirname, '../electron/services/backup-service.cjs');
@@ -56,6 +57,19 @@ async function withTempServer(fn) {
 
   try {
     return await fn({ root, serverPath, backupDir: path.join(serverPath, 'backups') });
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+}
+
+// A registered server folder that is missing: on an unplugged drive, or deleted
+// or moved outside the app. Its parent folder (the drive) is missing too.
+async function withMissingServer(fn) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'minecraft-core-backup-missing-'));
+  const drive = path.join(root, 'unplugged-drive');
+
+  try {
+    return await fn({ root, drive, serverPath: path.join(drive, 'server') });
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
   }
@@ -266,6 +280,78 @@ test('metadata-only lifecycle identity on an ordinary backup name is fail-closed
       const deletion = await backupService.deleteBackup({ serverPath, name });
       assert.equal(deletion.success, false);
       assert.equal(fs.existsSync(zipPath), true);
+    });
+  });
+});
+
+test('a missing server folder lists no backups and cleans up nothing, as in v26.6.1, without creating it', async () => {
+  await withBackupService(async (backupService) => {
+    await withMissingServer(async ({ root, drive, serverPath }) => {
+      assert.deepEqual(await backupService.listBackupsWithMetadata(serverPath), []);
+      assert.deepEqual(await backupService.cleanupIncompleteBackups(serverPath, { olderThanMs: 0 }), {
+        success: true,
+        deleted: 0,
+        skipped: 0,
+        failedDeletions: [],
+        deletedBackups: []
+      });
+      assert.deepEqual(await backupService.cleanupAutomaticBackups(serverPath, 1), {
+        success: true,
+        deleted: 0,
+        message: 'No automated backups to clean up'
+      });
+
+      // A file where the server folder was holds no backups either.
+      const filePath = path.join(root, 'not-a-folder');
+      await fsp.writeFile(filePath, 'file');
+      assert.deepEqual(await backupService.listBackupsWithMetadata(filePath), []);
+
+      assert.equal(fs.existsSync(drive), false);
+    });
+  });
+});
+
+test('deleting from a missing server folder checks the name first and reports success, as in v26.6.1', async () => {
+  await withBackupService(async (backupService) => {
+    await withMissingServer(async ({ drive, serverPath }) => {
+      assert.deepEqual(await backupService.deleteBackup({
+        serverPath,
+        name: 'backup-world-2026-10-01_10-00-00.zip'
+      }), { success: true });
+      assert.deepEqual(await backupService.deleteBackup({ serverPath, name: '../outside.zip' }), {
+        success: false,
+        error: 'Invalid backup name'
+      });
+
+      // A lifecycle restore point name stays refused, as in a folder without that file.
+      const restorePoint = await backupService.deleteBackup({ serverPath, name: 'restore-point-2026-10-01.zip' });
+      assert.equal(restorePoint.success, false);
+      assert.match(restorePoint.error, /pinned/i);
+
+      assert.equal(fs.existsSync(drive), false);
+    });
+  });
+});
+
+test('a missing server folder still fails rename and restore, and the backup lock still refuses it', async () => {
+  await withBackupService(async (backupService) => {
+    await withMissingServer(async ({ drive, serverPath }) => {
+      // v26.6.1 failed both here too.
+      await assert.rejects(
+        () => backupService.renameBackup({ serverPath, oldName: 'old.zip', newName: 'new.zip' }),
+        { code: 'ENOENT' }
+      );
+      assert.deepEqual(await backupService.restoreBackup({ serverPath, name: 'old.zip', serverStatus: 'Stopped' }), {
+        success: false,
+        error: 'Backup file not found.'
+      });
+
+      // Lifecycle restore points take this lock and keep failing closed.
+      let ran = false;
+      await assert.rejects(withBackupMutationLock(serverPath, async () => { ran = true; }), { code: 'ENOENT' });
+      assert.equal(ran, false);
+
+      assert.equal(fs.existsSync(drive), false);
     });
   });
 });

@@ -651,6 +651,36 @@ test('N4: restoring full backups keeps the change counter monotonic and the serv
   strict.assertUnused([serverPath]);
 });
 
+test('the Backups tab of a registered server whose folder is missing lists nothing and deletes as in v26.6.1', async () => {
+  // The server's external drive is unplugged (or its folder was deleted or moved).
+  const drive = path.join(ROOT, 'unplugged-drive');
+  const serverPath = makeServer('Unplugged Server', { parent: drive });
+  registerServer('unplugged-server', serverPath, 'Unplugged Server');
+  fs.rmSync(drive, { recursive: true, force: true });
+  const strict = watchStrictMachinery();
+
+  // What the tab asks when it opens or refreshes.
+  assert.deepEqual(await invoke('backups:list', { serverPath }), []);
+  const sizes = await invoke('backups:calculate-sizes', { serverPath });
+  assert.deepEqual([sizes.success, sizes.backups, sizes.totalSize, sizes.backupCount], [true, [], 0, 0], sizes.error);
+  assert.deepEqual(await invoke('backups:check-size-alerts', { serverPath, maxSizeBytes: 1024 }),
+    { success: true, alerts: [], totalSize: 0, maxSize: 1024 });
+  assert.deepEqual(await invoke('backups:preview-retention-policy', { serverPath, policy: { maxCount: 14 } }), {
+    success: true,
+    preview: { totalBackups: 0, backupsToDelete: [], backupsToKeep: [], spaceThatWouldBeSaved: 0, spaceToKeep: 0, hasActiveRules: true }
+  });
+  assert.equal((await invoke('backups:watch-size-changes', { serverPath })).success, true);
+  // v26.6.1 checked the name first and otherwise found nothing to delete.
+  assert.deepEqual(await invoke('backups:delete', { serverPath, name: 'backup-world-2026-06-20_10-00-00.zip' }), { success: true });
+  assert.deepEqual(await invoke('backups:delete', { serverPath, name: '../outside.zip' }), { success: false, error: 'Invalid backup name' });
+  assert.deepEqual(await invoke('backups:apply-retention-policy', { serverPath, policy: { maxCount: 14 } }), {
+    success: true, message: 'No backups found', deletedBackups: [], failedDeletions: [], spaceSaved: 0, totalBackups: 0, backupsRemaining: 0
+  });
+
+  assert.equal(fs.existsSync(drive), false, 'nothing recreated the missing folder');
+  strict.assertUnused([serverPath]);
+});
+
 test('a server reached through a junction deletes a mod and is then admitted to start', WINDOWS_ONLY, async () => {
   const realPath = makeServer('Junction Target', { parent: path.join(ROOT, 'real-servers') });
   const serverPath = junction(realPath, path.join(ROOT, 'linked-servers', 'Junction Server'));
