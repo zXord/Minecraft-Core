@@ -116,7 +116,20 @@
       activityStatus === 'ready' && activeOperationCount === 0 && recoveryPendingCount === 0 && currentRecoveryScopeKey() === loadedRecoveryScopeKey;
   }
 
-  async function refreshActivity() {
+  // A failed check is read again after each of these delays before the banner
+  // asks for Retry check: a server added a moment ago may not be registered in
+  // the main process yet. Start stays blocked until a check succeeds.
+  const RECOVERY_CHECK_RETRY_DELAYS_MS = Object.freeze([500, 1000, 2000]);
+  let recoveryRetryTimer = null;
+
+  function cancelRecoveryRetry() {
+    if (recoveryRetryTimer) clearTimeout(recoveryRetryTimer);
+    recoveryRetryTimer = null;
+  }
+
+  // Resolves 'failed' when this current read failed. A held failure stays
+  // 'loading' because the caller reads the status again.
+  async function refreshActivity({ holdFailure = false } = {}) {
     const sequence = ++activityRequestSequence;
     const scopeKey = currentRecoveryScopeKey();
     const serverId = currentInstanceId;
@@ -124,25 +137,34 @@
     const token = activityScope.begin();
     if (activityPollTimer) clearTimeout(activityPollTimer);
     activityStatus = serverId && serverPath ? 'loading' : 'unknown';
-    if (!recoveryMounted || !serverId || !serverPath) return;
+    if (!recoveryMounted || !serverId || !serverPath) return 'skipped';
     const isCurrent = () => recoveryMounted && activityScope.isCurrent(token, currentInstanceId || '') && sequence === activityRequestSequence && scopeKey === currentRecoveryScopeKey();
+    let outcome = 'stale';
     try {
       const result = await modpackApi.getActiveJobs(serverId);
-      if (!isCurrent()) return;
+      if (!isCurrent()) return outcome;
       if (result?.serverId !== serverId || !Array.isArray(result.items)) throw new Error('Operation status unavailable');
       const previouslyOwned = activeOperationCount > 0;
       activeOperationCount = result.items.length;
       activityStatus = 'ready';
+      outcome = 'ready';
       if (previouslyOwned && activeOperationCount === 0) void refreshRecovery();
     } catch {
-      if (isCurrent()) activityStatus = 'error';
+      if (isCurrent()) {
+        outcome = 'failed';
+        if (!holdFailure) activityStatus = 'error';
+      }
     } finally {
-      if (isCurrent() && activeOperationCount > 0) activityPollTimer = setTimeout(refreshActivity, 1200);
+      if (isCurrent() && activeOperationCount > 0 && !(holdFailure && outcome === 'failed')) {
+        activityPollTimer = setTimeout(refreshActivity, 1200);
+      }
     }
+    return outcome;
   }
 
-  async function refreshRecovery() {
+  async function refreshRecovery(retryAttempt = 0) {
     const sequence = ++recoveryRequestSequence;
+    cancelRecoveryRetry();
     const scopeKey = currentRecoveryScopeKey();
     const serverId = currentInstanceId;
     loadedRecoveryScopeKey = scopeKey;
@@ -150,7 +172,10 @@
     recoveryStatus = serverId && serverPath ? 'loading' : 'unknown';
     if (!recoveryMounted || !serverId || !serverPath) return;
     const isCurrent = () => recoveryMounted && sequence === recoveryRequestSequence && scopeKey === currentRecoveryScopeKey();
-    const activeRead = refreshActivity();
+    const retryDelay = RECOVERY_CHECK_RETRY_DELAYS_MS[retryAttempt];
+    const holdFailure = retryDelay !== undefined;
+    let recoveryFailed = false;
+    const activeRead = refreshActivity({ holdFailure });
     const recoveryRead = modpackApi.listRecovery().then(result => {
       if (!isCurrent()) return;
       const records = Array.isArray(result) ? result : result?.items;
@@ -158,9 +183,16 @@
       recoveryPendingCount = filterRecoveryRecordsForServer(records, serverId).length;
       recoveryStatus = 'ready';
     }).catch(() => {
-      if (isCurrent()) recoveryStatus = 'error';
+      if (!isCurrent()) return;
+      recoveryFailed = true;
+      if (!holdFailure) recoveryStatus = 'error';
     });
-    await Promise.all([activeRead, recoveryRead]);
+    const [activityOutcome] = await Promise.all([activeRead, recoveryRead]);
+    if (!holdFailure || !isCurrent() || (activityOutcome !== 'failed' && !recoveryFailed)) return;
+    recoveryRetryTimer = setTimeout(() => {
+      recoveryRetryTimer = null;
+      if (isCurrent()) void refreshRecovery(retryAttempt + 1);
+    }, retryDelay);
   }
   const ACTIVE_SERVER_STATUSES = new Set(['Starting', 'Running', 'Stopping']);
   const TRANSITIONAL_SERVER_STATUSES = new Set(['Starting', 'Stopping']);
@@ -1384,6 +1416,7 @@
     recoveryRequestSequence += 1;
     activityRequestSequence += 1;
     if (activityPollTimer) clearTimeout(activityPollTimer);
+    cancelRecoveryRetry();
     pendingAutoStart = false;
     unsubscribeRecoveryProgress?.();
     versionCheckRequestId += 1;

@@ -1644,12 +1644,15 @@ test(`actual App server switch ignores an older delayed recovery ${staleReply}`,
 }
 
 test('actual App unavailable recovery cannot enable Start and ordinary Retry check confirms empty', async () => {
-  const fixture = await harness.launchModpackApp({ profile: 'unmanaged', recoveryListFixture: { failureCalls: [1] } });
+  // The Dashboard reads a failed check again a few times before it reports it.
+  const fixture = await harness.launchModpackApp({ profile: 'unmanaged',
+    recoveryListFixture: { failureCalls: Array.from({ length: 20 }, (_, index) => index + 1) } });
   try {
     const { page } = fixture;
     await expect(dashboardRecovery(page)).toContainText('Recovery status could not be checked');
     await expect(dashboardStarts(page).nth(0)).toBeDisabled();
     await expect(dashboardStarts(page).nth(1)).toBeDisabled();
+    fixture.updateScenario({ recoveryListFixture: {} });
     await dashboardRecovery(page).getByRole('button', { name: 'Retry check' }).click();
     await expect(dashboardRecovery(page)).toHaveCount(0);
     await expect(dashboardStarts(page).nth(0)).toBeEnabled();

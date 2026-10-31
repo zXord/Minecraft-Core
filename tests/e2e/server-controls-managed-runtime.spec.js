@@ -101,6 +101,8 @@ test.beforeEach(async ({ page }) => {
     state.holdActivity = false;
     state.pendingActivity = [];
     state.recoveryReplies = [];
+    // A reply for every recovery read, the repeated reads of a failed check included.
+    state.recoveryFailure = null;
     state.pendingRecovery = [];
     state.listeners = {};
     state.autoStart = false;
@@ -133,7 +135,7 @@ test.beforeEach(async ({ page }) => {
           return { ok: true, value: { serverId: request.serverId, items: active } };
         }
         if (channel === 'modpacks:list-recovery') {
-          const reply = state.recoveryReplies.shift() || { value: state.recovery };
+          const reply = state.recoveryReplies.shift() || state.recoveryFailure || { value: state.recovery };
           if (reply.hold) await new Promise((resolve, reject) => state.pendingRecovery.push({ resolve, reject }));
           if (reply.error) throw new Error('recovery unavailable');
           return { ok: true, value: reply.value };
@@ -406,13 +408,15 @@ for (const managed of [true, false]) {
 
 for (const reply of [{ error: true }, { value: {} }, { value: { items: 'bad' } }, { value: null }]) {
   test(`unavailable/malformed recovery stays guarded and explicit: ${JSON.stringify(reply)}`, async ({ page }) => {
-    await page.evaluate(reply => window.controlsTest.recoveryReplies.push(reply), reply);
+    // A failed check is read again a few times before the banner reports it.
+    await page.evaluate(reply => { window.controlsTest.recoveryFailure = reply; }, reply);
     await show(page, 'alpha', true);
     await expect(recoveryStatus(page)).toContainText('Recovery status could not be checked');
     await expect(starts(page).nth(0)).toBeDisabled();
     await expect(starts(page).nth(1)).toBeDisabled();
     await forceStartHandlers(page);
     expect(await startCalls(page)).toEqual([]);
+    await page.evaluate(() => { window.controlsTest.recoveryFailure = null; });
     await recoveryStatus(page).getByRole('button', { name: 'Retry check' }).click();
     await expect(starts(page).nth(0)).toBeEnabled();
     await expect(starts(page).nth(1)).toBeEnabled();
@@ -597,6 +601,8 @@ for (const initial of ['empty', 'pending', 'error', 'switch', 'destroy']) {
       window.appStartupCompleted = false;
       window.controlsTest.autoStart = true;
       window.controlsTest.recoveryReplies.push({ hold: true, value: initial === 'pending' ? [{ instanceId: 'alpha' }] : [], error: initial === 'error' });
+      // The repeated reads of the failed initial check fail as well.
+      if (initial === 'error') window.controlsTest.recoveryFailure = { error: true };
     }, initial);
     await show(page, 'alpha', true);
     await expect.poll(() => page.evaluate(() => window.controlsTest.requests.some(value => value.channel === 'get-management-server-status'))).toBe(true);
@@ -621,6 +627,7 @@ for (const initial of ['empty', 'pending', 'error', 'switch', 'destroy']) {
       }
       if (initial === 'error') {
         await expect(recoveryStatus(page)).toContainText('Recovery status could not be checked');
+        await page.evaluate(() => { window.controlsTest.recoveryFailure = null; });
         await recoveryStatus(page).getByRole('button', { name: 'Retry check' }).click();
         await expect(starts(page).nth(0)).toBeEnabled();
       }

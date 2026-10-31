@@ -40,7 +40,7 @@ function functionSource(name) {
 const SETUP_FUNCTIONS = ['handleSetupComplete', 'saveInstancesAfterSetup', 'setupFailureText'];
 
 function loadSetupHandler({ invoke, instances = [EXISTING_SERVER], instanceType = 'server' }) {
-  const calls = { invoke: [], toastError: [], toastSuccess: [], loggerError: [], loggerWarn: [] };
+  const calls = { invoke: [], toastError: [], toastSuccess: [], loggerError: [], loggerWarn: [], modpackStateReads: [] };
   const dependencies = {
     instances: instances.map(instance => ({ ...instance })),
     instanceType,
@@ -69,14 +69,16 @@ function loadSetupHandler({ invoke, instances = [EXISTING_SERVER], instanceType 
     async loadServerSettingsForInstance() {},
     activateServerModContext() { return true; },
     async primeServerModState() {},
-    refreshServerStatuses() {}
+    refreshServerStatuses() {},
+    async refreshCurrentServerModpackState(serverId) { calls.modpackStateReads.push(serverId); }
   };
   const sources = SETUP_FUNCTIONS.map(functionSource);
   assert.ok(sources[0], 'App.svelte defines handleSetupComplete');
   const factory = new Function('dependencies', `
     const {
       logger, toast, window, storeCurrentInstance, saveInstancesIfNeeded, updateServerPath,
-      loadServerSettingsForInstance, activateServerModContext, primeServerModState, refreshServerStatuses
+      loadServerSettingsForInstance, activateServerModContext, primeServerModState, refreshServerStatuses,
+      refreshCurrentServerModpackState
     } = dependencies;
     let instances = dependencies.instances;
     let instanceType = dependencies.instanceType;
@@ -203,6 +205,7 @@ test('Try again saves the instance list once more and confirms it', async () => 
   await harness.run({ detail: { path: NEW_SERVER_PATH } });
   const [{ options }] = harness.calls.toastError;
   assert.equal(options.action?.label, 'Try again');
+  assert.deepEqual(harness.calls.modpackStateReads, []);
 
   options.action.onClick();
   await settled();
@@ -215,6 +218,9 @@ test('Try again saves the instance list once more and confirms it', async () => 
   );
   assert.equal(harness.calls.toastError.length, 1);
   assert.equal(harness.calls.toastSuccess.length, 1);
+  // The new server was opened unregistered; its modpack state is read again.
+  assert.deepEqual(harness.calls.modpackStateReads, [harness.state().currentInstance.id]);
+  assert.equal(harness.state().currentInstance.path, NEW_SERVER_PATH);
 });
 
 for (const [label, writeSettings] of [

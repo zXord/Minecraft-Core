@@ -1075,98 +1075,113 @@
     path = newPath;
     updateServerPath();
 
-    // If no instances exist, this is the initial setup
-    if (!createdInstance && instances.length === 0) {
-      const inst = {
-        id: "default-server",
-        name: "Default Server",
-        type: "server",
-        path: newPath,
-      };
-      instances = [inst];
-      currentInstance = inst;
-      createdInstance = inst;
-      storeCurrentInstance(inst);
-      saveInstancesIfNeeded();
-    } else if (!createdInstance && instanceType === "server") {
-      // Create a new server instance
-      const nextServerCount = instances.filter((i) => i.type === "server").length + 1;
-      const inst = {
-        id: `server-${Date.now()}`,
-        name: `Server ${nextServerCount}`,
-        type: "server",
-        path: newPath,
-      };
-      instances = [...instances, inst];
-      currentInstance = inst;
-      createdInstance = inst;
-      storeCurrentInstance(inst);
-      saveInstancesIfNeeded();
-    }
+    // A published modpack instance is already registered by the main process,
+    // so only the legacy manual setup writes the settings and the registry.
+    if (!requestedInstanceId) {
+      // Legacy manual setup (an Empty/Custom server or an existing server
+      // folder) still owns its selected path and settings flow. The main
+      // process answers a server's reads only once the server is registered,
+      // and the views and the modpack state read query the selected server as
+      // soon as it opens, so the new server is opened only after its
+      // registration. The settings write and the registration both change the
+      // new server folder, so the registration waits until the settings are
+      // written.
+      let pendingInstance = null;
+      if (instances.length === 0) {
+        // If no instances exist, this is the initial setup
+        pendingInstance = {
+          id: "default-server",
+          name: "Default Server",
+          type: "server",
+          path: newPath,
+        };
+      } else if (instanceType === "server") {
+        // Create a new server instance
+        const nextServerCount = instances.filter((i) => i.type === "server").length + 1;
+        pendingInstance = {
+          id: `server-${Date.now()}`,
+          name: `Server ${nextServerCount}`,
+          type: "server",
+          path: newPath,
+        };
+      }
 
-    if (createdInstance?.type === "server" && createdInstance.path) {
-      instanceType = "server";
-      path = createdInstance.path;
-      updateServerPath();
+      // The finished setup view gives way to a progress view, so it cannot
+      // start another setup while this server is registered.
+      step = "registering";
       try {
-        await loadServerSettingsForInstance(createdInstance);
+        const settingsResult = await window.electron.invoke("update-settings", {
+          instanceId: pendingInstance?.id,
+          serverPath: newPath,
+        });
+        if (!settingsResult || !settingsResult.success) {
+          logger.warn("Failed to save settings for the new server", {
+            category: "settings",
+            data: {
+              component: "App",
+              instanceId: pendingInstance?.id,
+              error: settingsResult?.error,
+            },
+          });
+        }
       } catch (error) {
-        logger.warn("Failed to hydrate new server instance settings", {
+        logger.warn(`Failed to save settings for the new server: ${setupFailureText(error) || "unknown error"}`, {
           category: "settings",
           data: {
             component: "App",
-            instanceId: createdInstance.id,
-            error: error?.message || String(error),
+            instanceId: pendingInstance?.id,
+            errorType: error?.constructor?.name || typeof error,
           },
         });
       }
-      const restoredServerModState = activateServerModContext(createdInstance.path);
-      if (!restoredServerModState) {
-        void primeServerModState(createdInstance.path);
+
+      try {
+        // Persist the updated instances list - this part is crucial
+        await saveInstancesAfterSetup({
+          list: pendingInstance ? [...instances, pendingInstance] : instances,
+        });
+
+        // A failed save was reported with Try again; the server is still opened
+        // for this session, as before.
+        if (pendingInstance) {
+          instances = [...instances.filter((instance) => instance.id !== pendingInstance.id), pendingInstance];
+          currentInstance = pendingInstance;
+          createdInstance = pendingInstance;
+          storeCurrentInstance(pendingInstance);
+        }
+      } catch (error) {
+        // Never leave the "Adding the server..." view up.
+        step = "done";
+        throw error;
       }
-      refreshServerStatuses();
     }
 
-    if (requestedInstanceId) {
-      // Publication already persisted the authoritative instance in main.
-      // Do not write the registry or echo its filesystem path back over IPC.
-      step = "done";
-      return;
-    }
-
-    // Legacy manual setup still owns its selected path and settings flow.
-    // The settings write and the registration both change the new server
-    // folder, so the registration waits until the settings are written.
     try {
-      const settingsResult = await window.electron.invoke("update-settings", {
-        instanceId: createdInstance?.id,
-        serverPath: newPath,
-      });
-      if (!settingsResult || !settingsResult.success) {
-        logger.warn("Failed to save settings for the new server", {
-          category: "settings",
-          data: {
-            component: "App",
-            instanceId: createdInstance?.id,
-            error: settingsResult?.error,
-          },
-        });
+      if (createdInstance?.type === "server" && createdInstance.path) {
+        instanceType = "server";
+        path = createdInstance.path;
+        try {
+          await loadServerSettingsForInstance(createdInstance);
+        } catch (error) {
+          logger.warn("Failed to hydrate new server instance settings", {
+            category: "settings",
+            data: {
+              component: "App",
+              instanceId: createdInstance.id,
+              error: error?.message || String(error),
+            },
+          });
+        }
+        const restoredServerModState = activateServerModContext(createdInstance.path);
+        if (!restoredServerModState) {
+          void primeServerModState(createdInstance.path);
+        }
+        refreshServerStatuses();
       }
-    } catch (error) {
-      logger.warn(`Failed to save settings for the new server: ${setupFailureText(error) || "unknown error"}`, {
-        category: "settings",
-        data: {
-          component: "App",
-          instanceId: createdInstance?.id,
-          errorType: error?.constructor?.name || typeof error,
-        },
-      });
+    } finally {
+      // Return to main view, also when hydrating the new server failed.
+      step = "done";
     }
-
-    // Persist the updated instances list - this part is crucial
-    await saveInstancesAfterSetup();
-    // Return to main view
-    step = "done";
   }
 
   // IPC failures are Errors in practice, but the setup has to finish whatever
@@ -1178,11 +1193,11 @@
 
   // Without this save a new Custom server is gone after the next restart, so
   // a failed save is shown to the user with a way to try again.
-  async function saveInstancesAfterSetup({ retry = false } = {}) {
+  async function saveInstancesAfterSetup({ retry = false, list = instances } = {}) {
     const unknownFailure = "The instance list could not be saved.";
     let failure = "";
     try {
-      const result = await window.electron.invoke("save-instances", instances);
+      const result = await window.electron.invoke("save-instances", list);
       if (!result || !result.success) {
         failure = setupFailureText(result?.error) || unknownFailure;
       }
@@ -1195,7 +1210,7 @@
         category: "storage",
         data: {
           component: "App",
-          instanceCount: instances.length,
+          instanceCount: list.length,
           retry,
         },
       });
@@ -1204,6 +1219,10 @@
           description: "The new server is now in your instance list.",
           duration: 5000,
         });
+        // The new server was opened unregistered, so its modpack state could
+        // not be read. A known state also has the Dashboard check it again.
+        const serverId = currentInstance?.type === "server" ? currentInstance.id : "";
+        if (serverId) void refreshCurrentServerModpackState(serverId);
       }
       return;
     }
@@ -1212,7 +1231,7 @@
       category: "storage",
       data: {
         component: "App",
-        instanceCount: instances.length,
+        instanceCount: list.length,
         error: failure,
         retry,
       },
@@ -1259,6 +1278,7 @@
 
   // Show instance selection screen
   function showAddInstanceScreen() {
+    if (step === "registering") return;
     logger.info("Add instance screen requested", {
       category: "ui",
       data: {
@@ -1489,6 +1509,9 @@
 
   // Switch between instances
   async function switchInstance(instance) {
+    // The new server opens as soon as it is registered; switching meanwhile
+    // would be overridden and leave the saved server path pointing elsewhere.
+    if (step === "registering") return;
     logger.info("Switching to instance", {
       category: "ui",
       data: {
@@ -1841,6 +1864,8 @@
             {/await}
           {/if}
         </div>
+      {:else if step === "registering"}
+        <div class="route-loading"><div class="loading-spinner"></div><p>Adding the server...</p></div>
       {:else if isLoading}
         <!-- Loading screen -->
         <div class="loading-screen">
