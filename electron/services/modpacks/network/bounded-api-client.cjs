@@ -1,6 +1,9 @@
 const { ModpackError } = require('../errors.cjs');
 
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+// Hard ceiling for one request's own byte limit. The client-wide limit never
+// exceeds DEFAULT_MAX_RESPONSE_BYTES; only a request that names a larger limit gets one.
+const MAX_REQUEST_RESPONSE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const MAX_REQUEST_TIMEOUT_MS = 5 * 60_000;
 
@@ -26,6 +29,12 @@ function cancelled() {
 
 function requestTimeout(value) {
   if (!Number.isSafeInteger(value) || value < 1 || value > MAX_REQUEST_TIMEOUT_MS) throw new TypeError('Bounded API client dependencies are invalid');
+  return value;
+}
+
+function responseLimit(value, fallback) {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_REQUEST_RESPONSE_BYTES) throw invalid();
   return value;
 }
 
@@ -104,7 +113,8 @@ class BoundedApiClient {
 
   async request(path, options = {}) {
     if (!options || typeof options !== 'object' || Array.isArray(options) || Object.getPrototypeOf(options) !== Object.prototype ||
-        Object.keys(options).some(key => !['headers', 'query', 'signal'].includes(key))) throw invalid();
+        Object.keys(options).some(key => !['headers', 'query', 'signal', 'maxResponseBytes'].includes(key))) throw invalid();
+    const maxResponseBytes = responseLimit(options.maxResponseBytes, this.maxResponseBytes);
     const relative = normalizedPath(path).slice(1);
     const url = new URL(relative, this.baseUrl);
     if (url.origin !== this.origin || !url.pathname.startsWith(this.baseUrl.pathname)) throw invalid();
@@ -129,7 +139,7 @@ class BoundedApiClient {
       const rawLength = response.headers?.['content-length'];
       if (rawLength !== undefined) {
         if (Array.isArray(rawLength) || !/^(0|[1-9][0-9]*)$/u.test(String(rawLength)) ||
-            BigInt(rawLength) > BigInt(this.maxResponseBytes)) {
+            BigInt(rawLength) > BigInt(maxResponseBytes)) {
           response.destroy?.();
           throw tooLarge(rawLength);
         }
@@ -140,7 +150,7 @@ class BoundedApiClient {
         for await (const value of response) {
           const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
           measured += chunk.length;
-          if (measured > this.maxResponseBytes) {
+          if (measured > maxResponseBytes) {
             response.destroy?.();
             throw tooLarge(measured);
           }
@@ -169,4 +179,4 @@ class BoundedApiClient {
   }
 }
 
-module.exports = { BoundedApiClient, DEFAULT_MAX_RESPONSE_BYTES };
+module.exports = { BoundedApiClient, DEFAULT_MAX_RESPONSE_BYTES, MAX_REQUEST_RESPONSE_BYTES };

@@ -2,9 +2,19 @@ const { TextDecoder } = require('node:util');
 const { createArtifactSetPlan } = require('../contracts.cjs');
 const { ModpackError, deepFreeze } = require('../errors.cjs');
 const { validateRemoteUrl } = require('../network/remote-url-policy.cjs');
+const { MAX_REQUEST_RESPONSE_BYTES } = require('../network/bounded-api-client.cjs');
 
 const MODRINTH_ARTIFACT_HOSTS = Object.freeze(['cdn.modrinth.com']);
 const DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+// Version history grows with every release, and packs list hundreds of dependencies
+// per version, so a popular pack's history passes 5 MiB even without changelogs.
+// Only that request gets this larger, still bounded limit.
+const MAX_VERSION_HISTORY_RESPONSE_BYTES = MAX_REQUEST_RESPONSE_BYTES;
+const MAX_VERSION_HISTORY_ITEMS = 5000;
+// Every Minecraft release and snapshot together stays well below this; a longer list
+// is malformed, not just long.
+const MAX_MINECRAFT_VERSIONS = 2048;
+const HISTORY_TOO_LARGE_MESSAGE = 'This modpack has too many versions to list here. Download its .mrpack file from Modrinth and use Local archive instead.';
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CHANNELS = new Set(['release', 'beta', 'alpha']);
 const LOADERS = new Set(['vanilla', 'fabric', 'forge', 'neoforge', 'quilt']);
@@ -21,6 +31,10 @@ const APP_LOADER_TO_SEARCH_CATEGORY = new Map([
   ['vanilla', 'vanilla'], ['fabric', 'fabric'], ['forge', 'forge'], ['neoforge', 'neoforge'], ['quilt', 'quilt']
 ]);
 const SERVER_COMPATIBILITY = new Set(['required', 'optional', 'unsupported', 'unknown']);
+// Galleries are display-only. Modrinth projects can have more images than the app
+// shows, so later images are dropped instead of failing the whole catalog page.
+const MAX_SEARCH_GALLERY_ITEMS = 32;
+const MAX_PROJECT_GALLERY_ITEMS = 128;
 
 function invalidResponse() {
   return new ModpackError('INVALID_REQUEST', 'Modrinth returned an invalid response');
@@ -83,6 +97,11 @@ function strings(value, { maxItems = 256, maxLength = 128 } = {}) {
   return value.map(item => text(item, maxLength));
 }
 
+function leadingItems(value, maxItems) {
+  if (!Array.isArray(value)) throw invalidResponse();
+  return value.slice(0, maxItems);
+}
+
 function normalizedLoaders(value) {
   const source = strings(value, { maxItems: 64 });
   const result = [];
@@ -113,7 +132,9 @@ function normalizeCompatibility(value) {
 function normalizeSearchHit(hit) {
   if (!plain(hit) || hit.project_type !== 'modpack') throw invalidResponse();
   const categories = strings(hit.categories, { maxItems: 128 });
-  const gallery = hit.gallery === undefined ? [] : strings(hit.gallery, { maxItems: 32, maxLength: 4096 }).map(candidateUrl);
+  const gallery = hit.gallery === undefined
+    ? []
+    : strings(leadingItems(hit.gallery, MAX_SEARCH_GALLERY_ITEMS), { maxItems: MAX_SEARCH_GALLERY_ITEMS, maxLength: 4096 }).map(candidateUrl);
   return {
     projectId: identifier(hit.project_id),
     slug: text(hit.slug, 256),
@@ -122,7 +143,7 @@ function normalizeSearchHit(hit) {
     iconUrlCandidate: optionalIconCandidate(hit.icon_url),
     galleryUrlCandidates: gallery,
     categories,
-    minecraftVersions: strings(hit.versions, { maxItems: 256, maxLength: 64 }),
+    minecraftVersions: strings(hit.versions, { maxItems: MAX_MINECRAFT_VERSIONS, maxLength: 64 }),
     loaders: [...new Set(categories.map(category => UPSTREAM_LOADER_TO_APP.get(category)).filter(Boolean))],
     serverCompatibility: normalizeCompatibility(hit.server_side),
     updatedAt: timestamp(hit.date_modified),
@@ -131,8 +152,7 @@ function normalizeSearchHit(hit) {
 }
 
 function normalizeGallery(value) {
-  if (!Array.isArray(value) || value.length > 128) throw invalidResponse();
-  return value.map(entry => {
+  return leadingItems(value, MAX_PROJECT_GALLERY_ITEMS).map(entry => {
     if (!plain(entry) || typeof entry.featured !== 'boolean') throw invalidResponse();
     return {
       urlCandidate: candidateUrl(entry.url),
@@ -165,7 +185,7 @@ function normalizeProject(project) {
     iconUrlCandidate: optionalIconCandidate(project.icon_url),
     galleryCandidates: normalizeGallery(project.gallery ?? []),
     runtimes: {
-      minecraftVersions: strings(project.game_versions, { maxItems: 256, maxLength: 64 }),
+      minecraftVersions: strings(project.game_versions, { maxItems: MAX_MINECRAFT_VERSIONS, maxLength: 64 }),
       loaders: normalizedLoaders(project.loaders)
     },
     serverCompatibility: normalizeCompatibility(project.server_side),
@@ -197,7 +217,7 @@ function normalizeVersion(value) {
     version: text(value.version_number, 256),
     changelog: optionalString(value.changelog, 1024 * 1024, { multiline: true, empty: true }),
     channel: value.version_type,
-    minecraftVersions: strings(value.game_versions, { maxItems: 256, maxLength: 64 }),
+    minecraftVersions: strings(value.game_versions, { maxItems: MAX_MINECRAFT_VERSIONS, maxLength: 64 }),
     loaders: normalizedLoaders(value.loaders),
     publishedAt: timestamp(value.date_published),
     downloads: count(value.downloads),
@@ -224,12 +244,15 @@ class ModrinthModpackProvider {
   }
 
   async requestJson(path, options, { missingCode, missingId } = {}) {
+    // A per-request limit travels in the transport options, so the transport's
+    // streaming check and this re-check of the buffered body use the same number.
+    const maxResponseBytes = options?.maxResponseBytes ?? this.maxResponseBytes;
     let response;
     try { response = await this.http.request(path, options); }
     catch (error) { if (error instanceof ModpackError) throw error; throw unavailable(); }
     if (!response || !Number.isSafeInteger(response.statusCode) || !Buffer.isBuffer(response.body)) throw invalidResponse();
     const bytes = response.body;
-    if (bytes.length > this.maxResponseBytes) {
+    if (bytes.length > maxResponseBytes) {
       throw new ModpackError('ARCHIVE_LIMIT_EXCEEDED', 'Modrinth response exceeded the configured byte limit', {
         details: { limit: 'maxTechnicalStdoutBytes', actual: String(bytes.length) }
       });
@@ -294,8 +317,17 @@ class ModrinthModpackProvider {
     const query = { include_changelog: 'false' };
     if (gameVersions.length) query.game_versions = JSON.stringify(gameVersions);
     if (loaders.length) query.loaders = JSON.stringify(loaders.map(loader => APP_LOADER_TO_VERSION_API.get(loader)));
-    const value = await this.requestJson(`/project/${projectId}/version`, { query }, { missingCode: 'REPOSITORY_NOT_FOUND', missingId: projectId });
-    if (!Array.isArray(value) || value.length > 1000) throw invalidResponse();
+    let value;
+    try {
+      value = await this.requestJson(`/project/${projectId}/version`, { query, maxResponseBytes: MAX_VERSION_HISTORY_RESPONSE_BYTES }, { missingCode: 'REPOSITORY_NOT_FOUND', missingId: projectId });
+    } catch (error) {
+      if (error instanceof ModpackError && error.code === 'ARCHIVE_LIMIT_EXCEEDED') {
+        throw new ModpackError('ARCHIVE_LIMIT_EXCEEDED', HISTORY_TOO_LARGE_MESSAGE, { details: error.details });
+      }
+      throw error;
+    }
+    if (!Array.isArray(value)) throw invalidResponse();
+    if (value.length > MAX_VERSION_HISTORY_ITEMS) throw new ModpackError('ARCHIVE_LIMIT_EXCEEDED', HISTORY_TOO_LARGE_MESSAGE);
     const versions = value.map(normalizeVersion);
     if (versions.some(version => version.projectId !== projectId) || new Set(versions.map(version => version.versionId)).size !== versions.length) throw invalidResponse();
     return deepFreeze(channels.length ? versions.filter(item => channels.includes(item.channel)) : versions);

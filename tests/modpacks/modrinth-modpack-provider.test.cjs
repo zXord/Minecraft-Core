@@ -8,8 +8,21 @@ const {
   ModrinthModpackProvider
 } = require('../../electron/services/modpacks/providers/modrinth-modpack-provider.cjs');
 
+// Version history may be up to 16 MiB; every other Modrinth response keeps 2 MiB.
+const HISTORY_LIMIT_BYTES = 16 * 1024 * 1024;
+const DEFAULT_LIMIT_BYTES = 2 * 1024 * 1024;
+const HISTORY_TOO_LARGE_MESSAGE = 'This modpack has too many versions to list here. Download its .mrpack file from Modrinth and use Local archive instead.';
+
 function jsonResponse(value, statusCode = 200) {
   return { statusCode, body: Buffer.from(JSON.stringify(value), 'utf8') };
+}
+
+function paddedJson(value, size) {
+  const json = Buffer.from(JSON.stringify(value), 'utf8');
+  assert.ok(json.length <= size);
+  const body = Buffer.alloc(size, 0x20);
+  json.copy(body);
+  return body;
 }
 
 function makeHttp(routes) {
@@ -50,6 +63,32 @@ function makeBoundedHistoryHttp(history) {
     }
   });
   return { http, calls, responses, fullBody, lightBody };
+}
+
+function makeBoundedRoutesHttp(bodies) {
+  const calls = [];
+  const http = new BoundedApiClient({
+    baseUrl: 'https://api.modrinth.com/v2/',
+    client: {
+      async request(url) {
+        const parsed = new URL(url);
+        const body = bodies[parsed.pathname.slice('/v2'.length)];
+        if (!body) throw new Error(`Unplanned request: ${parsed.pathname}`);
+        const response = Readable.from([body.subarray(0, 1024 * 1024), body.subarray(1024 * 1024)]);
+        response.statusCode = 200;
+        response.headers = {};
+        calls.push({ path: parsed.pathname, response });
+        return response;
+      }
+    }
+  });
+  return { http, calls };
+}
+
+function dependencies(count, seed) {
+  return Array.from({ length: count }, (_, index) => ({
+    version_id: `v${seed}-${index}`.padEnd(8, '0'), project_id: `p${index}`.padEnd(8, '0'), file_name: null, dependency_type: 'embedded'
+  }));
 }
 
 function version(overrides = {}) {
@@ -162,6 +201,53 @@ test('optional icons do not loosen required titles slugs galleries links or arti
     '/version/version-exact': jsonResponse(version({ files: [{ ...version().files[0], url: '' }] }))
   }) });
   await assert.rejects(provider.resolveArtifactSetPlan('version-exact'), { code: 'INVALID_REQUEST' });
+});
+
+test('display galleries keep the first images instead of failing the catalog on a long gallery', async () => {
+  // A live Modrinth project with 57 gallery images made every search page fail.
+  const urls = Array.from({ length: 57 }, (_, index) => `https://cdn.modrinth.com/data/glade/images/${index}.webp`);
+  const entries = Array.from({ length: 200 }, (_, index) => ({ url: `https://cdn.modrinth.com/data/glade/images/${index}.webp`, featured: index === 0 }));
+  const provider = new ModrinthModpackProvider({ http: makeHttp({
+    '/search': jsonResponse({ hits: [searchHit({ project_id: 'first' }), searchHit({ project_id: 'glade', gallery: urls })], offset: 0, limit: 20, total_hits: 2 }),
+    '/project/project-exact': jsonResponse(project({ gallery: entries }))
+  }) });
+  const search = await provider.searchProjects();
+  assert.deepEqual(search.items.map(item => item.projectId), ['first', 'glade']);
+  assert.deepEqual(search.items[1].galleryUrlCandidates, urls.slice(0, 32));
+  const detail = await provider.getProject('project-exact');
+  assert.equal(detail.galleryCandidates.length, 128);
+  assert.deepEqual(detail.galleryCandidates[127], { urlCandidate: entries[127].url, featured: false });
+});
+
+test('long Minecraft version lists do not fail the catalog, project or version metadata', async () => {
+  const versions = Array.from({ length: 300 }, (_, index) => `1.${index}`);
+  const provider = new ModrinthModpackProvider({ http: makeHttp({
+    '/search': jsonResponse({ hits: [searchHit({ versions })], offset: 0, limit: 20, total_hits: 1 }),
+    '/project/project-exact': jsonResponse(project({ game_versions: versions })),
+    '/version/version-exact': jsonResponse(version({ game_versions: versions }))
+  }) });
+  assert.equal((await provider.searchProjects()).items[0].minecraftVersions.length, 300);
+  assert.equal((await provider.getProject('project-exact')).runtimes.minecraftVersions.length, 300);
+  assert.equal((await provider.getVersion('version-exact')).minecraftVersions.length, 300);
+
+  const tooMany = Array.from({ length: 2049 }, (_, index) => `1.${index}`);
+  const refusing = new ModrinthModpackProvider({ http: makeHttp({
+    '/search': jsonResponse({ hits: [searchHit({ versions: tooMany })], offset: 0, limit: 20, total_hits: 1 })
+  }) });
+  await assert.rejects(refusing.searchProjects(), { code: 'INVALID_REQUEST' });
+});
+
+test('display galleries still reject malformed shown entries and non-list values', async () => {
+  for (const gallery of [null, 'https://images.example/one.png', [...Array.from({ length: 31 }, () => 'https://images.example/ok.png'), '']]) {
+    const provider = new ModrinthModpackProvider({ http: makeHttp({ '/search': jsonResponse({
+      hits: [searchHit({ gallery })], offset: 0, limit: 20, total_hits: 1
+    }) }) });
+    await assert.rejects(provider.searchProjects(), { code: 'INVALID_REQUEST' });
+  }
+  for (const gallery of ['https://images.example/one.png', { url: 'https://images.example/one.png', featured: true }, [{ url: 'https://images.example/one.png', featured: 'yes' }]]) {
+    const provider = new ModrinthModpackProvider({ http: makeHttp({ '/project/project-exact': jsonResponse(project({ gallery })) }) });
+    await assert.rejects(provider.getProject('project-exact'), { code: 'INVALID_REQUEST' });
+  }
 });
 
 test('search serializes Modrinth modpack facets, paging, compatibility, and supported sorts', async () => {
@@ -283,14 +369,15 @@ test('version history omits unused changelogs to preserve every runtime loader c
   const upstreamLoaders = ['minecraft', 'fabric', 'forge', 'neoforge', 'quilt'];
   const appLoaders = ['vanilla', 'fabric', 'forge', 'neoforge', 'quilt'];
   const channels = ['release', 'beta', 'alpha'];
+  // With changelogs this history is past the 16 MiB history bound; without them it fits.
   const history = Array.from({ length: 783 }, (_, index) => version({
-    id: `history-${index}`, changelog: 'x'.repeat(3000),
+    id: `history-${index}`, changelog: 'x'.repeat(24_000),
     game_versions: [runtimes[index % 3]], loaders: [upstreamLoaders[index % 5]],
     version_type: channels[index % 3]
   }));
   const transport = makeBoundedHistoryHttp(history);
-  assert.ok(transport.fullBody.length > 2 * 1024 * 1024);
-  assert.ok(transport.lightBody.length < 2 * 1024 * 1024);
+  assert.ok(transport.fullBody.length > HISTORY_LIMIT_BYTES);
+  assert.ok(transport.lightBody.length < HISTORY_LIMIT_BYTES);
   const provider = new ModrinthModpackProvider({ http: transport.http });
 
   const listed = await provider.listVersions({ projectId: 'project-exact' });
@@ -303,27 +390,93 @@ test('version history omits unused changelogs to preserve every runtime loader c
   assert.deepEqual([...transport.calls[0].searchParams], [['include_changelog', 'false']]);
 });
 
-test('version history rejects a still-oversized changelog-free response without a partial result or fallback', async () => {
-  const history = Array.from({ length: 783 }, (_, index) => version({
-    id: `history-${index}`, changelog: null,
-    files: Array.from({ length: 8 }, () => version().files[0])
+test('version history accepts a 5 MiB changelog-free history with hundreds of dependencies per version through the real bounded client', async () => {
+  // Live Modrinth packs list hundreds of dependencies per version: Prominence II's
+  // 106 versions came to 5,146 KB without changelogs, which failed at 2 MiB.
+  const history = Array.from({ length: 106 }, (_, index) => version({
+    id: `history-${index}`, changelog: null, dependencies: dependencies(520, index)
   }));
   const transport = makeBoundedHistoryHttp(history);
-  assert.ok(transport.lightBody.length > 2 * 1024 * 1024);
+  assert.ok(transport.lightBody.length > 5 * 1024 * 1024);
+  assert.ok(transport.lightBody.length < HISTORY_LIMIT_BYTES);
+  const provider = new ModrinthModpackProvider({ http: transport.http });
+
+  const listed = await provider.listVersions({ projectId: 'project-exact' });
+  assert.deepEqual(listed.map(item => item.versionId), history.map(item => item.id));
+  assert.equal(transport.calls.length, 1);
+  assert.deepEqual([...transport.calls[0].searchParams], [['include_changelog', 'false']]);
+});
+
+test('version history rejects a still-oversized changelog-free response without a partial result or fallback', async () => {
+  const history = Array.from({ length: 360 }, (_, index) => version({
+    id: `history-${index}`, changelog: null, dependencies: dependencies(520, index)
+  }));
+  const transport = makeBoundedHistoryHttp(history);
+  assert.ok(transport.lightBody.length > HISTORY_LIMIT_BYTES);
   const provider = new ModrinthModpackProvider({ http: transport.http });
   await assert.rejects(provider.listVersions({ projectId: 'project-exact' }), {
-    code: 'ARCHIVE_LIMIT_EXCEEDED', message: 'Provider response exceeded the configured byte limit'
+    code: 'ARCHIVE_LIMIT_EXCEEDED', message: HISTORY_TOO_LARGE_MESSAGE
   });
   assert.equal(transport.calls.length, 1);
   assert.deepEqual([...transport.calls[0].searchParams], [['include_changelog', 'false']]);
   assert.equal(transport.responses[0].destroyed, true);
 });
 
-test('version history rejects 1001 versions rather than returning a truncated success', async () => {
-  const history = Array.from({ length: 1001 }, (_, index) => version({ id: `history-${index}`, changelog: undefined }));
+test('search, project and version responses keep the 2 MiB bound through the real bounded client', async () => {
+  const bodies = size => ({
+    '/search': paddedJson({ hits: [searchHit()], offset: 0, limit: 20, total_hits: 1 }, size),
+    '/project/project-exact': paddedJson(project(), size),
+    '/version/version-exact': paddedJson(version(), size)
+  });
+  const atLimit = new ModrinthModpackProvider({ http: makeBoundedRoutesHttp(bodies(DEFAULT_LIMIT_BYTES)).http });
+  assert.equal((await atLimit.searchProjects()).items.length, 1);
+  assert.equal((await atLimit.getProject('project-exact')).projectId, 'project-exact');
+  assert.equal((await atLimit.getVersion('version-exact')).versionId, 'version-exact');
+
+  const transport = makeBoundedRoutesHttp(bodies(DEFAULT_LIMIT_BYTES + 1));
+  const provider = new ModrinthModpackProvider({ http: transport.http });
+  for (const call of [() => provider.searchProjects(), () => provider.getProject('project-exact'), () => provider.getVersion('version-exact')]) {
+    await assert.rejects(call(), { code: 'ARCHIVE_LIMIT_EXCEEDED', message: 'Provider response exceeded the configured byte limit' });
+  }
+  assert.deepEqual(transport.calls.map(({ path }) => path), ['/v2/search', '/v2/project/project-exact', '/v2/version/version-exact']);
+  assert.ok(transport.calls.every(({ response }) => response.destroyed));
+});
+
+test('the provider re-checks the version history bound when its transport ignores per-request limits', async () => {
+  for (const size of [3 * 1024 * 1024, HISTORY_LIMIT_BYTES]) {
+    const http = makeHttp({ '/project/project-exact/version': { statusCode: 200, body: paddedJson([version({ changelog: undefined })], size) } });
+    const listed = await new ModrinthModpackProvider({ http }).listVersions({ projectId: 'project-exact' });
+    assert.deepEqual(listed.map(item => item.versionId), ['version-exact']);
+    assert.deepEqual(http.calls[0].options, { query: { include_changelog: 'false' }, maxResponseBytes: HISTORY_LIMIT_BYTES });
+  }
+  for (const statusCode of [200, 404]) {
+    const http = makeHttp({ '/project/project-exact/version': { statusCode, body: Buffer.alloc(HISTORY_LIMIT_BYTES + 1, 0x20) } });
+    await assert.rejects(new ModrinthModpackProvider({ http }).listVersions({ projectId: 'project-exact' }), error =>
+      error.code === 'ARCHIVE_LIMIT_EXCEEDED' && error.message === HISTORY_TOO_LARGE_MESSAGE &&
+      error.details?.actual === String(HISTORY_LIMIT_BYTES + 1));
+  }
+
+  const oversized = { statusCode: 200, body: Buffer.alloc(DEFAULT_LIMIT_BYTES + 1, 0x20) };
+  const http = makeHttp({ '/search': oversized, '/project/project-exact': oversized, '/version/version-exact': oversized });
+  const provider = new ModrinthModpackProvider({ http });
+  for (const call of [() => provider.searchProjects(), () => provider.getProject('project-exact'), () => provider.getVersion('version-exact')]) {
+    await assert.rejects(call(), { code: 'ARCHIVE_LIMIT_EXCEEDED', message: 'Modrinth response exceeded the configured byte limit' });
+  }
+  assert.ok(http.calls.every(({ options }) => options.maxResponseBytes === undefined));
+});
+
+test('version history lists up to 5000 versions and refuses 5001 rather than returning a truncated success', async () => {
+  // Live packs such as Optimizationn already publish 1,501 versions.
+  const accepted = Array.from({ length: 5000 }, (_, index) => version({ id: `history-${index}`, changelog: undefined }));
+  const listed = await new ModrinthModpackProvider({ http: makeHttp({ '/project/project-exact/version': jsonResponse(accepted) }) })
+    .listVersions({ projectId: 'project-exact' });
+  assert.equal(listed.length, 5000);
+  assert.equal(listed[4999].versionId, 'history-4999');
+
+  const history = Array.from({ length: 5001 }, (_, index) => version({ id: `history-${index}`, changelog: undefined }));
   const http = makeHttp({ '/project/project-exact/version': jsonResponse(history) });
   const provider = new ModrinthModpackProvider({ http });
-  await assert.rejects(provider.listVersions({ projectId: 'project-exact' }), { code: 'INVALID_REQUEST' });
+  await assert.rejects(provider.listVersions({ projectId: 'project-exact' }), { code: 'ARCHIVE_LIMIT_EXCEEDED', message: HISTORY_TOO_LARGE_MESSAGE });
   assert.deepEqual(http.requestedPaths, ['/project/project-exact/version']);
 });
 
@@ -346,7 +499,7 @@ test('changelog-free history normalizes absence and null while exact getVersion 
     fileName: 'server.mrpack', primary: true, size: '1234', fileType: 'required-resource-pack'
   }]);
   assert.deepEqual(http.calls, [
-    { path: '/project/project-exact/version', options: { query: { include_changelog: 'false' } } },
+    { path: '/project/project-exact/version', options: { query: { include_changelog: 'false' }, maxResponseBytes: HISTORY_LIMIT_BYTES } },
     { path: '/version/version-exact', options: {} }
   ]);
 });
