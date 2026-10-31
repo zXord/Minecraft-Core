@@ -16,6 +16,7 @@ Servers and clients without modpack data, which is everything a 26.6.1 user has,
 
 - Restore backup, Delete world, Delete instance, Version update or loader install and Repair still need the server stopped, as in 26.6.1.
 - Every other server action works while the server runs again: players, bans, settings and auto-start, the management server and invites, server.properties, backup rename, delete, automation and retention, mods and mod watches, renaming, and adding or reordering instances.
+- Saving Dashboard settings while the server or its management server runs (both **Auto-start** boxes, the other server's port) now works. 26.6.1 refused every such save because the server's own running port counted as "already occupied". A port you change is still checked as before.
 - On a modpack-managed server, a full backup restore that would replace its modpack state is refused, with a pointer to **Modpack > Rollback** or **Detach**. World-only restores still work. Other servers restore exactly as before.
 - On a modpack-managed server, the management server and its invite settings change only while the server is stopped.
 
@@ -43,6 +44,9 @@ When AppData is redirected to a network share, Minecraft Core opens with a banne
 - Port conflicts between servers are checked as in 26.6.1.
 - A friend's **Required Mods** list shows its mods again. 26.6.1 showed only the count ("2 mods") for lists of 80 mods or fewer.
 - If the loader install (Fabric, Forge, NeoForge or Quilt) fails during server setup or a version update, Minecraft Core now stops and shows the reason next to the button, instead of finishing as if it had worked.
+- Restoring a world backup after the world was deleted no longer says the previous state was saved to a backup that was never made.
+- After a server stops, the Dashboard no longer jumps back to **Running** (with Start greyed out) for a while. A usage reading that finished after the server exited caused it, in 26.6.1 too.
+- A server folder whose path has characters outside the Windows code page, for example a name copied from a Mac (NFD), cannot start: Java itself cannot run from such a path. This is the same in 26.6.1. Rename or move the folder.
 
 ## Going back to 26.6.1 after using modpacks
 

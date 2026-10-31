@@ -85,6 +85,11 @@ Upgrade, pre-fix build opening that 26.6.1 owner data:
 - A registered server whose folder is missing counts as using the default ports 25565/8080 in the cross-instance port check, so it can block auto-start of a default-port server, as in 26.6.1.
 - Quitting with servers running stops them with a hard kill, as 26.6.1 did (`taskkill /F`).
 - Modrinth requests carry no User-Agent. Modrinth answers today, but asks clients to identify themselves.
+- A server whose folder path has characters outside the Windows ANSI code page (for example an NFD name copied from a Mac) cannot start: the bundled Java fails with "could not find java.dll". Start fails after about 15 s ("spawnSync … ETIMEDOUT", the Java check blocks the main process for its 10 s timeout) and the post-download check leaves an orphaned "Java Virtual Machine Launcher" error box. Same Java check code as 26.6.1.
+- The auto-restart crash counter is one counter for all servers, so another server's Settings can show "crashed N time(s)"; same in 26.6.1.
+- A damaged `.minecraft-core.json` reads as default ports (25565/8080) in the cross-instance port check, like a missing folder; same rule as 26.6.1.
+- A Dashboard settings save while the server runs is still refused when the running process holds a port that differs from the saved one (a server or management server started on an unsaved value), or when the folder has no `.minecraft-core.json`. Both need an unusual sequence; 26.6.1 refused every save while running.
+- Each new server copy's Java triggers a Windows Defender Firewall "allow access" prompt on first listen, as in 26.6.1; local play works without answering it.
 
 ### Fixed on 31 October (late fix round)
 
@@ -95,6 +100,9 @@ Upgrade, pre-fix build opening that 26.6.1 owner data:
 - Modrinth browsing failed for everyone while one search result had more than 32 gallery images; display galleries now keep their first 32 (search) or 128 (project) images.
 - Popular packs whose version history is larger than 2 MiB (Prominence II, Re-Console, Fabulously Optimized) or longer than 1,000 versions (Optimizationn) could not be opened. The history request alone may now be up to 16 MiB and 5,000 versions; a longer history (OneClient, 26 MiB) shows "This modpack has too many versions to list here" with a pointer to Local archive.
 - Minecraft version lists in Modrinth metadata may hold up to 2,048 entries (was 256), so one long list can no longer fail every search page.
+- Dashboard settings saves (both auto-start boxes, RAM, the management port) while the server or its management server runs were refused because the server's own running port counted as occupied, also in 26.6.1. Only ports the save changes are checked now (`a76ef04`).
+- Restoring a world backup after Delete World named a "previous state" backup that was never created (`86e019c`, also 26.6.1).
+- After Stop, a usage sample that finished after the server exited flipped the Dashboard back to Running with Start greyed for up to a couple of minutes (`ed904e1`, same race in 26.6.1).
 
 ## Scope update — 13 October 11:58
 
