@@ -347,6 +347,13 @@ function sendMetricsUpdate(metrics, selector = {}) {
   });
 }
 
+// A usage read can take seconds on Windows. One that finishes after its process
+// exited must not be sent: the app would treat it as activity and show a
+// stopped server as Running again.
+function isMetricsProcessCurrent(state, child) {
+  return state.process === child && child.exitCode === null && child.signalCode === null;
+}
+
 async function updateMetrics(state) {
   const currentProcess = state.process;
   if (!currentProcess || !currentProcess.pid) {
@@ -354,8 +361,14 @@ async function updateMetrics(state) {
     return;
   }
 
+  let stats;
   try {
-    const stats = await pidusage(currentProcess.pid);
+    stats = await pidusage(currentProcess.pid);
+  } catch {
+    stats = null;
+  }
+  if (!isMetricsProcessCurrent(state, currentProcess)) return;
+  if (stats) {
     sendMetricsUpdate({
       cpuPct: Number(stats.cpu?.toFixed?.(1) || stats.cpu || 0),
       memUsedMB: Number(((stats.memory || 0) / 1024 / 1024).toFixed(1)),
@@ -365,7 +378,7 @@ async function updateMetrics(state) {
       players: state.playersInfo.count,
       names: [...state.playersInfo.names]
     }, { instanceId: state.instanceId });
-  } catch {
+  } else {
     sendMetricsUpdate({
       cpuPct: 0,
       memUsedMB: 0,

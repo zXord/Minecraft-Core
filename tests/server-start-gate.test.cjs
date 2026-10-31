@@ -219,7 +219,7 @@ async function withServerManager(options, work) {
       };
     }
     if (request === 'pidusage') {
-      return async () => ({ cpu: 0, memory: 0 });
+      return options.pidusage || (async () => ({ cpu: 0, memory: 0 }));
     }
     if (request.endsWith('server-process-runner.cjs') && options.processHandle) {
       return {
@@ -1745,6 +1745,60 @@ test('a post-running child error keeps the run block until confirmed process clo
       },
       async () => {}
     );
+  });
+});
+
+for (const outcome of ['returns usage', 'fails']) {
+  test(`a process usage read that ${outcome} after the server stopped sends no metrics`, async () => {
+    const reads = [];
+    const pidusage = () => new Promise((resolve, reject) => reads.push({ resolve, reject }));
+    await withServerManager({ pidusage }, async ({ children, sentMessages, serverManager }) => {
+      const started = await serverManager.startMinecraftServer({
+        instanceId: INSTANCE_ID,
+        targetPath: SERVER_PATH,
+        port: 25565,
+        maxRam: 4
+      });
+      assert.equal(started.success, true, started.error);
+      assert.equal(reads.length, 1, 'metrics reporting reads the process once at start');
+
+      // The read is still running when the server exits and its close is confirmed.
+      const child = children.at(-1);
+      child.exit(0, null);
+      child.close(0, null);
+      await flush();
+      await flush();
+      assert.equal(sentMessages.filter(message => message.channel === 'server-status').at(-1).payload.status, 'stopped');
+      const afterStop = sentMessages.length;
+
+      // A late sample would make the app show Running for a stopped server.
+      if (outcome === 'fails') reads[0].reject(new Error('No matching pid found'));
+      else reads[0].resolve({ cpu: 12.5, memory: 512 * 1024 * 1024 });
+      await flush();
+      await flush();
+      assert.deepEqual(sentMessages.slice(afterStop).filter(message => message.channel === 'metrics-update'), []);
+    });
+  });
+}
+
+test('a process usage read that finishes while the server runs still reports metrics', async () => {
+  const reads = [];
+  const pidusage = () => new Promise((resolve, reject) => reads.push({ resolve, reject }));
+  await withServerManager({ pidusage }, async ({ sentMessages, serverManager }) => {
+    const started = await serverManager.startMinecraftServer({
+      instanceId: INSTANCE_ID,
+      targetPath: SERVER_PATH,
+      port: 25565,
+      maxRam: 4
+    });
+    assert.equal(started.success, true, started.error);
+    reads[0].resolve({ cpu: 12.5, memory: 512 * 1024 * 1024 });
+    await flush();
+    await flush();
+    const metrics = sentMessages.filter(message => message.channel === 'metrics-update');
+    assert.equal(metrics.length, 1);
+    assert.equal(metrics[0].payload.cpuPct, 12.5);
+    assert.equal(metrics[0].payload.memUsedMB, 512);
   });
 });
 
