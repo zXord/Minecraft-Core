@@ -993,7 +993,9 @@ async function restoreBackup({ serverPath, name, serverStatus }) {
     // For full backups, just extract and overwrite everything
     zip.extractAllTo(serverPath, true);
     keepPreRestoreContentRevision(serverPath, preRestoreRevision);
-    return { success: true, message: 'Backup restored successfully.', preRestoreBackup: preRestoreBackupName };
+    // With no world (or nothing at all) to save, no previous-state backup was made.
+    const preRestoreBackup = itemsToBackup.length > 0 ? preRestoreBackupName : null;
+    return { success: true, message: 'Backup restored successfully.', preRestoreBackup };
   } catch (err) {
     return { success: false, error: err.message };
   }

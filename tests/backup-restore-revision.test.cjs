@@ -175,6 +175,53 @@ test('a world-only restore never writes the server config', async (t) => {
   assert.equal(readContentRevision(serverPath), 3);
 });
 
+function preRestoreFiles(serverPath) {
+  return fs.readdirSync(path.join(serverPath, 'backups')).filter(name => name.startsWith('pre-restore-')).sort();
+}
+
+test('a world restore after the world was deleted names no previous-state backup', async (t) => {
+  const serverPath = serverAtRevision(t, 3);
+  fs.rmSync(path.join(serverPath, 'world'), { recursive: true, force: true });
+  writeBackup(serverPath, 'backup-world-2026-06-04_10-00-00.zip', 'world', {
+    'world/level.dat': 'backed-up-world'
+  });
+  const backupService = loadBackupService(t);
+  configureServerConfigDurableFsFactory(strictFactory);
+
+  const result = await backupService.restoreBackup({
+    serverPath,
+    name: 'backup-world-2026-06-04_10-00-00.zip',
+    serverStatus: 'Stopped'
+  });
+
+  assert.equal(result.success, true, result.error);
+  assert.equal(fs.readFileSync(path.join(serverPath, 'world', 'level.dat'), 'utf8'), 'backed-up-world');
+  // Nothing was there to save, so the message must not point at a backup.
+  assert.deepEqual(preRestoreFiles(serverPath), []);
+  assert.equal(result.preRestoreBackup, null);
+});
+
+test('a world restore over a live world names the previous-state backup it made', async (t) => {
+  const serverPath = serverAtRevision(t, 3);
+  writeBackup(serverPath, 'backup-world-2026-06-05_10-00-00.zip', 'world', {
+    'world/level.dat': 'backed-up-world'
+  });
+  const backupService = loadBackupService(t);
+  configureServerConfigDurableFsFactory(strictFactory);
+
+  const result = await backupService.restoreBackup({
+    serverPath,
+    name: 'backup-world-2026-06-05_10-00-00.zip',
+    serverStatus: 'Stopped'
+  });
+
+  assert.equal(result.success, true, result.error);
+  assert.match(result.preRestoreBackup, /^pre-restore-world-\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.zip$/);
+  assert.deepEqual(preRestoreFiles(serverPath), [result.preRestoreBackup.replace(/\.zip$/, '.json'), result.preRestoreBackup]);
+  const saved = new AdmZip(path.join(serverPath, 'backups', result.preRestoreBackup));
+  assert.equal(saved.readAsText('world/level.dat'), 'live-world');
+});
+
 test('a coordinated world-only restore only gains the coordinator bump', async (t) => {
   const serverPath = serverAtRevision(t, 3);
   writeBackup(serverPath, 'backup-world-2026-06-03_10-00-00.zip', 'world', {
