@@ -58,9 +58,13 @@ function createClientConnectionCore({ store, readClientConfig, getPinnedHttpsAge
   // A folder registered twice (a v26.6.1 duplicate) resolves like v26.6.1 launched it:
   // the same id under several spellings of one folder is one client, and several ids
   // for one folder resolve to the lowest id in code-point order, never by array order.
-  // One id registered for different folders stays ambiguous and is refused.
-  const resolveClient = async clientId => {
-    const matches = getInstances().filter(i => i?.id === clientId && i.type === 'client' && typeof i.path === 'string' && path.isAbsolute(i.path));
+  // One id registered for different folders (a copied client folder) stays ambiguous and
+  // is refused, unless the caller names the folder: a registry edit (rename, delete)
+  // resolves that folder's registration, as v26.6.1 edited each copy by its entry.
+  const resolveClient = async (clientId, folder) => {
+    if (folder !== undefined && (typeof folder !== 'string' || !path.isAbsolute(folder))) throw unregistered();
+    const matches = getInstances().filter(i => i?.id === clientId && i.type === 'client' && typeof i.path === 'string' && path.isAbsolute(i.path) &&
+      (folder === undefined || key(i.path) === key(folder)));
     if (matches.length === 0 || matches.some(match => key(match.path) !== key(matches[0].path))) throw unregistered();
     const clientPath = matches.map(match => path.resolve(match.path)).sort(compareCodePoints)[0];
     return Object.freeze({ clientId, clientPath });

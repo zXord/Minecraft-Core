@@ -9,7 +9,7 @@ const test = require('node:test');
 // One environment per process: the settings handlers bind the app store when
 // they load. Only process-wide boundaries (store, logger, secrets, runtime
 // stop) are stubbed; the policy, coordinator, config writer, settings handlers,
-// client-pack integration and client process guard are real.
+// client resolution, client-pack integration and client process guard are real.
 const store = new Map();
 const appStore = {
   get: key => (store.has(key) ? structuredClone(store.get(key)) : undefined),
@@ -47,6 +47,7 @@ const configManager = require('../electron/utils/config-manager.cjs');
 const { ServerMutationCoordinator } = require('../electron/services/server-mutation-coordinator.cjs');
 const { canonicalCoordinatorSelector } = require('../electron/services/coordinator-identity.cjs');
 const { createServerMutationPolicy } = require('../electron/services/server-mutation-policy.cjs');
+const { createClientConnectionCore } = require('../electron/bootstrap/create-client-connection-core.cjs');
 const { createClientPackIntegration } = require('../electron/services/client-modpacks/client-pack-integration.cjs');
 const { ClientProcessGuard } = require('../electron/services/client-modpacks/client-process-guard.cjs');
 const { createSettingsHandlers } = require('../electron/ipc/settings-handlers.cjs');
@@ -108,23 +109,31 @@ function fixture(t, { recoveryBlocks = [] } = {}) {
 
   const guardRoot = path.join(root, 'client-processes');
   fs.mkdirSync(guardRoot);
+  // A test may make each client hold wait, to act while an edit takes its holds.
+  let endpointGate = null;
   const guard = new ClientProcessGuard({
     root: guardRoot,
     durableFs: jsDurableFs([guardRoot]),
     inspectProcesses: async () => ({ complete: true, processes: [] }),
-    acquireEndpointLease: async () => ({ async close() {}, assertHeld() {} })
+    acquireEndpointLease: async () => {
+      await endpointGate?.();
+      return { async close() {}, assertHeld() {} };
+    }
   });
-  const resolveClient = async clientId => {
-    const matches = registered().filter(instance => instance?.id === clientId && instance.type === 'client' &&
-      typeof instance.path === 'string' && path.isAbsolute(instance.path));
-    if (matches.length !== 1) throw new ModpackError('INVALID_REQUEST', 'Choose a registered client instance');
-    return Object.freeze({ clientId, clientPath: path.resolve(matches[0].path) });
-  };
+  const core = createClientConnectionCore({ store: appStore, clock: { now: () => Date.now() }, randomUUID: crypto.randomUUID });
+  t.after(() => core.dispose());
+  // Folders whose client-pack transaction is unsettled (an interrupted publication).
+  const unsettled = new Set();
   const integration = createClientPackIntegration({
-    resolveClient,
+    resolveClient: core.resolveClient,
     resolveClientByPath: async () => { throw new Error('the registry path never resolves launches'); },
     processGuard: guard,
-    transaction: { status: async () => null, assertNoUnsettledAtPath: async () => {} },
+    transaction: {
+      status: async () => null,
+      async assertNoUnsettledAtPath(clientPath) {
+        if (unsettled.has(path.resolve(clientPath))) throw new ModpackError('RECOVERY_REQUIRED', 'Unsettled client pack transaction');
+      }
+    },
     stateStore: { read: async () => null },
     // Production-shaped, but every network path throws: registry edits never read the host.
     managementClient: { async readRequirement() { throw new Error('registry edits must not contact the host'); } },
@@ -180,7 +189,29 @@ function fixture(t, { recoveryBlocks = [] } = {}) {
     return { entered: entered.promise, release: () => { gate.resolve(); return run; } };
   }
 
-  return { root, coordinator, guard, integration, policy, wrap, server, client, start, holdLifecycle };
+  // A client folder the user copied: its client-config.json, so its client id, comes along.
+  function copyClient(original, name) {
+    const folder = path.join(root, name);
+    fs.cpSync(original.path, folder, { recursive: true });
+    return { ...original, path: folder };
+  }
+
+  return {
+    root, coordinator, guard, integration, policy, wrap, server, client, copyClient, start, holdLifecycle, unsettled,
+    gateClientHolds: gate => { endpointGate = gate; }
+  };
+}
+
+function clientName(folder) {
+  return JSON.parse(fs.readFileSync(path.join(folder, 'client-config.json'), 'utf8')).clientName;
+}
+
+// A keep-files client delete that waits for a server sharing one of its folders names that server.
+function runningBeside(serverName) {
+  const message = serverName === null
+    ? 'This client\'s folder is also used by a running server. Stop it, then remove the client again; your files are kept.'
+    : `This client's folder is also used by the running server '${serverName}'. Stop it, then remove the client again; your files are kept.`;
+  return error => error?.code === 'SERVER_RUNNING' && error.message === message;
 }
 
 test('a client is renamed in the store and in its client-config.json', async t => {
@@ -207,6 +238,7 @@ test('a client is deleted keeping its files and deleting its files', async t => 
   const kept = await f.wrap('delete-instance')(EVENT, { id: keep.id, deleteFiles: false });
   assert.equal(kept.success, true, kept.error);
   assert.equal(fs.existsSync(keep.path), true);
+  assert.equal(f.coordinator.pathBinding(keep.path), null, 'the removed registration is forgotten');
 
   const removed = await f.wrap('delete-instance')(EVENT, { id: remove.id, deleteFiles: true });
   assert.equal(removed.success, true, removed.error);
@@ -271,6 +303,276 @@ test('a client delete with files over a running nested server needs that server 
   }
   assert.equal(fs.existsSync(nested.path), true);
   assert.deepEqual(registered().map(instance => instance.id), [nested.id]);
+});
+
+test('a client in a running server\'s own folder is deleted keeping its files; with its files once the server stops', async t => {
+  const f = fixture(t);
+  const alpha = f.server('Alpha');
+  const me = f.client('Me', { folder: alpha.path });
+  appStore.set('instances', [alpha, me]);
+  const run = await f.start(alpha.id, alpha.path);
+
+  try {
+    // Owner decision Q7: the files are the running server's folder.
+    await assert.rejects(f.wrap('delete-instance')(EVENT, { id: me.id, deleteFiles: true }), code('SERVER_RUNNING'));
+    assert.deepEqual(registered().map(instance => instance.id), [alpha.id, me.id]);
+    const kept = await f.wrap('delete-instance')(EVENT, { id: me.id, deleteFiles: false });
+    assert.equal(kept.success, true, kept.error);
+    const updated = await f.wrap('update-settings')(EVENT, { serverPath: alpha.path, instanceId: alpha.id, maxRam: 5 });
+    assert.equal(updated.success, true, updated.error);
+  } finally {
+    run.release();
+  }
+  assert.deepEqual(registered().map(instance => instance.id), [alpha.id]);
+  assert.equal(fs.existsSync(path.join(alpha.path, 'client-config.json')), true, 'keeping the files deletes nothing');
+  assert.deepEqual(f.coordinator.pathBinding(alpha.path), { instanceId: alpha.id });
+
+  appStore.set('instances', [alpha, me]);
+  const removed = await f.wrap('delete-instance')(EVENT, { id: me.id, deleteFiles: true });
+  assert.equal(removed.success, true, removed.error);
+  assert.equal(fs.existsSync(alpha.path), false, 'with the server stopped the folder is deleted as in v26.6.1');
+});
+
+test('a client whose id is bound to the folder of a server added later still needs that server stopped to be deleted', async t => {
+  const f = fixture(t);
+  const me = f.client('Me');
+  appStore.set('instances', [me]);
+  // The client is used first, so its id is the folder's coordinator identity.
+  assert.deepEqual(await f.policy.wrapHandler('minecraft-launch', async () => ({ success: true }))(EVENT, { clientPath: me.path }),
+    { success: true });
+  const alpha = f.server('Alpha', { folder: me.path });
+  assert.equal((await f.wrap('save-instances')(EVENT, [me, alpha])).success, true);
+  assert.deepEqual(f.coordinator.pathBinding(me.path), { instanceId: me.id });
+  const run = await f.start(alpha.id, alpha.path);
+
+  try {
+    // Its binding can only be released while the folder is idle; the running
+    // server's own writers would otherwise be refused until it stopped.
+    await assert.rejects(f.wrap('delete-instance')(EVENT, { id: me.id, deleteFiles: false }), runningBeside('Alpha'));
+    // A server name that is no safe message text is left out.
+    appStore.set('instances', registered().map(instance => (instance.id === alpha.id ? { ...instance, name: 'Alpha/2' } : instance)));
+    await assert.rejects(f.wrap('delete-instance')(EVENT, { id: me.id, deleteFiles: false }), runningBeside(null));
+    const updated = await f.wrap('update-settings')(EVENT, { serverPath: alpha.path, instanceId: alpha.id, maxRam: 5 });
+    assert.equal(updated.success, true, updated.error);
+  } finally {
+    run.release();
+  }
+  const kept = await f.wrap('delete-instance')(EVENT, { id: me.id, deleteFiles: false });
+  assert.equal(kept.success, true, kept.error);
+  assert.equal(f.coordinator.pathBinding(alpha.path), null);
+  const updated = await f.wrap('update-settings')(EVENT, { serverPath: alpha.path, instanceId: alpha.id, maxRam: 6 });
+  assert.equal(updated.success, true, updated.error);
+  (await f.start(alpha.id, alpha.path)).release();
+  assert.deepEqual(f.coordinator.pathBinding(alpha.path), { instanceId: alpha.id });
+});
+
+test('two folders registered under one client id (a copied client) are renamed and deleted as in v26.6.1', async t => {
+  const f = fixture(t);
+  const original = f.client('Friend', { id: 'client-copied' });
+  const copy = f.copyClient(original, 'Friend - Copy');
+  appStore.set('instances', [original, copy]);
+  // Launching the copy binds the shared id to the copy's folder.
+  assert.deepEqual(await f.policy.wrapHandler('minecraft-launch', async () => ({ success: true }))(EVENT, { clientPath: copy.path }),
+    { success: true });
+  assert.deepEqual(f.coordinator.pathBinding(copy.path), { instanceId: copy.id });
+
+  // v26.6.1 renames the first registration with the id, in its own folder.
+  const renamed = await f.wrap('rename-instance')(EVENT, { id: copy.id, newName: 'Original' });
+  assert.equal(renamed.success, true, renamed.error);
+  assert.deepEqual(registered().map(instance => [instance.path, instance.name]), [[original.path, 'Original'], [copy.path, 'Friend']]);
+  assert.deepEqual([clientName(original.path), clientName(copy.path)], ['Original', 'Friend']);
+  // Moved above the original in the sidebar, the copy is the one renamed.
+  appStore.set('instances', [...registered()].reverse());
+  const renamedCopy = await f.wrap('rename-instance')(EVENT, { id: copy.id, newName: 'Copy' });
+  assert.equal(renamedCopy.success, true, renamedCopy.error);
+  assert.deepEqual(registered().map(instance => [instance.path, instance.name]), [[copy.path, 'Copy'], [original.path, 'Original']]);
+  assert.deepEqual([clientName(original.path), clientName(copy.path)], ['Original', 'Copy']);
+
+  // A delete removes every registration with the id; with files, only the first one's folder.
+  const deleted = await f.wrap('delete-instance')(EVENT, { id: copy.id, deleteFiles: true });
+  assert.equal(deleted.success, true, deleted.error);
+  assert.deepEqual(registered(), []);
+  assert.equal(fs.existsSync(copy.path), false);
+  assert.equal(clientName(original.path), 'Original');
+  assert.equal(f.coordinator.pathBinding(copy.path), null, 'the removed id is forgotten');
+
+  const second = f.copyClient(original, 'Friend - Second');
+  appStore.set('instances', [original, second]);
+  assert.deepEqual(await f.policy.wrapHandler('minecraft-launch', async () => ({ success: true }))(EVENT, { clientPath: second.path }),
+    { success: true });
+  const kept = await f.wrap('delete-instance')(EVENT, { id: original.id, deleteFiles: false });
+  assert.equal(kept.success, true, kept.error);
+  assert.deepEqual(registered(), []);
+  assert.deepEqual([original.path, second.path].map(folder => fs.existsSync(path.join(folder, 'client-config.json'))), [true, true]);
+  assert.equal(f.coordinator.pathBinding(second.path), null, 'the other copy\'s binding is forgotten too');
+});
+
+test('a copied client delete waits for a server running in a later copy\'s folder bound to that id, then retires it', async t => {
+  const f = fixture(t);
+  const original = f.client('Friend', { id: 'client-copied' });
+  const copy = f.copyClient(original, 'Friend - Copy');
+  appStore.set('instances', [original, copy]);
+  // Launching the copy binds the shared id to its folder; a server is then created there.
+  assert.deepEqual(await f.policy.wrapHandler('minecraft-launch', async () => ({ success: true }))(EVENT, { clientPath: copy.path }),
+    { success: true });
+  const alpha = f.server('Alpha', { folder: copy.path });
+  assert.equal((await f.wrap('save-instances')(EVENT, [original, copy, alpha])).success, true);
+  assert.deepEqual(f.coordinator.pathBinding(copy.path), { instanceId: copy.id });
+  const run = await f.start(alpha.id, alpha.path);
+
+  try {
+    // The delete removes the copy's registration too, whose binding the running server holds.
+    await assert.rejects(f.wrap('delete-instance')(EVENT, { id: original.id, deleteFiles: false }), runningBeside('Alpha'));
+    await assert.rejects(f.wrap('delete-instance')(EVENT, { id: original.id, deleteFiles: true }), code('SERVER_RUNNING'));
+    assert.deepEqual(registered().map(instance => instance.path), [original.path, copy.path, alpha.path]);
+    assert.equal(fs.existsSync(path.join(original.path, 'client-config.json')), true);
+    const updated = await f.wrap('update-settings')(EVENT, { serverPath: alpha.path, instanceId: alpha.id, maxRam: 5 });
+    assert.equal(updated.success, true, updated.error);
+  } finally {
+    run.release();
+  }
+
+  // Once the server is stopped the delete goes through and the folder becomes the server's.
+  const kept = await f.wrap('delete-instance')(EVENT, { id: original.id, deleteFiles: false });
+  assert.equal(kept.success, true, kept.error);
+  assert.deepEqual(registered().map(instance => instance.id), [alpha.id]);
+  assert.equal(f.coordinator.pathBinding(copy.path), null);
+  const updated = await f.wrap('update-settings')(EVENT, { serverPath: alpha.path, instanceId: alpha.id, maxRam: 6 });
+  assert.equal(updated.success, true, updated.error);
+  assert.deepEqual(f.coordinator.pathBinding(alpha.path), { instanceId: alpha.id });
+});
+
+test('a copied client delete held back by a server names the running server, wherever it runs', async t => {
+  const f = fixture(t);
+  const original = f.client('Friend', { id: 'client-copied' });
+  const copy = f.copyClient(original, 'Friend - Copy');
+  const alpha = f.server('Alpha', { folder: original.path });
+  appStore.set('instances', [original, copy, alpha]);
+  assert.deepEqual(await f.policy.wrapHandler('minecraft-launch', async () => ({ success: true }))(EVENT, { clientPath: copy.path }),
+    { success: true });
+  const beta = f.server('Beta', { folder: copy.path });
+  assert.equal((await f.wrap('save-instances')(EVENT, [original, copy, alpha, beta])).success, true);
+
+  // The copy's folder is bound to the client's id, so the delete holds it with the
+  // original's folder and waits for every server running in either.
+  for (const [running, name] of [[alpha, 'Alpha'], [beta, 'Beta']]) {
+    const run = await f.start(running.id, running.path);
+    try {
+      await assert.rejects(f.wrap('delete-instance')(EVENT, { id: original.id, deleteFiles: false }), runningBeside(name), name);
+    } finally {
+      run.release();
+    }
+  }
+  const kept = await f.wrap('delete-instance')(EVENT, { id: original.id, deleteFiles: false });
+  assert.equal(kept.success, true, kept.error);
+  assert.deepEqual(registered().map(instance => instance.id), [alpha.id, beta.id]);
+});
+
+test('a client registration that names no absolute folder is skipped, and refused when the edit acts on it', async t => {
+  const f = fixture(t);
+  const me = f.client('Me');
+  const stray = { ...me, path: 'policy-registry-stray-client' };
+  // Listed after a registration with a folder, the stray entry is only removed with it, as in v26.6.1.
+  appStore.set('instances', [me, stray]);
+  const renamed = await f.wrap('rename-instance')(EVENT, { id: me.id, newName: 'Renamed' });
+  assert.equal(renamed.success, true, renamed.error);
+  assert.equal(clientName(me.path), 'Renamed');
+  const kept = await f.wrap('delete-instance')(EVENT, { id: me.id, deleteFiles: false });
+  assert.equal(kept.success, true, kept.error);
+  assert.deepEqual(registered(), []);
+
+  // Listed first, it is the registration the handler would act on: refused, and nothing is touched.
+  appStore.set('instances', [stray, me]);
+  for (const edit of [
+    () => f.wrap('rename-instance')(EVENT, { id: me.id, newName: 'Stray' }),
+    () => f.wrap('delete-instance')(EVENT, { id: me.id, deleteFiles: true })
+  ]) {
+    await assert.rejects(edit(), code('INVALID_REQUEST'));
+  }
+  assert.deepEqual(registered().map(instance => instance.path), [stray.path, me.path]);
+  assert.equal(clientName(me.path), 'Renamed');
+});
+
+test('copies whose folder names differ only in Unicode form are each held when the client is deleted', async t => {
+  const f = fixture(t);
+  const original = f.client('Caf\u00e9', { id: 'client-copied' });
+  if (fs.existsSync(path.join(f.root, 'Cafe\u0301'))) {
+    t.skip('this file system treats both Unicode forms as one name');
+    return;
+  }
+  const copy = f.copyClient(original, 'Cafe\u0301');
+  appStore.set('instances', [original, copy]);
+  let holds = 0;
+  f.gateClientHolds(async () => { holds += 1; });
+
+  const kept = await f.wrap('delete-instance')(EVENT, { id: original.id, deleteFiles: false });
+  assert.equal(kept.success, true, kept.error);
+  assert.equal(holds, 2, 'every folder client resolution tells apart is held');
+  assert.deepEqual(registered(), []);
+});
+
+test('a copied client keeps its registrations while either copy has an unsettled pack transaction', async t => {
+  const f = fixture(t);
+  const original = f.client('Friend', { id: 'client-copied' });
+  const copy = f.copyClient(original, 'Friend - Copy');
+  appStore.set('instances', [original, copy]);
+  f.unsettled.add(copy.path);
+
+  // A delete removes the copy's registration too, which its recovery needs.
+  for (const deleteFiles of [false, true]) {
+    await assert.rejects(f.wrap('delete-instance')(EVENT, { id: original.id, deleteFiles }), code('RECOVERY_REQUIRED'));
+  }
+  assert.deepEqual(registered().map(instance => instance.path), [original.path, copy.path]);
+  assert.deepEqual([original.path, copy.path].map(folder => fs.existsSync(path.join(folder, 'client-config.json'))), [true, true]);
+  // A rename changes only the first registration; the copy itself stays refused.
+  assert.equal((await f.wrap('rename-instance')(EVENT, { id: original.id, newName: 'Renamed' })).success, true);
+  appStore.set('instances', [...registered()].reverse());
+  await assert.rejects(f.wrap('rename-instance')(EVENT, { id: copy.id, newName: 'Refused' }), code('RECOVERY_REQUIRED'));
+  assert.deepEqual([clientName(original.path), clientName(copy.path)], ['Renamed', 'Friend']);
+});
+
+test('a copied client delete never removes a registration added while it took its holds', async t => {
+  const f = fixture(t);
+  const original = f.client('Friend', { id: 'client-copied' });
+  const copy = f.copyClient(original, 'Friend - Copy');
+  appStore.set('instances', [original, copy]);
+  const entered = deferred();
+  const gate = deferred();
+  f.gateClientHolds(async () => {
+    entered.resolve();
+    await gate.promise;
+  });
+
+  const deleting = f.wrap('delete-instance')(EVENT, { id: original.id, deleteFiles: false });
+  await entered.promise;
+  const third = f.copyClient(original, 'Friend - Third');
+  appStore.set('instances', [...registered(), third]);
+  f.gateClientHolds(null);
+  gate.resolve();
+
+  await assert.rejects(deleting, code('OPERATION_IN_PROGRESS'));
+  assert.deepEqual(registered().map(instance => instance.path), [original.path, copy.path, third.path]);
+});
+
+test('a client folder registered twice renames and deletes each registration on its own (v26.6.1)', async t => {
+  const f = fixture(t);
+  const later = f.client('Twice', { id: 'client-b' });
+  const lowest = { ...later, id: 'client-a', clientId: 'client-a', name: 'client-a', clientName: 'client-a' };
+  appStore.set('instances', [later, lowest]);
+
+  const renamed = await f.wrap('rename-instance')(EVENT, { id: later.id, newName: 'Later' });
+  assert.equal(renamed.success, true, renamed.error);
+  assert.deepEqual(registered().map(instance => [instance.id, instance.name]), [[later.id, 'Later'], [lowest.id, 'client-a']]);
+  const kept = await f.wrap('delete-instance')(EVENT, { id: later.id, deleteFiles: false });
+  assert.equal(kept.success, true, kept.error);
+  assert.deepEqual(registered().map(instance => instance.id), [lowest.id]);
+  assert.equal(fs.existsSync(path.join(later.path, 'client-config.json')), true);
+
+  assert.equal((await f.wrap('rename-instance')(EVENT, { id: lowest.id, newName: 'Lowest' })).success, true);
+  const removed = await f.wrap('delete-instance')(EVENT, { id: lowest.id, deleteFiles: true });
+  assert.equal(removed.success, true, removed.error);
+  assert.deepEqual(registered(), []);
+  assert.equal(fs.existsSync(later.path), false);
 });
 
 test('a client rename or delete during an exclusive client-pack transaction is refused', async t => {

@@ -245,6 +245,8 @@ function createDegradedModpackFallbacks({
   }
 
   const byId = request => () => clientConnectionCore.resolveClient(request?.clientId);
+  // A registry edit names the registration it changes (a copied client folder shares its id).
+  const byRegistration = request => () => clientConnectionCore.resolveClient(request?.clientId, request?.clientPath);
   const clientPackIntegration = Object.freeze({
     async assertServerDestination(serverPath) {
       try {
@@ -256,7 +258,7 @@ function createDegradedModpackFallbacks({
     runLegacyMutation: (request, work) => clientOperation(byId(request), run => integration.runLegacyMutation(request, run), work),
     runPersonalMutation: (request, work) => clientOperation(byId(request), run => integration.runPersonalMutation(request, run), work),
     runLocalMutation: (request, work) => clientOperation(byId(request), run => integration.runLocalMutation(request, run), work),
-    runRegistryMutation: (request, work) => clientOperation(byId(request), run => integration.runRegistryMutation(request, run), work),
+    runRegistryMutation: (request, work) => clientOperation(byRegistration(request), run => integration.runRegistryMutation(request, run), work),
     beginManagedLaunch: (request, options) => clientOperation(
       () => clientConnectionCore.resolveClientByPath(request?.clientPath),
       () => integration.beginManagedLaunch(request, options))

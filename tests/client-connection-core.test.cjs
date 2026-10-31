@@ -135,6 +135,27 @@ test('one id registered for two different folders is still refused', async t => 
   assert.deepEqual(host.registrations, []);
 });
 
+test('a registry edit resolves the registration at the folder it names, even for an id registered for two folders', async t => {
+  const host = await startHost(t);
+  const original = path.join(root, 'Client');
+  const copy = path.join(root, 'Client copy');
+  const core = connectionCore(t, host, [client('copied-client', original), client('copied-client', copy)],
+    new Map([[original, 'remote-friend'], [copy, 'remote-friend']]));
+
+  assert.deepEqual(await core.resolveClient('copied-client', original), { clientId: 'copied-client', clientPath: original });
+  assert.deepEqual(await core.resolveClient('copied-client', `${copy}${path.sep}`), { clientId: 'copied-client', clientPath: copy });
+  for (const [name, attempt] of [
+    ['the id alone', () => core.resolveClient('copied-client')],
+    ['a folder the id is not registered for', () => core.resolveClient('copied-client', path.join(root, 'Elsewhere'))],
+    ['a relative folder', () => core.resolveClient('copied-client', 'Client')],
+    ['another id at that folder', () => core.resolveClient('other-client', original)],
+    ['a launch by folder', () => core.resolveClientByPath(original)]
+  ]) {
+    await assert.rejects(attempt(), { code: 'INVALID_REQUEST' }, name);
+  }
+  assert.deepEqual(host.registrations, []);
+});
+
 test('the shared session moves with the folder when its lowest id changes', async t => {
   const host = await startHost(t);
   const folder = path.join(root, 'Client');

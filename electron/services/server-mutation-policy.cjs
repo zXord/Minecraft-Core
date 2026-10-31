@@ -36,6 +36,7 @@ const MANAGED_MOD_EDIT_MESSAGE = 'Individual mod changes are disabled while this
 const UNCHECKED_MOD_EDIT_MESSAGE = "Mod changes are paused because this server's modpack ownership could not be checked. Open Modpack to review it, then retry.";
 const NESTED_MANAGED_CLIENT_MESSAGE = 'This server folder and a client folder are inside each other, and that client uses a matching modpack. Move the client or the server into its own separate folder.';
 const CLIENT_CONTAINS_SERVER_MESSAGE = 'This client folder contains a server; stop and remove that server first.';
+const CLIENT_BESIDE_RUNNING_SERVER_MESSAGE = "This client's folder is also used by a running server. Stop it, then remove the client again; your files are kept.";
 const DEFAULT_LANE_WAIT_TIMEOUT_MS = 60000;
 
 // A running server blocks only the writers the v26.6.1 UI already disabled while
@@ -268,6 +269,13 @@ function normalizePathKey(value) {
 function samePathKey(left, right) {
   const key = normalizePathKey(left);
   return key !== null && key === normalizePathKey(right);
+}
+
+// How client resolution (create-client-connection-core.cjs) tells registered
+// client folders apart: resolved, and case-insensitive on Windows.
+function clientFolderKey(value) {
+  const resolved = path.resolve(value);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 function compareCodePoints(left, right) {
@@ -719,6 +727,36 @@ function createServerMutationPolicy({
     })();
   }
 
+  // The coordinator binds an id to one folder, so a client id registered for
+  // several folders (a copied client folder) is no coordinator identity: an edit
+  // of one copy holds that folder alone, whichever copy the coordinator met first.
+  function clientRegistrySelector(client, sharedId) {
+    const selector = canonical({ instanceId: client.id, serverPath: client.path });
+    return sharedId && selector.instanceId === client.id
+      ? Object.freeze({ instanceId: null, serverPath: selector.serverPath })
+      : selector;
+  }
+
+  // A keep-files client delete that waits for a server sharing one of its folders
+  // (see runClientRegistration) names that server when its name is safe to show.
+  function clientBesideRunningServer(cause, pinned) {
+    const servers = registeredInstances(getInstances, ['server']);
+    const refusedKey = coordinatorInstanceKey(cause.details?.serverId);
+    const server = servers.find(candidate => refusedKey !== null && coordinatorInstanceKey(candidate.id) === refusedKey) ||
+      servers.find(candidate => pinned.some(registration => folderKey(registration.path) === folderKey(candidate.path)));
+    if (!server) return cause;
+    const name = typeof server.name === 'string' && server.name.trim() ? server.name.trim() : server.id;
+    const details = { serverId: server.id };
+    try {
+      return new ModpackError('SERVER_RUNNING',
+        `This client's folder is also used by the running server '${name}'. Stop it, then remove the client again; your files are kept.`,
+        { cause, details });
+    } catch {
+      // A name that is no safe message text (a path, a long name) is left out.
+      return new ModpackError('SERVER_RUNNING', CLIENT_BESIDE_RUNNING_SERVER_MESSAGE, { cause, details });
+    }
+  }
+
   // Client rename and delete are registry edits. They never contact the host and
   // tolerate a client whose folder is gone, as in v26.6.1, yet they never overlap
   // a client-pack transaction (the client-pack layer refuses that) or a server
@@ -726,16 +764,56 @@ function createServerMutationPolicy({
   async function runClientRegistration(channel, descriptor, handler, event, args, clientId) {
     const deleting = channel === 'delete-instance';
     const deleteFiles = deleting && Boolean(args[0]?.deleteFiles);
+    // Coordinator records and bindings compare by the coordinator's own keys;
+    // registrations are told apart as client resolution tells them apart.
+    const sameFolder = (left, right) => folderKey(left) === folderKey(right);
+    const boundToOwnId = registration => {
+      const key = coordinatorInstanceKey(registration.id);
+      return key !== null && coordinatorInstanceKey(coordinator.pathBinding?.(registration.path)?.instanceId) === key;
+    };
     const request = () => {
-      const client = registeredInstances(getInstances, ['client']).find(instance => instance.id === clientId) || null;
-      if (!client) return null;
-      const servers = deleteFiles
-        ? registeredInstances(getInstances, ['server']).filter(server => pathsOverlap(server.path, client.path))
+      // As in v26.6.1 the handler renames the first registration with the id and a
+      // delete removes every one; a copied client folder brings its id along. Only
+      // a registration with an absolute folder has a folder to hold, and the one
+      // the handler acts on must have one.
+      const matching = registeredInstances(getInstances, ['client']).filter(instance => instance.id === clientId);
+      const client = matching[0];
+      if (!client || !path.isAbsolute(client.path)) return null;
+      const registrations = [];
+      for (const registration of matching) {
+        if (path.isAbsolute(registration.path) &&
+            !registrations.some(other => clientFolderKey(other.path) === clientFolderKey(registration.path))) {
+          registrations.push(registration);
+        }
+      }
+      const sharedId = registrations.length > 1;
+      const registeredServers = registeredInstances(getInstances, ['server']);
+      const servers = deleteFiles ? registeredServers.filter(server => pathsOverlap(server.path, client.path)) : [];
+      // A delete releases a folder's coordinator binding to the client's id only
+      // while that folder is idle. Each removed registration whose folder a server
+      // shares and the coordinator binds to this id is held too, with that server
+      // stopped; otherwise the server's own writers would be refused afterwards.
+      const pinned = deleting
+        ? registrations.filter(registration => boundToOwnId(registration) &&
+          registeredServers.some(server => sameFolder(server.path, registration.path)))
         : [];
-      const selectors = [client, ...servers].map(instance => canonical({ instanceId: instance.id, serverPath: instance.path }));
-      return { client, servers, selectors };
+      const selectors = [
+        clientRegistrySelector(client, sharedId),
+        ...pinned.filter(registration => registration !== client).map(registration => clientRegistrySelector(registration, sharedId)),
+        ...servers.map(server => canonical({ instanceId: server.id, serverPath: server.path }))
+      ];
+      const edited = deleting ? registrations : [client];
+      const signature = JSON.stringify([
+        selectors.map(selector => [coordinatorInstanceKey(selector.instanceId), coordinatorPathKey(selector.serverPath)]),
+        edited.map(registration => folderKey(registration.path)),
+        pinned.map(registration => folderKey(registration.path))
+      ]);
+      return { client, edited, pinned, servers, selectors, signature };
     };
     const initial = request();
+    if (!initial) throw invalidRequest();
+    // The registry may have changed while this edit waited.
+    const unchanged = () => request()?.signature === initial.signature;
     let integration = null;
     if (getClientPackIntegration) {
       integration = getClientPackIntegration();
@@ -745,23 +823,39 @@ function createServerMutationPolicy({
       }
     }
     const work = async leases => {
-      const current = request();
-      if (!current || current.selectors.length !== initial.selectors.length ||
-          current.selectors.some((selector, index) => !sameCoordinatorSelector(selector, initial.selectors[index]))) {
-        throw operationInProgress();
-      }
-      const { client } = current;
-      const perform = () => handler(event, ...args);
+      if (!unchanged()) throw operationInProgress();
+      // The client-pack layer holds every registration the edit changes, the one the
+      // handler acts on first; the registry is checked again once all are held.
+      const perform = () => {
+        if (!unchanged()) throw operationInProgress();
+        return handler(event, ...args);
+      };
       const result = integration
-        ? await integration.runRegistryMutation({ clientId: client.id, clientPath: client.path }, perform)
+        ? await initial.edited.reduceRight((next, registration) => () => integration.runRegistryMutation(
+          { clientId: registration.id, clientPath: registration.path }, next), perform)()
         : await perform();
       if (descriptor.markOnSuccess && mutationSucceeded(result)) leases.forEach(lease => lease.markDirty());
       if (deleting && mutationSucceeded(result)) leases.forEach(retireRemovedRegistration);
       return result;
     };
-    const options = writerOptions(channel, descriptor, deleting);
-    if (initial.servers.length) return coordinator.runManyMutations(initial.selectors, options, work);
-    return coordinator.runMutation(initial.selectors[0], options, lease => work([lease]));
+    // Owner decision Q7: a delete with files reserves the servers in the folder it
+    // removes and needs them stopped. A delete that keeps the files holds the
+    // client's folder exclusively (it retires the registration) yet beside a server
+    // running there, as v26.6.1 allowed. A rename shares the folder.
+    const options = writerOptions(channel, descriptor, deleteFiles || initial.pinned.length > 0);
+    if (!deleting) return coordinator.runMutation(initial.selectors[0], options, lease => work([lease]));
+    let result;
+    try {
+      result = await coordinator.runManyMutations(initial.selectors, options, work);
+    } catch (error) {
+      if (!deleteFiles && initial.pinned.length > 0 && error?.code === 'SERVER_RUNNING') {
+        throw clientBesideRunningServer(error, initial.pinned);
+      }
+      throw error;
+    }
+    // The registrations of the id's other folders went with it.
+    if (mutationSucceeded(result)) retireDisappearedClients(initial.edited.slice(1));
+    return result;
   }
 
   // save-instances only edits the registry. A server re-listed with the same id

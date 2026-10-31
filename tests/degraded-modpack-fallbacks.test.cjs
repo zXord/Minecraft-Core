@@ -114,7 +114,7 @@ function fixture(t, { disposalPending = () => false, recoveryGate = null, requir
     isCompositionDisposalPending: disposalPending,
     reparseInspector: NOT_A_REPARSE_POINT
   });
-  return { clients, fallbacks, requirementReads, root, servers, userDataPath };
+  return { clients, fallbacks, instances, requirementReads, root, servers, userDataPath };
 }
 
 test('degraded server state reads are null exactly where the strict repository reads null', async t => {
@@ -204,6 +204,24 @@ test('a journaled client is refused while a failed composition is still disposin
   pending = false;
   assert.equal(await integration.runLegacyMutation(journaled, async () => 'after-disposal'), 'after-disposal');
   assert.equal((await fallbacks.readClientState({ clientId: clients.journaled.id })).status, 'unmanaged');
+});
+
+test('both copies of a copied client folder keep their registry edits while a failed composition is disposing', async t => {
+  const { clients, fallbacks, instances, root } = fixture(t, { disposalPending: () => true });
+  // The copy brought the legacy client's id along: one id, two registered folders.
+  const copy = { ...clients.legacy, path: path.join(root, 'clients', 'legacy copy') };
+  fs.mkdirSync(copy.path);
+  instances.push(copy);
+  const integration = fallbacks.clientPackIntegration;
+
+  for (const registration of [clients.legacy, copy]) {
+    assert.equal(await integration.runRegistryMutation({ clientId: registration.id, clientPath: registration.path },
+      async () => 'registry-done'), 'registry-done', registration.path);
+  }
+  // Every other channel still resolves the id alone and refuses it.
+  await assert.rejects(integration.runLegacyMutation({ clientId: copy.id, clientPath: copy.path }, async () => assert.fail('never runs')),
+    { code: 'INVALID_REQUEST' });
+  assert.deepEqual(fallbacks.listActiveMutations(), []);
 });
 
 test('client state follows the host requirement and keeps an unreachable host a connection problem', async t => {

@@ -56,17 +56,22 @@ function createClientPackIntegration({ resolveClient, resolveClientByPath, proce
     try { return !settled(await transaction.status(target)) || Boolean(await stateStore.read(target.clientPath)); }
     catch { return true; }
   }
-  async function registeredTarget(clientId, clientPath) {
-    const target = await resolveClient(clientId);
+  // Channels resolve a client by its id alone, which refuses an id registered for
+  // several folders (a copied client folder). Only registry edits resolve the
+  // registration at the folder they name: v26.6.1 renamed and deleted each copy.
+  const byId = clientId => resolveClient(clientId);
+  const byRegistration = (clientId, clientPath) => resolveClient(clientId, clientPath);
+  async function registeredTarget(clientId, clientPath, resolve = byId) {
+    const target = await resolve(clientId, clientPath);
     if (!target || target.clientId !== clientId || (clientPath !== undefined && pathKey(clientPath) !== pathKey(target.clientPath))) throw fail('INVALID_REQUEST');
     return target;
   }
   // Client channels share the folder with each other and with the app's own
   // unmanaged game, with no process scan (v26.6.1 had no guard). Pack transactions
   // and managed launches hold it exclusively, so neither side can overlap the other.
-  function lenient(target, work) {
+  function lenient(target, work, resolve = byId) {
     return processGuard.withMutation(target, async () => {
-      const current = await resolveClient(target.clientId);
+      const current = await resolve(target.clientId, target.clientPath);
       if (!current || pathKey(current.clientPath) !== pathKey(target.clientPath)) throw fail('PLAN_STALE');
       return work();
     }, LENIENT);
@@ -168,7 +173,7 @@ function createClientPackIntegration({ resolveClient, resolveClientByPath, proce
     // leaves the live folder missing, and recovery needs the registration to finish.
     // Only the journal's phase matters here; a settled pack never pins the folder.
     async runRegistryMutation({ clientId, clientPath }, work) {
-      const target = await registeredTarget(clientId, clientPath);
+      const target = await registeredTarget(clientId, clientPath, byRegistration);
       if (await folderMissing(target.clientPath)) {
         await transaction.assertNoUnsettledAtPath(target.clientPath);
         return work();
@@ -176,7 +181,7 @@ function createClientPackIntegration({ resolveClient, resolveClientByPath, proce
       return lenient(target, async () => {
         await transaction.assertNoUnsettledAtPath(target.clientPath);
         return work();
-      });
+      }, byRegistration);
     },
     async beginManagedLaunch({ clientPath }, options = {}) {
       const target = await resolveClientByPath(clientPath);

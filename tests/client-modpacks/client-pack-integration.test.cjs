@@ -483,6 +483,43 @@ test('client registry edits need no network and tolerate a missing folder', asyn
     { code: 'INVALID_REQUEST' });
 });
 
+test('a registry edit of a copied client acts on the registration it names; every other channel resolves the id alone', async t => {
+  const f = fixture(t);
+  const [original, copy] = ['Client', 'Client - Copy'].map(name => path.join(f.target.clientPath, name));
+  for (const folder of [original, copy]) fs.mkdirSync(folder);
+  const registrations = [original, copy].map(clientPath => Object.freeze({ clientId: 'client-copied', clientPath }));
+  const resolutions = []; const held = []; const checked = [];
+  // The connection core's rule: the id alone is ambiguous, a named folder selects its registration.
+  const resolveClient = async (clientId, clientPath) => {
+    resolutions.push(clientPath === undefined ? [clientId] : [clientId, clientPath]);
+    const matches = registrations.filter(item => item.clientId === clientId && (clientPath === undefined || item.clientPath === clientPath));
+    if (matches.length !== 1) throw new ModpackError('INVALID_REQUEST', 'Choose a registered client instance');
+    return matches[0];
+  };
+  const integration = createClientPackIntegration({ resolveClient, resolveClientByPath: async () => assert.fail('no launch'),
+    processGuard: { withMutation: async (target, work, options) => { held.push([target.clientPath, options?.proof]); return work(); } },
+    transaction: { status: async () => null, async assertNoUnsettledAtPath(value) { checked.push(value); } },
+    stateStore: { read: async () => null },
+    managementClient: { readRequirement: () => assert.fail('registry edits never read the host') }, clientPackService: {} });
+
+  for (const clientPath of [copy, original]) {
+    assert.equal(await integration.runRegistryMutation({ clientId: 'client-copied', clientPath }, () => 'edited'), 'edited');
+  }
+  assert.deepEqual(held, [[copy, 'none'], [original, 'none']]);
+  assert.deepEqual(checked, [copy, original]);
+  // Resolved by the named folder, and again inside the hold.
+  assert.deepEqual(resolutions, [copy, copy, original, original].map(clientPath => ['client-copied', clientPath]));
+  await assert.rejects(integration.runRegistryMutation({ clientId: 'client-copied' }, () => assert.fail('ambiguous')), { code: 'INVALID_REQUEST' });
+
+  // Content, sync and settings channels keep refusing an id registered for two folders.
+  resolutions.length = 0;
+  for (const method of ['runLegacyMutation', 'runLocalMutation', 'runPersonalMutation']) {
+    await assert.rejects(integration[method]({ clientId: 'client-copied', clientPath: copy }, () => assert.fail(method)), { code: 'INVALID_REQUEST' }, method);
+  }
+  assert.deepEqual(resolutions, [['client-copied'], ['client-copied'], ['client-copied']]);
+  assert.equal(held.length, 2);
+});
+
 const journalFiles = () => ({ async readFileBoundedAsync(file) {
   try { return await fs.promises.readFile(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 } });

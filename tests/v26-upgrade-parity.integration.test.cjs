@@ -929,6 +929,85 @@ test('client rename and delete work as in v26.6.1 without reading the host', asy
   assert.equal(hostReads.length, reads, 'registry edits never contact the host (it may be offline)');
 });
 
+// Every file below a folder, with a digest of its bytes.
+function folderFiles(folder) {
+  return Object.fromEntries(fs.readdirSync(folder, { recursive: true }).sort()
+    .filter(relative => fs.statSync(path.join(folder, relative)).isFile())
+    .map(relative => [relative, crypto.createHash('sha256').update(fs.readFileSync(path.join(folder, relative))).digest('hex')]));
+}
+
+test('a client in a running server\'s own folder is deleted keeping its files; deleting its files waits for the stop', async () => {
+  const serverPath = makeServer('Server With Client');
+  const server = registerServer('server-with-client', serverPath, 'Server With Client');
+  const friend = registerClient('friend-in-server', serverPath, 'Friend');
+  const strict = watchStrictMachinery();
+  const java = await startServer(server);
+  try {
+    const files = folderFiles(serverPath);
+    // Owner decision Q7: deleting the client's files would delete the running server's folder.
+    await assert.rejects(invoke('delete-instance', { id: friend.id, deleteFiles: true }), code('SERVER_RUNNING'));
+    assert.deepEqual(folderFiles(serverPath), files);
+    // Keeping the files only edits the registry, which v26.6.1 allowed while the server ran.
+    const kept = await invoke('delete-instance', { id: friend.id, deleteFiles: false });
+    assert.equal(kept.success, true, kept.error);
+    assert.deepEqual(folderFiles(serverPath), files, 'no file was deleted or changed');
+    assert.deepEqual(appStore.get('instances').filter(instance => instance.path === serverPath).map(instance => instance.id), [server.id]);
+    assert.equal(java.exitCode, null, 'the running server was never stopped');
+    assert.equal(serverManager.getServerState({ instanceId: server.id }).status, 'running');
+    assert.equal((await invoke('update-settings', { serverPath, instanceId: server.id, maxRam: 5 })).success, true);
+  } finally {
+    await stopServer(server);
+  }
+  assert.deepEqual(coordinator.pathBinding(serverPath), { instanceId: server.id });
+  await startServer(server);
+  await stopServer(server);
+  strict.assertUnused([serverPath]);
+});
+
+test('two copies of one client folder (one client ID) are renamed and deleted as in v26.6.1', async () => {
+  // A copied client folder brings its client-config.json, and so its client ID, along.
+  const copies = (name, id) => [name, `${name} - Copy`].map(folder => {
+    const clientPath = path.join(ROOT, 'copied-clients', folder);
+    writeJar(path.join(clientPath, 'mods', 'own.jar'), folder);
+    return registerClient(id, clientPath, name);
+  });
+  const clientName = clientPath => readJson(path.join(clientPath, 'client-config.json')).clientName;
+  const registrations = id => appStore.get('instances').filter(instance => instance.id === id)
+    .map(instance => [instance.path, instance.name]);
+  const [original, copy] = copies('Friend Client', 'copied-friend');
+  const [first, second] = copies('Keep Client', 'copied-keep');
+  const reads = hostReads.length;
+  const strict = watchStrictMachinery();
+
+  // v26.6.1 renames the first registration with that ID, in its own folder.
+  const renamed = await invoke('rename-instance', { id: copy.id, newName: 'Friend Original' });
+  assert.equal(renamed.success, true, renamed.error);
+  assert.deepEqual(registrations(copy.id), [[original.path, 'Friend Original'], [copy.path, 'Friend Client']]);
+  assert.deepEqual([clientName(original.path), clientName(copy.path)], ['Friend Original', 'Friend Client']);
+  // Dragged above the original in the sidebar, the copy is the one renamed.
+  const listed = appStore.get('instances');
+  const isCopy = instance => instance.id === copy.id && instance.path === copy.path;
+  assert.equal((await invoke('save-instances', [...listed.filter(isCopy), ...listed.filter(instance => !isCopy(instance))])).success, true);
+  const renamedCopy = await invoke('rename-instance', { id: copy.id, newName: 'Friend Copy' });
+  assert.equal(renamedCopy.success, true, renamedCopy.error);
+  assert.deepEqual(registrations(copy.id), [[copy.path, 'Friend Copy'], [original.path, 'Friend Original']]);
+  assert.deepEqual([clientName(original.path), clientName(copy.path)], ['Friend Original', 'Friend Copy']);
+
+  // A delete removes every registration with that ID; with files, only the first one's folder.
+  const deleted = await invoke('delete-instance', { id: copy.id, deleteFiles: true });
+  assert.equal(deleted.success, true, deleted.error);
+  assert.equal(fs.existsSync(copy.path), false);
+  assert.equal(fs.existsSync(path.join(original.path, 'mods', 'own.jar')), true);
+  assert.deepEqual(registrations(copy.id), []);
+  const kept = await invoke('delete-instance', { id: second.id, deleteFiles: false });
+  assert.equal(kept.success, true, kept.error);
+  assert.deepEqual([first.path, second.path].map(clientPath => fs.existsSync(path.join(clientPath, 'mods', 'own.jar'))), [true, true]);
+  assert.deepEqual(registrations(second.id), []);
+
+  assert.equal(hostReads.length, reads, 'registry edits never contact the host');
+  strict.assertUnused([original.path, copy.path, first.path, second.path]);
+});
+
 test('adding and reordering instances while a server runs persists and leaves its config untouched', async () => {
   const runningPath = makeServer('Running Server');
   const running = registerServer('running-server', runningPath, 'Running Server');
